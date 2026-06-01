@@ -1,0 +1,14 @@
+ahrs_driver_node:  # 节点名称（需与启动文件中节点名称一致）
+  ros__parameters:
+    if_debug_: False
+    serial_port_: '/dev/FDI_IMU_GNSS'
+    serial_baud_: 921600
+    imu_topic: '/imu'
+    imu_frame_id_: 'gyro_link'
+    mag_pose_2d_topic: '/mag_pose_2d'
+    Magnetic_topic: '/magnetic'
+    Euler_angles_topic: '/euler_angles'
+    gps_topic: '/gps/fix'
+    twist_topic: '/system_speed'
+    NED_odom_topic: '/NED_odometry'
+    device_type_: 1

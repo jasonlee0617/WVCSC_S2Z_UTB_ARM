@@ -1,0 +1,412 @@
+#除了不能倒车，其他正常
+
+#amcl:用于机器人定位的自适应蒙特卡罗定位算法节点
+amcl:
+  ros__parameters:
+    filter_queue_size: 400  # 增大订阅队列
+    queue_size: 400
+    time_stamp_tolerance: 1.0  # 时间戳容忍度
+    transform_tolerance: 2.0  # TF变换容忍度（与全局统一）
+    tf_buffer_size: 60.0  # 增大TF缓冲区
+    message_queue_size: 400
+    use_sim_time: False # 关闭模拟时间
+    # 噪声参数：阿克曼底盘运动更稳定，降低噪声值
+    alpha1: 0.1  # 原0.2，降低里程计旋转噪声
+    alpha2: 0.1  # 原0.2，降低里程计旋转-平移耦合噪声
+    alpha3: 0.1  # 原0.2，降低里程计平移噪声
+    alpha4: 0.1  # 原0.2，降低里程计平移-旋转耦合噪声
+    alpha5: 0.1  # 原0.2，降低平移噪声
+    base_frame_id: "base_footprint" # 机器人基坐标系
+    beam_skip_distance: 0.1 # 激光束跳过最小距离
+    beam_skip_error_threshold: 0.5 # 激光束跳过误差阈值
+    beam_skip_threshold: 0.2 # 激光束跳过阈值
+    do_beamskip: false # 关闭激光束跳过
+    global_frame_id: "map" # 全局坐标系
+    lambda_short: 0.1 # 短距离激光衰减率
+    laser_max_range: 25.0 # 激光最大范围
+    laser_min_range: -1.0 # 激光最小范围
+    laser_likelihood_max_dist: 10.0 # 激光似然场最大距离
+    laser_model_type: "likelihood_field" # 激光模型
+    max_beams: 100 # 每次更新最大激光束数
+    max_particles: 5000 # 最大粒子数
+    min_particles: 1000 # 最小粒子数
+    odom_frame_id: "odom" # 里程计坐标系
+    pf_err: 0.05 # 粒子滤波器误差阈值
+    pf_z: 0.99 # 粒子滤波器参数
+    recovery_alpha_fast: 0.0 # 快速恢复参数
+    recovery_alpha_slow: 0.0 # 慢速恢复参数
+    resample_interval: 2 # 重采样间隔
+    # 关键修改：阿克曼底盘无专属AMCL模型，替换为通用全向模型（兼容阿克曼运动）
+    robot_model_type: "nav2_amcl::OmniMotionModel" # 原DifferentialMotionModel（差速模型，删除）
+    save_pose_rate: 0.5 # 保存位姿频率
+    sigma_hit: 0.1 # 激光测量噪声标准差
+    tf_broadcast: true # 广播TF变换
+    update_min_a: 0.05 # 更新最小角度变化
+    update_min_d: 0.05 # 更新最小距离变化
+    z_hit: 0.7 # 激光击中概率
+    z_max: 0.05 # 激光最大值概率
+    z_rand: 0.3 # 激光随机值概率
+    z_short: 0.05 # 激光短距离概率
+    scan_topic: scan # 激光话题
+    always_update: true # 强制每帧更新
+
+amcl_map_client:
+  ros__parameters:
+    use_sim_time: False
+
+amcl_rclcpp_node:
+  ros__parameters:
+    use_sim_time: False
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: False
+    transform_tolerance: 2.0 # 关键修改：与全局TF容忍度统一（原0.5）
+    goal_reached_tol: 0.25 # 目标到达容忍度
+    global_frame: map # 全局坐标系
+    robot_base_frame: base_footprint # 机器人基坐标系
+    odom_topic: /ekf_odom # 里程计话题
+    bt_loop_duration: 20 # 行为树循环周期
+    default_server_timeout: 20 # 服务器超时时间
+    plugin_lib_names:
+    - nav2_compute_path_to_pose_action_bt_node
+    - nav2_compute_path_through_poses_action_bt_node
+    - nav2_follow_path_action_bt_node
+    - nav2_back_up_action_bt_node
+    - nav2_spin_action_bt_node
+    - nav2_wait_action_bt_node
+    - nav2_clear_costmap_service_bt_node
+    - nav2_is_stuck_condition_bt_node
+    - nav2_goal_reached_condition_bt_node
+    - nav2_goal_updated_condition_bt_node
+    - nav2_initial_pose_received_condition_bt_node
+    - nav2_reinitialize_global_localization_service_bt_node
+    - nav2_rate_controller_bt_node
+    - nav2_distance_controller_bt_node
+    - nav2_speed_controller_bt_node
+    - nav2_truncate_path_action_bt_node
+    - nav2_goal_updater_node_bt_node
+    - nav2_recovery_node_bt_node
+    - nav2_pipeline_sequence_bt_node
+    - nav2_round_robin_node_bt_node
+    - nav2_transform_available_condition_bt_node
+    - nav2_time_expired_condition_bt_node
+    - nav2_distance_traveled_condition_bt_node
+    - nav2_single_trigger_bt_node
+    - nav2_is_battery_low_condition_bt_node
+    - nav2_navigate_through_poses_action_bt_node
+    - nav2_navigate_to_pose_action_bt_node
+    - nav2_remove_passed_goals_action_bt_node
+    - nav2_planner_selector_bt_node
+    - nav2_controller_selector_bt_node
+    - nav2_goal_checker_selector_bt_node
+
+bt_navigator_rclcpp_node:
+  ros__parameters:
+    use_sim_time: False
+
+# 本地控制器服务器节点。
+controller_server:
+  ros__parameters:
+    use_sim_time: False
+    controller_frequency: 20.0 # 控制器更新频率
+    # 关键修改：删除全局min_turning_radius（阿克曼由wheel_base和max_steering_angle决定，冗余）
+    # min_turning_radius: 2.0
+    min_x_velocity_threshold: 0.01 # 最小x速度阈值
+    min_y_velocity_threshold: 0.01 # 最小y速度阈值（保留，阿克曼y方向速度为0，可设为0）
+    min_theta_velocity_threshold: 0.01 # 最小角度速度阈值
+    failure_tolerance: 0.3 # 失败容忍度
+    odom_topic: /ekf_odom # 里程计话题
+    cmd_vel_topic: "/cmd_vel" # 控制话题
+
+    progress_checker_plugin: "progress_checker" # 进度检查器
+    goal_checker_plugins: ["general_goal_checker"] # 目标检查器
+    controller_plugins: ["FollowPath"] # 控制器插件
+   
+    # 进度检查器配置（保留，可适当增大movement_time_allowance适配阿克曼慢响应）
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.05 # 最小移动半径
+      movement_time_allowance: 20.0 # 原10.0，增大至15秒（阿克曼响应慢，避免误判卡顿）
+    # 通用目标检查器配置
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.35 # xy目标容忍度
+      yaw_goal_tolerance: 0.35 # 航向目标容忍度（保留，阿克曼航向调整慢，可适当增大至0.5）
+    
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # 阿克曼核心参数（根据实际底盘校准，保留并优化）
+      wheel_base: 0.82  # 轴距（米）
+      track_width: 0.7  # 轮距（米，纯追踪算法非必需，可保留）
+      max_steering_angle: 0.86  # 最大前轮转角（弧度，≈49.3°，根据硬件限制）
+
+      desired_linear_vel: 0.35 # 期望最大线速度
+      max_linear_vel_backwards: 0.15 # 倒车最大线速度（0.15m/s）
+      lookahead_time: 2.0 # 前瞻时间（阿克曼需更大，保留，可增至2.5）
+      lookahead_time_backwards: 2.0  # 新增：倒车前瞻时间3.0s（关键
+      transform_tolerance: 2.0 # TF变换容忍度
+      use_velocity_scaled_lookahead_dist: true # 速度缩放前瞻距离
+      min_approach_linear_velocity: 0.05 # 接近目标最小速度
+      approach_velocity_scaling_dist: 1.0 # 速度缩放距离
+      use_collision_detection: true # 碰撞检测
+      max_allowed_time_to_collision_up_to_carrot: 2.0 # 碰撞检测时间
+      use_regulated_linear_velocity_scaling: true # 受控线速度缩放
+      use_cost_regulated_linear_velocity_scaling: true # 代价受控线速度缩放
+      # 关键修改：regulated_linear_scaling_min_radius与阿克曼实际最小转弯半径匹配
+      # 计算：minimum_turning_radius = wheel_base / tan(max_steering_angle) = 0.82 / tan(0.86) ≈ 0.71m
+      regulated_linear_scaling_min_radius: 0.71 # 原2.0，改为实际计算值
+      regulated_linear_scaling_min_speed: 0.10 # 最小缩放速度
+      use_rotate_to_heading: false # 关闭原地旋转航向（保留，阿克曼禁用）
+      max_robot_pose_search_dist: 10.0 # 最大位姿搜索距离
+      use_interpolation: false # 路径插值（保留，可开启true优化稀疏路径）
+      cost_scaling_dist: 0.6 # 代价缩放距离
+      cost_scaling_gain: 1.0 # 代价缩放增益
+      goal_dist_tol: 0.1 # 目标距离容忍度
+      # 关键修改：阿克曼倒车控制复杂，先关闭（调试稳定后再开启）
+      # allow_reversing: false # 原true，改为false
+      allow_reversing: true # 启用阿克曼倒车
+
+controller_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: False
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      transform_tolerance: 2.0 # TF变换容忍度
+      use_strict_timestamps: false # 关闭严格时间戳
+      update_frequency: 10.0 # 更新频率
+      publish_frequency: 10.0 # 发布频率
+      global_frame: odom # 全局坐标系
+      robot_base_frame: base_footprint # 机器人基坐标系
+      use_sim_time: False # 关闭模拟时间
+      rolling_window: true # 滚动窗口
+      width: 6 # 宽度（保留，阿克曼可增至8米，扩大感知范围）
+      height: 6 # 高度（保留，同上）
+      resolution: 0.05 # 分辨率
+      footprint: "[ [0.6, -0.3], [0.6, 0.3], [-0.6, 0.3], [-0.6, -0.3] ]" 
+      footprint_padding: 0.2 # 安全边距（保留，可增至0.3）
+      plugins: ["obstacle_layer", "inflation_layer"]
+      # 障碍物层配置（保留，优化参数）
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        combination_method: 1 # 最大值组合
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0 # 最大障碍物高度
+          clearing: True # 清除障碍
+          marking: True # 标记障碍
+          data_type: "LaserScan" # 数据类型
+          raytrace_max_range: 20.0 # 光线追踪最大范围
+          raytrace_min_range: 0.0 # 光线追踪最小范围
+          obstacle_max_range: 11.0 # 障碍标记最大范围
+          obstacle_min_range: 0.0 # 障碍标记最小范围
+          observation_persistence: 0.0 # 观测持久化
+          expected_update_rate: 1.0 # 期望更新频率
+          obstacle_range: 10.0 # 障碍范围
+          raytrace_range: 12.0 # 光线追踪范围
+          queue_size: 100 # 队列大小
+      # 膨胀层配置（关键修改：增大膨胀半径适配阿克曼最小转弯半径）
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 1.0 # 代价缩放因子
+        inflation_radius: 0.2 # 原0.2，改为阿克曼实际最小转弯半径（0.71m），避免碰撞
+     
+      # 静态层配置（保留，虽未在plugins中，但若需全局地图可开启）
+      static_layer:
+        map_subscribe_transient_local: True
+      always_send_full_costmap: True # 发送完整代价地图（保留，调试用，发布频率高时可改为false）
+
+  local_costmap_client:
+    ros__parameters:
+      use_sim_time: False
+  local_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: False
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0 # 更新频率
+      publish_frequency: 1.0 # 发布频率
+      global_frame: map # 全局坐标系
+      robot_base_frame: base_footprint # 机器人基坐标系
+      use_sim_time: False # 关闭模拟时间
+      # 与本地代价地图统一footprint
+      footprint: "[ [0.6, -0.3], [0.6, 0.3], [-0.6, 0.3], [-0.6, -0.3] ]"
+      footprint_padding: 0.2 # 安全边距
+      resolution: 0.05 # 分辨率
+      track_unknown_space: false # 不跟踪未知空间
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"] # 插件
+      # 障碍物层配置（与本地代价地图统一）
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        combination_method: 1
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 20.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 11.0
+          obstacle_min_range: 0.0
+          observation_persistence: 0.0
+          expected_update_rate: 1.0
+      # 静态层配置
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      # 膨胀层配置（与本地代价地图统一）
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 1.0
+        inflation_radius: 0.2 # 原0.2，改为0.71m
+      always_send_full_costmap: True # 发送完整代价地图
+
+  global_costmap_client:
+    ros__parameters:
+      use_sim_time: False
+  global_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: False
+
+map_server:
+  ros__parameters:
+    use_sim_time: False
+    yaml_filename: "turtlebot3_world.yaml" 
+
+map_saver:
+  ros__parameters:
+    use_sim_time: False
+    save_map_timeout: 5.0 # 保存地图超时时间
+    free_thresh_default: 0.25 # 空闲阈值
+    occupied_thresh_default: 0.65 # 占用阈值
+    map_subscribe_transient_local: True # 订阅瞬态地图
+
+# 全局规划器服务器节点。
+planner_server:
+  ros__parameters:
+    validate_path: true # 路径验证
+    planner_min_distance: 0.0 # 允许零间距
+    tf_cache_time: 10.0 # TF缓存时间
+    expected_planner_frequency: 10.0 # 规划器频率
+    use_sim_time: False # 关闭模拟时间
+    use_astar: false # 关闭A*（保留，可开启true提升规划速度）
+    planner_plugins: ["GridBased"] # 规划器插件
+    GridBased:
+      plugin: "nav2_smac_planner/SmacPlannerHybrid"
+      tolerance: 0.25 # 目标偏差容忍度
+      footprint_padding: 0.2 # 安全边距
+      downsample_costmap: false # 不下采样（保留，高精度场景）
+      downsampling_factor: 1 # 下采样因子
+      allow_unknown: true # 允许未知空间
+      max_iterations: 1000000 # 最大迭代次数
+      max_on_approach_iterations: 1000 # 接近目标迭代次数
+      max_planning_time: 2.0 # 最大规划时间
+      # 关键修改：阿克曼支持前进+后退，替换为REEDS_SHEPP模型（原DUBIN仅支持前进）
+      motion_model_for_search: "REEDS_SHEPP" # 原DUBIN
+      cost_travel_multiplier: 2.0 # 代价乘数
+      angle_quantization_bins: 90 # 角度量化数
+      analytic_expansion_ratio: 3.5 # 解析扩展比率
+      analytic_expansion_max_cost: 200.0 # 解析扩展最大代价
+      # 关键修改：与阿克曼实际最小转弯半径匹配（0.71m）
+      minimum_turning_radius: 0.71 # 原2.0
+      # 关键修改：提高反向运动惩罚（阿克曼倒车控制复杂，优先前进）
+      reverse_penalty: 5.0 # 原0.8，改为5.0
+      # 关键修改：提高方向变化惩罚（阿克曼转向响应慢，减少频繁变向）
+      change_penalty: 2.0 # 原0.8，改为2.0
+      non_straight_penalty: 2.0 # 原0.8，改为2.0（减少非直线路径）
+      cost_penalty: 1.0 # 代价惩罚
+      lookup_table_size: 20.0 # 查找表大小
+      cache_obstacle_heuristic: True # 缓存启发式
+      smooth_path: true # 路径平滑
+      smoother:
+        max_iterations: 1000 # 平滑迭代次数
+        w_smooth: 0.3 # 平滑权重
+        w_data: 0.2 # 数据权重
+        tolerance: 1.0e-10 # 平滑容忍度
+
+planner_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: False
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: False
+    smoother_plugins: ["simple_smoother"] # 平滑器插件
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 0.2 # TF容忍度（保留，可改为2.0与全局统一）
+      max_its: 1000 # 最大迭代次数
+      do_refinement: True # 细化路径
+
+# 是恢复行为服务器节点。
+behavior_server:  # Humble and newer
+# recoveries_server:  # Galactic and earlier
+  ros__parameters:
+  # 代价地图的话题名称。
+    costmap_topic: local_costmap/costmap_raw
+    # 机器人足迹的话题名称。
+    footprint_topic: local_costmap/published_footprint
+    # 恢复行为的循环频率，单位为 Hz。
+    cycle_frequency: 10.0
+    recovery_behavior_enabled: true  # 启用恢复行为
+
+    behavior_plugins: ["spin", "backup", "wait"]  # Humble and later
+    # behavior_plugins: ["backup", "wait", "clear_costmap"] 
+    # behavior_plugins: ["backup", "wait"] 
+    spin:
+      plugin: "nav2_behaviors/Spin"
+      max_rotational_vel: 1.2     # 提高最大旋转速度（原1.0）
+      rotational_acc_lim: 3.0     # 提高角加速度（原2.0）
+      spin_dist: 0.2             # 旋转角度（原1.57，即180° 3.14 360°）
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+     # 3. 新增clear_costmap恢复行为（清除代价地图障碍，更适合阿克曼）
+    # clear_costmap:
+    #   plugin: "nav2_behaviors/ClearCostmapService"
+    #   costmap_names: ["local_costmap", "global_costmap"]  # 清除本地和全局代价地图
+    #   clear_area: 5.0  # 清除半径（米）
+    
+    # 全局坐标系的名称
+    # global_frame: odom_combined
+    global_frame: odom
+    robot_base_frame: base_footprint
+    # 变换的超时时间，单位为秒。
+    # transform_timeout: 0.1
+    transform_timeout: 1.0
+    
+    use_sim_time: False
+    # 模拟提前的时间，单位为秒。
+    simulate_ahead_time: 2.0
+    # 最大旋转速度，单位为弧度 / 秒。
+    max_rotational_vel: 0.7
+    # 最小旋转速度，单位为弧度 / 秒。
+    min_rotational_vel: 0.3
+    # 旋转加速度限制，单位为弧度 / 秒 ²。
+    rotational_acc_lim: 3.0
+
+robot_state_publisher:
+  ros__parameters:
+    use_sim_time: False
+
+# 航点跟随器节点。
+waypoint_follower:
+  ros__parameters:
+    loop_rate: 20 # 循环频率
+    stop_on_failure: true # 失败时停止
+    waypoint_task_executor_plugin: "wait_at_waypoint" # 航点任务插件
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 200 # 航点暂停时间（单位：毫秒，保留，可增至500）

@@ -1,0 +1,55 @@
+ekf_filter_node:
+    ros__parameters:
+        # 核心频率配置：期望输出30Hz（适配高频输入）
+        frequency: 30.0
+        # 传感器超时时间：改为0.01秒（远小于输入数据周期，避免纯预测）
+        sensor_timeout: 0.01
+        # 二维模式：保留（地面机器人适用）
+        two_d_mode: true
+
+        # TF变换配置
+        transform_time_offset: 0.0
+        transform_timeout: 1.0
+        print_diagnostics: false  # 关闭诊断，减少计算负载
+        debug: false  # 关闭调试输出，提升性能
+        debug_out_file: /path/to/debug/file.txt
+
+        # TF帧配置
+        publish_tf: true  # 发布odom→base_footprint的TF
+        publish_acceleration: false  # 不发布加速度
+        map_frame: map              
+        odom_frame: odom            
+        base_link_frame: base_footprint  
+        
+        world_frame: odom            # 与odom_frame一致，不使用map帧的定位
+
+        # 里程计（/car_odom）配置
+        # 关键修复：根据数据类型选择模式（以下提供两种情况，按需注释）
+        ###########################################################
+        # 情况A：/car_odom是**绝对位姿数据（pose）**（如GPS/视觉里程计）
+        odom0: /car_odom
+        odom0_config: [false, false, false,
+                       false, false, false,
+                       true,  true,  false,  # 融合线速度vx、vy（差分后）
+                       false, false, true,   # 融合角速度wz（差分后）
+                       false, false, false]
+        odom0_queue_size: 50  # 增大队列，缓存高频位姿数据
+        odom0_nodelay: false  # 不启用无延迟（高频数据无需）
+        odom0_differential: true  # 位姿转速度（差分模式）
+        odom0_relative: true  # 修复：与差分模式匹配，以第一帧为零点
+
+        ###########################################################
+        # 情况B：/car_odom是**速度数据（twist）**（如轮式里程计）
+        # odom0: /car_odom
+        # odom0_config: [false, false, false,
+        #                false, false, false,
+        #                true,  true,  false,  # 直接融合vx、vy
+        #                false, false, true,   # 直接融合wz
+        #                false, false, false]
+        # odom0_queue_size: 50  # 增大队列，缓存高频速度数据
+        # odom0_nodelay: false
+        # odom0_differential: false  # 修复：速度数据无需差分
+        # odom0_relative: false     # 保留绝对速度参考
+        ###########################################################
+
+       

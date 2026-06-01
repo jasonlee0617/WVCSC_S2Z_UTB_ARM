@@ -1,0 +1,13 @@
+# ================================================================
+# sensor_kit.param.yaml - Autoware 传感器套件诊断参数
+# dummy_diag_publisher 需要此文件
+# ================================================================
+/**:
+  ros__parameters:
+    # 传感器诊断发布频率
+    update_rate: 10.0
+
+    # 各传感器状态 (OK/WARN/ERROR)
+    lidar_status: "OK"
+    imu_status: "OK"
+    gnss_status: "OK"

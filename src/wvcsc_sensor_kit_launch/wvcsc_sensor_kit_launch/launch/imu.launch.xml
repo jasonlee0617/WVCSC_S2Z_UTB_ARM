@@ -1,0 +1,10 @@
+<launch>
+  <arg name="launch_driver" default="true"/>
+  <arg name="use_sim_time" default="false"/>
+
+  <group if="$(var launch_driver)">
+    <include file="$(find-pkg-share fdilink_ahrs)/launch/ahrs_driver_autoware.launch.py">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    </include>
+  </group>
+</launch>

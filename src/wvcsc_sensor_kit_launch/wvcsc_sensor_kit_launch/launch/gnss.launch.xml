@@ -1,0 +1,7 @@
+<launch>
+  <arg name="launch_driver" default="true"/>
+  <arg name="use_sim_time" default="false"/>
+
+  <!-- FDILink AHRS publishes the current raw GNSS fix on /gps/fix.
+       Keep this entrypoint for future GNSS-specific conversion to Autoware poses. -->
+</launch>

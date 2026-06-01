@@ -1,0 +1,28 @@
+<launch>
+    <arg name="use_sim_time" default="false" />
+
+    <!-- 传感器驱动 (LiDAR + IMU + GNSS) -->
+    <include file="$(find-pkg-share wvcsc_sensor_kit_launch)/launch/sensing.launch.xml">
+        <arg name="use_sim_time" value="$(var use_sim_time)" />
+    </include>
+
+    <!-- CAN 通信桥梁 -->
+    <include file="$(find-pkg-share can_bridge)/launch/can_bridge.launch.py">
+        <arg name="use_sim_time" value="$(var use_sim_time)" />
+    </include>
+
+    <!-- 底盘驱动 -->
+    <node pkg="wtb_car_driver" exec="wtb_car" name="wtb_car" output="screen">
+        <param name="WHEELBASE" value="0.82" />
+        <param name="vel_scale" value="1.0" />
+        <param name="steer_offset" value="0.0" />
+        <param name="min_speed" value="0.0005" />
+        <param name="max_speed" value="1.0" />
+        <param name="use_sim_time" value="$(var use_sim_time)" />
+    </node>
+
+    <!-- Autoware ↔ 底盘适配器 -->
+    <include file="$(find-pkg-share wvcsc_vehicle_launch)/launch/vehicle_interface.launch.xml">
+        <arg name="use_sim_time" value="$(var use_sim_time)" />
+    </include>
+</launch>
