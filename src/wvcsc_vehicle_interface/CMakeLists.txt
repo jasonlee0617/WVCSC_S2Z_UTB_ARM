@@ -14,13 +14,12 @@ find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(autoware_control_msgs REQUIRED)
 find_package(autoware_vehicle_msgs REQUIRED)
-find_package(tier4_vehicle_msgs REQUIRED)
 find_package(wtb_car_driver REQUIRED)
 
 add_executable(vehicle_interface_node src/vehicle_interface.cpp)
 ament_target_dependencies(vehicle_interface_node
   rclcpp std_msgs geometry_msgs nav_msgs sensor_msgs
-  autoware_control_msgs autoware_vehicle_msgs tier4_vehicle_msgs wtb_car_driver
+  autoware_control_msgs autoware_vehicle_msgs wtb_car_driver
 )
 
 install(TARGETS vehicle_interface_node
