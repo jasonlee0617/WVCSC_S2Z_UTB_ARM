@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="use_sim_time" default="false"/>
+  <arg name="input_fix_topic" default="/gps/fix"/>
+  <arg name="output_fix_topic" default="/sensing/gnss/fix"/>
+  <arg name="output_nav_sat_fix_topic" default="/sensing/gnss/nav_sat_fix"/>
+  <arg name="enable_fix_relay" default="true"/>
+  <arg name="enable_nav_sat_fix_relay" default="true"/>
+
+  <!-- This bridge normalizes raw GNSS fixes into the sensing namespace.
+       It does not yet estimate /sensing/gnss/pose_with_covariance. -->
+  <node if="$(var enable_fix_relay)" pkg="topic_tools" exec="relay" name="wvcsc_gnss_fix_relay">
+    <param name="input_topic" value="$(var input_fix_topic)"/>
+    <param name="output_topic" value="$(var output_fix_topic)"/>
+  </node>
+
+  <node if="$(var enable_nav_sat_fix_relay)" pkg="topic_tools" exec="relay" name="wvcsc_gnss_nav_sat_fix_relay">
+    <param name="input_topic" value="$(var input_fix_topic)"/>
+    <param name="output_topic" value="$(var output_nav_sat_fix_topic)"/>
+  </node>
+</launch>

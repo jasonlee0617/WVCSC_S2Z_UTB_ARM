@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="use_sim_time" default="false"/>
+  <arg name="vehicle_model" default="wvcsc_vehicle"/>
+  <arg name="sensor_model" default="wvcsc_sensor_kit"/>
+  <arg name="launch_driver" default="true"/>
+  <arg name="vehicle_id" default="$(env VEHICLE_ID default)"/>
+  <arg name="wheelbase" default="0.82"/>
+  <arg name="vel_scale" default="1.0"/>
+  <arg name="steer_offset" default="0.0"/>
+  <arg name="min_speed" default="0.0005"/>
+  <arg name="max_speed" default="1.0"/>
+
+  <include file="$(find-pkg-share wvcsc_vehicle_launch)/launch/vehicle.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="vehicle_model" value="$(var vehicle_model)"/>
+    <arg name="sensor_model" value="$(var sensor_model)"/>
+  </include>
+
+  <include file="$(find-pkg-share wvcsc_sensor_kit_launch)/launch/sensing.launch.xml">
+    <arg name="launch_driver" value="$(var launch_driver)"/>
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+  </include>
+
+  <include file="$(find-pkg-share wvcsc_autoware_bringup)/launch/gnss_bridge.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+  </include>
+
+  <include file="$(find-pkg-share can_bridge)/launch/can_bridge.launch.py"/>
+
+  <node pkg="wtb_car_driver" exec="wtb_car" name="wtb_car" output="screen">
+    <param name="WHEELBASE" value="$(var wheelbase)"/>
+    <param name="vel_scale" value="$(var vel_scale)"/>
+    <param name="steer_offset" value="$(var steer_offset)"/>
+    <param name="min_speed" value="$(var min_speed)"/>
+    <param name="max_speed" value="$(var max_speed)"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+
+  <include file="$(find-pkg-share wvcsc_vehicle_launch)/launch/vehicle_interface.launch.xml">
+    <arg name="vehicle_id" value="$(var vehicle_id)"/>
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+  </include>
+</launch>

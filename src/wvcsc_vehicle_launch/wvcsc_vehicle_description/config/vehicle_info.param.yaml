@@ -4,32 +4,29 @@
 # ================================================================
 /**:
   ros__parameters:
-    # 车身尺寸
-    vehicle_width: 0.98          # 车宽 (m, wheel_tread + wheel_width = 0.86 + 0.12)
-    vehicle_length: 1.30          # 车长 (m)
-    vehicle_height: 1.00          # 车高 (m)
+    # The body box in wtb_car.xacro is 1.30 x 0.80 x 1.00, while the overall
+    # vehicle width reaches 0.98 m when the wheel width is included.
+    vehicle_width: 0.98
+    vehicle_length: 1.30
+    vehicle_height: 1.00
 
-    # 轴距参数
-    wheel_base: 0.82              # 前后轴距 (m)
-    wheel_tread: 0.86             # 左右轮距 (m) (wheel_y × 2 = 0.43×2)
-    wheel_radius: 0.20            # 车轮半径 (m)
-    wheel_width: 0.12             # 轮胎宽度 (m) ← Autoware 必需!
+    # Wheel center positions in wtb_car.xacro are x=+/-0.35 and y=+/-0.43.
+    wheel_base: 0.70
+    wheel_tread: 0.86
+    wheel_radius: 0.20
+    wheel_width: 0.12
 
-    # 转向参数
-    max_steer_angle: 0.6109       # 最大转向角 (rad, ≈35°)
-    max_steer_angle_rate: 2.0     # 最大转向角速度 (rad/s)
+    max_steer_angle: 0.6109
+    max_steer_angle_rate: 2.0
 
-    # 速度参数
-    max_velocity: 1.0             # 最大线速度 (m/s)
-    max_acceleration: 1.0         # 最大加速度 (m/s²)
-    min_acceleration: -1.0        # 最大减速度 (m/s²)
+    max_velocity: 1.0
+    max_acceleration: 1.0
+    min_acceleration: -1.0
 
-    # CG位置 (重心在base_link坐标系下的位置)
-    cog_to_rear_axle: 0.41        # 重心到后轴距离 (wheel_base/2)
-    cog_to_front_axle: 0.41       # 重心到前轴距离 (wheel_base/2)
+    cog_to_rear_axle: 0.35
+    cog_to_front_axle: 0.35
 
-    # 悬垂 (车轴/轮距中心线到车身边缘的距离)
-    front_overhang: 0.24          # 前轴到车头距离 ((1.30-0.82)/2)
-    rear_overhang: 0.24           # 后轴到车尾距离 ((1.30-0.82)/2)
-    left_overhang: 0.06           # 左轮中心线到车身左边缘距离 ((0.98-0.86)/2)
-    right_overhang: 0.06          # 右轮中心线到车身右边缘距离 ((0.98-0.86)/2)
+    front_overhang: 0.30
+    rear_overhang: 0.30
+    left_overhang: 0.06
+    right_overhang: 0.06
