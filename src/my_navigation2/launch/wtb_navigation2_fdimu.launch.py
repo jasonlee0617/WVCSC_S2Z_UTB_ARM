@@ -14,11 +14,12 @@ def generate_launch_description():
     my_navigation2_dir = get_package_share_directory('my_navigation2')
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
     
+    
     #=============================2.声明参数，获取配置文件路径===================================================
     # use_sim_time 这里要设置成true,因为gazebo是仿真环境，其时间是通过/clock话题获取，而不是系统时间
     # use_sim_time = LaunchConfiguration('use_sim_time', default='false') 
     use_sim_time = LaunchConfiguration('use_sim_time', default='False') 
-    map_yaml_path = LaunchConfiguration('map',default=os.path.join(my_navigation2_dir,'maps','map_wtb_demo.yaml'))
+    map_yaml_path = LaunchConfiguration('map',default=os.path.join(my_navigation2_dir,'maps','map_new.yaml'))
     nav2_param_path = LaunchConfiguration('params_file',default=os.path.join(my_navigation2_dir,'param','wtb_nav2_params.yaml'))
     # nav2_param_path = LaunchConfiguration('params_file',default=os.path.join(my_navigation2_dir,'param','wtb_nav2_params2.yaml'))
     rviz_config_dir = os.path.join(my_navigation2_dir,'rviz','nav2_default_view2.rviz')
@@ -35,11 +36,7 @@ def generate_launch_description():
                 'launch',
                 'start_wtb_car_fdimu.launch.py'
             ])
-        ]),
-        launch_arguments={
-            'open_rviz': 'false',
-            'enable_pointcloud_to_laserscan': 'false'
-        }.items()
+        ])
     )
 
 

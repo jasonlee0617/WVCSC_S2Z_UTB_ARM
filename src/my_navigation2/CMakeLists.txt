@@ -11,7 +11,7 @@ find_package(rclcpp REQUIRED)
 
 
 install(
-  DIRECTORY launch param maps rviz ros_maps
+  DIRECTORY launch param maps rviz
   DESTINATION share/${PROJECT_NAME}
 )
 

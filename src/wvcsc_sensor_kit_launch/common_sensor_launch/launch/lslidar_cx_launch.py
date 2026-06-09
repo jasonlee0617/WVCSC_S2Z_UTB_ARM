@@ -12,7 +12,7 @@ import subprocess
 
 
 def generate_launch_description():
-    driver_dir = os.path.join(get_package_share_directory('common_sensor_launch'), 'params', 'lslidar_cx.yaml')
+    driver_dir = os.path.join(get_package_share_directory('wvcsc_common_sensor_launch'), 'params', 'lslidar_cx.yaml')
 
     p = subprocess.Popen("echo $ROS_DISTRO", stdout=subprocess.PIPE, shell=True)
     driver_node = ""

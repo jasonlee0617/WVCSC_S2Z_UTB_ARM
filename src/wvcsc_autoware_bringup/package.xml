@@ -9,6 +9,9 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+
   <exec_depend>autoware_launch</exec_depend>
   <exec_depend>can_bridge</exec_depend>
   <exec_depend>fdilink_ahrs</exec_depend>

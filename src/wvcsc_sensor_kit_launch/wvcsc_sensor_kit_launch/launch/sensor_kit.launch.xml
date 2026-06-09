@@ -1,7 +1,7 @@
 <launch>
     <arg name="use_sim_time" default="false" />
 
-    <!-- 传感器驱动 (LiDAR + IMU + GNSS) -->
+    <!-- 传感器驱动 (LiDAR + IMU) -->
     <include file="$(find-pkg-share wvcsc_sensor_kit_launch)/launch/sensing.launch.xml">
         <arg name="use_sim_time" value="$(var use_sim_time)" />
     </include>

@@ -10,4 +10,3 @@
     # 各传感器状态 (OK/WARN/ERROR)
     lidar_status: "OK"
     imu_status: "OK"
-    gnss_status: "OK"

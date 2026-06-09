@@ -1,583 +1,467 @@
-# WVCSC Autoware 实车 Bringup 手册
+# WVCSC Autoware 实车部署手册
 
-本文档是 `WVCSC_S2Z_UTB_ARM` 的唯一实车部署主手册，目标是把两条链路彻底分开并讲清楚：
+本文档是 `WVCSC_S2Z_UTB_ARM` 实车部署唯一维护的主手册。覆盖建图、编译、启动、定位、规划控制和故障排查。
 
-- 建图链：`LIO-SAM-ROS2`，只负责三维地图重建和导出 `pointcloud_map.pcd`
-- 运行链：`wvcsc_autoware_bringup/full_real_vehicle.launch.xml`，负责地图加载、定位、感知、规划、控制、底盘执行
+**基线环境：** Ubuntu 22.04 / ROS 2 Humble / Autoware `/home/eisa/autoware` / WVCSC `/home/eisa/WVCSC_S2Z_UTB_ARM`
 
-这也是当前最稳妥的工程路线：`LIO-SAM` 不直接接管 `full_real_vehicle.launch.xml` 的在线定位，而是先把正式地图产出来，再交给 Autoware 的定位链使用。
+---
 
-## 0. 环境准备
+## 1. 两条核心链路
 
-推荐每次都按下面顺序准备环境：
+WVCSC 分成两条独立链路，**不要混成一个总入口**：
 
-```bash
-cd /home/robot/WVCSC_S2Z_UTB_ARM
-source /opt/ros/humble/setup.bash
-source /home/robot/autoware/install/setup.bash
-source /home/robot/WVCSC_S2Z_UTB_ARM/install/setup.bash
+```
+建图链                         运行链
+LIO-SAM                       wvcsc_autoware_bringup
+LiDAR + IMU → pointcloud_map   map → localization → planning → control → chassis
 ```
 
-如果刚改过代码，先编译：
+---
 
-```bash
-cd /home/robot/WVCSC_S2Z_UTB_ARM
-source /opt/ros/humble/setup.bash
-source /home/robot/autoware/install/setup.bash
-colcon build --symlink-install
-source /home/robot/WVCSC_S2Z_UTB_ARM/install/setup.bash
+## 2. 包结构总览
+
+```
+WVCSC_S2Z_UTB_ARM/src/
+├── can_bridge/                     CAN ↔ ROS2 桥接
+├── wtb_car_driver/                 底盘驱动 (Ackermann + CAN协议)
+├── wvcsc_vehicle_interface/        Autoware控制 ↔ 底盘适配器
+├── wvcsc_vehicle_launch/           车辆URDF + vehicle.launch
+│   ├── wvcsc_vehicle_description/  车辆参数 + vehicle_info.param.yaml
+│   └── wvcsc_vehicle_launch/       robot_state_publisher + vehicle_interface
+├── wvcsc_sensor_kit_launch/        传感器驱动套件
+│   ├── wvcsc_sensor_kit_description/  传感器URDF + 标定
+│   ├── wvcsc_sensor_kit_launch/        sensing.launch.xml
+│   └── common_sensor_launch/          共享 LiDAR/IMU 驱动入口
+├── wvcsc_autoware_bringup/         顶层整合 + 定位 + Autoware适配
+├── lio_sam/                        LIO-SAM 3D建图
+├── lidar_ros2/lslidar_ros/        雷神LiDAR驱动
+├── fdilink_ahrs_ROS2/              FDILink IMU驱动
+├── serial/                         ROS2串口库
+├── my_cartographer/                Cartographer 2D建图 (参考链)
+└── my_navigation2/                 Nav2 2D导航 (参考链)
 ```
 
-建议先确认核心包都能被找到：
+### 包职责速查
 
-```bash
-ros2 pkg prefix wvcsc_autoware_bringup
-ros2 pkg prefix wvcsc_vehicle_launch
-ros2 pkg prefix wvcsc_sensor_kit_launch
-ros2 pkg prefix wvcsc_vehicle_interface
-ros2 pkg prefix lio_sam
+| 包 | 角色 | 是否正式运行链 |
+|----|------|:---:|
+| `can_bridge` | USB-CAN ↔ `can_msgs/Frame` | ✅ |
+| `wtb_car_driver` | 底盘解码 + 里程计 + CAN命令发送 | ✅ |
+| `wvcsc_vehicle_interface` | Autoware `control_cmd` → `twist_cmd` 适配 | ✅ |
+| `wvcsc_vehicle_launch` | 车体URDF TF发布 | ✅ |
+| `wvcsc_sensor_kit_launch` | LiDAR/IMU驱动入口 | ✅ |
+| `wvcsc_autoware_bringup` | 硬件+定位+Autoware全栈bringup | ✅ |
+| `lio_sam` | 3D点云地图生产 | ✅ 建图 |
+| `my_cartographer` | 2D SLAM | 参考 |
+| `my_navigation2` | 2D Nav2导航 | 参考 |
+
+---
+
+## 3. TF 树与传感器外参
+
+### 3.1 TF 链（以 `wtb_car.xacro` 为基准）
+
+```
+map ──(static)──▶ odom ──(EKF)──▶ base_footprint ──(URDF)──▶ base_link
+                                                               │
+                                                    ┌──────────┤
+                                                    ▼          ▼
+                                          sensor_kit_base_link (零偏移层)
+                                                    │
+                                         ┌──────────┤
+                                         ▼          ▼
+                                       laser      gyro_link
+                                    (0.36,0,0.50) (0,0,-0.40)
 ```
 
-### 0.1 LIO-SAM 额外依赖
+### 3.2 传感器外参
 
-`LIO-SAM-ROS2` 在 Humble 下最容易卡住的是 `GTSAM`。当前工作区如果出现下面这类错误：
+| 传感器 | 父frame | x(m) | y(m) | z(m) | roll | pitch | yaw |
+|--------|---------|------|------|------|------|-------|-----|
+| **laser** | sensor_kit_base_link | 0.36 | 0.0 | 0.50 | 0.0 | 0.0 | 0.0 |
+| **gyro_link** | sensor_kit_base_link | 0.0 | 0.0 | -0.40 | 0.0 | 0.0 | 0.0 |
 
-```text
-Could not find a package configuration file provided by "GTSAM"
+### 3.3 Frame 命名规则
+
+| 正式frame | 禁止使用的旧名 |
+|-----------|---------------|
+| `laser` | `laser_link` |
+| `gyro_link` | `imu_link` |
+| — | `gnss_link` (已移除) |
+| — | `navsat_link` (已移除) |
+
+---
+
+## 4. 数据流
+
+```
+┌─ 传感器 ───────────────────────────────────────────────────┐
+│ LiDAR (UDP:192.168.1.200:2368) → lslidar_driver            │
+│   → /sensing/lidar/pointcloud_raw (PointXYZIRT, laser)     │
+│ IMU (/dev/FDI_IMU_GNSS) → fdilink_ahrs                     │
+│   → /sensing/imu/tamagawa/imu_raw (gyro_link)              │
+└────────────────────────────────────────────────────────────┘
+
+┌─ 车辆 ─────────────────────────────────────────────────────┐
+│ CAN → can_bridge → can_msgs/Frame                          │
+│ can_msgs/Frame → wtb_car → /car_odom, /wtb_car_message    │
+│                                                             │
+│ 控制流:                                                     │
+│ /control/command/control_cmd → wvcsc_vehicle_interface      │
+│   → /twist_cmd → wtb_car → CAN → 底盘执行                  │
+│                                                             │
+│ 反馈流:                                                     │
+│ /car_odom → wvcsc_vehicle_interface                         │
+│   → /vehicle/status/velocity_status → Autoware             │
+└────────────────────────────────────────────────────────────┘
+
+┌─ Autoware ─────────────────────────────────────────────────┐
+│ localization: NDT scan matcher + EKF pose fusion           │
+│ planning: behavior_planner + motion_planner                │
+│ control: pure_pursuit → /control/command/control_cmd       │
+└────────────────────────────────────────────────────────────┘
 ```
 
-先安装：
+---
+
+## 5. 编译
+
+### 5.1 环境准备
 
 ```bash
+# 工控机上已安装 acados 到 ~/.local/acados
+export CMAKE_PREFIX_PATH="/home/eisa/.local/acados:${CMAKE_PREFIX_PATH}"
+export ACADOS_SOURCE_DIR="/home/eisa/.local/acados"
+export LD_LIBRARY_PATH="/home/eisa/.local/acados/lib:${LD_LIBRARY_PATH}"
+
+# LIO-SAM 依赖
 sudo apt-get install -y ros-humble-gtsam
 ```
 
-然后重新执行：
+### 5.2 Autoware 编译
+
+**工控机上必须限制并行度，否则桌面假死。** 建议在纯终端 / tmux / SSH 环境执行。
 
 ```bash
-cd /home/robot/WVCSC_S2Z_UTB_ARM
+cd /home/eisa/autoware
 source /opt/ros/humble/setup.bash
-source /home/robot/autoware/install/setup.bash
-rosdep install --from-paths src --ignore-src -r -y
+
+export CMAKE_PREFIX_PATH="/home/eisa/.local/acados:${CMAKE_PREFIX_PATH}"
+export ACADOS_SOURCE_DIR="/home/eisa/.local/acados"
+export LD_LIBRARY_PATH="/home/eisa/.local/acados/lib:${LD_LIBRARY_PATH}"
+export MAKEFLAGS=-j2
+
+colcon build --symlink-install --executor sequential \
+  --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+### 5.3 WVCSC 工作区编译
+
+```bash
+cd /home/eisa/WVCSC_S2Z_UTB_ARM
+source /opt/ros/humble/setup.bash
+source /home/eisa/autoware/install/setup.bash
+
 colcon build --symlink-install
+source install/setup.bash
 ```
 
-## 1. 先建立正确心智模型：两条工作链
+---
 
-### 1.1 建图链
+## 6. LIO-SAM 建图
 
-建图链使用：
-
-```text
-LIO-SAM-ROS2
-├── launch/run_wvcsc_mapping.launch.py
-└── launch/run_wvcsc_offline_mapping.launch.py
-```
-
-职责只有一个：
-
-```text
-LiDAR + IMU + 底盘辅助状态 -> 三维重建 -> pointcloud_map.pcd
-```
-
-它不是当前实车自动驾驶运行时入口。
-
-### 1.2 运行链
-
-运行链使用：
-
-```text
-wvcsc_autoware_bringup/full_real_vehicle.launch.xml
-```
-
-职责是：
-
-```text
-pointcloud_map.pcd + lanelet2_map.osm + map_projector_info.yaml
-  -> localization
-  -> perception
-  -> planning
-  -> control
-  -> wvcsc_vehicle_interface
-  -> wtb_car_driver
-```
-
-当前运行链保留 Autoware 规划层和控制层，不需要再额外补一个总入口。
-
-## 2. `turn_on_wheeltec_robot.launch.py` 的具体作用
-
-`turn_on_wheeltec_robot.launch.py` 本质上是旧 `wheeltec` 风格的基础硬件总入口。它做了 6 件事：
-
-1. 通过 `base_serial.launch.py` 拉起底盘串口驱动。
-2. 通过 `robot_mode_description.launch.py` 选择车体模型和描述文件。
-3. 通过 `wheeltec_ekf.launch.py` 拉起 EKF。
-4. 发布两个静态 TF：`base_footprint -> base_link`、`base_footprint -> gyro_link`。
-5. 运行 `imu_filter_madgwick_node` 做 IMU 姿态后处理。
-6. 运行 `joint_state_publisher`。
-
-在 WVCSC 体系里，这些职责已经被本地化组件替代：
-
-- `wtb_car_driver`
-- `wvcsc_vehicle_launch/vehicle.launch.xml`
-- `wvcsc_sensor_kit_launch/sensing.launch.xml`
-- `wvcsc_autoware_bringup/hardware.launch.xml`
-- `wvcsc_autoware_bringup/localization.launch.xml`
-
-所以它现在更适合被当作：
-
-```text
-wheeltec 历史模板
-```
-
-而不是 WVCSC 长期依赖的正式入口。
-
-## 3. 如何理解 LIO-SAM 从 wheeltec 风格迁移到 WVCSC 风格
-
-当前已新增两项 WVCSC 化改造：
-
-- `config/wvcsc_mapping_params.yaml`
-- `launch/run_wvcsc_mapping.launch.py`
-- `launch/run_wvcsc_offline_mapping.launch.py`
-
-它们的目标是让 LIO-SAM 直接对接 WVCSC 当前硬件接口：
-
-- 点云：`/sensing/lidar/pointcloud_raw`
-- IMU：`/sensing/imu/tamagawa/imu_raw`
-- GNSS：`/sensing/gnss/nav_sat_fix`
-- LiDAR frame：`laser`
-- 车体 frame：`base_footprint`
-
-### 3.1 当前仍然保留但不建议再作为主入口的旧文件
-
-下面这些旧 wheeltec 入口先保留作参考，但不建议继续作为主入口：
-
-- `launch/run.launch.py`
-- `launch/run_offline.launch.py`
-- `launch/run_gnss.launch.py`
-- `launch/run_offline_gnss.launch.py`
-- `launch/run_usegnss.launch.py`
-- `launch/include/turn_on_wheeltec_robot_lio.launch.py`
-- `launch/include/wheeltec_sensors_liosam.launch.py`
-- `config/wheeltec_params.yaml`
-
-建议后续的使用习惯改成：
-
-- 直播建图：`run_wvcsc_mapping.launch.py`
-- 离线建图：`run_wvcsc_offline_mapping.launch.py`
-
-## 4. LIO-SAM 建图前必须先核对的输入条件
-
-### 4.1 点云字段
-
-LIO-SAM 强依赖点云中包含：
-
-- `ring`
-- `time`
-
-当前 WVCSC 雷神雷达驱动已经有较大概率满足这一点，因为 `lslidar_driver` 里定义了 `PointXYZIRT`，并且当前 Autoware sensing 话题已经统一为：
-
-```text
-/sensing/lidar/pointcloud_raw
-```
-
-建议你实车前一定检查一次字段：
+### 6.1 直播建图
 
 ```bash
-ros2 topic echo /sensing/lidar/pointcloud_raw --once
+source /opt/ros/humble/setup.bash
+source /home/eisa/autoware/install/setup.bash
+source /home/eisa/WVCSC_S2Z_UTB_ARM/install/setup.bash
+
+ros2 launch lio_sam run_wvcsc_mapping.launch.py \
+  launch_hardware:=true \
+  launch_rviz:=false
 ```
 
-如果后续发现 LIO-SAM 报错与字段不匹配，应优先检查：
+TF 归属：
+- `map → odom`：静态TF（建图launch发布）
+- `odom → base_footprint`：EKF动态TF
+- `base_footprint → base_link → laser/gyro_link`：robot_state_publisher静态TF
 
-- 是否真的带 `ring`
-- `time` 是否是每一圈扫描内部的相对时间，而不是空值或绝对时间戳
+**建图技巧：**
+- 启动后静止3-5秒让IMU初始化
+- 缓慢直线行驶5-10米
+- 绕场地走闭合路线（3-5分钟）
+- 确保回到起点附近产生回环
 
-### 4.2 IMU 频率与时间同步
-
-LIO-SAM 对 IMU 要求比普通导航链更严格。建议至少确认：
+### 6.2 建图前检查
 
 ```bash
-ros2 topic hz /sensing/imu/tamagawa/imu_raw
+ros2 topic hz /sensing/lidar/pointcloud_raw    # ~10Hz
+ros2 topic hz /sensing/imu/tamagawa/imu_raw     # ~100Hz
+ros2 run tf2_ros tf2_echo base_link laser
+ros2 run tf2_ros tf2_echo base_link gyro_link
 ```
 
-同时关注：
+重点确认：点云有 `ring` 和 `time` 字段，`frame_id` 为 `laser`。
 
-- LiDAR 与 IMU 是否时间同步
-- `gyro_link` 与 `laser` 外参是否匹配真实安装关系
-- `wvcsc_mapping_params.yaml` 中的外参是否和你现在的实车标定一致
-
-当前 `wvcsc_mapping_params.yaml` 是按照现有实车模型先给出的初始值：
-
-```text
-base_link -> laser = (0.36, 0.0, 0.50)
-base_link -> gyro_link = (0.0, 0.0, -0.40)
-```
-
-所以 `extrinsicTrans` 目前写成的是 IMU 到 LiDAR 的相对平移近似值。真正上车建图前，建议你再结合实物安装关系做一次复核。
-
-## 5. LIO-SAM 建图流程
-
-### 5.1 直播建图
-
-推荐命令：
+### 6.3 保存地图
 
 ```bash
-ros2 launch lio_sam run_wvcsc_mapping.launch.py   launch_hardware:=true   launch_rviz:=false
+ros2 service call /lio_sam/save_map lio_sam/srv/SaveMap \
+  "{resolution: 0.2, destination: '/home/eisa/autoware_data/maps/wvcsc_lio_sam'}"
 ```
 
-它会做两件事：
+---
 
-1. 条件启动 `wvcsc_autoware_bringup/hardware.launch.xml`
-2. 启动 LIO-SAM 四个核心节点：
-   - `lio_sam_imuPreintegration`
-   - `lio_sam_imageProjection`
-   - `lio_sam_featureExtraction`
-   - `lio_sam_mapOptimization`
+## 7. 硬件链启动
 
-建议建图时：
+### 7.1 Launch 层次
 
-- 低速平稳行驶
-- 先小范围闭环一圈
-- 再逐步扩大区域
-- 避免急转、急停、剧烈颠簸
+```
+hardware.launch.xml
+├── vehicle_hardware.launch.xml      ← CAN + 底盘 + EKF + 车辆接口
+│   ├── vehicle.launch.xml           ← URDF → robot_state_publisher
+│   ├── can_bridge.launch.py
+│   ├── wtb_car node
+│   ├── EKF node (可选)
+│   └── vehicle_interface.launch.xml
+└── sensor_hardware.launch.xml       ← LiDAR + IMU
+    └── sensing.launch.xml
+        ├── lidar.launch.xml         ← lslidar_cx
+        ├── imu.launch.xml           ← fdilink_ahrs
+        └── vehicle_velocity_converter
+```
 
-### 5.2 离线建图
-
-如果你已经录好了 bag，推荐命令：
+### 7.2 单独启动硬件
 
 ```bash
-ros2 launch lio_sam run_wvcsc_offline_mapping.launch.py   launch_rviz:=false
-```
+source /opt/ros/humble/setup.bash
+source /home/eisa/autoware/install/setup.bash
+source /home/eisa/WVCSC_S2Z_UTB_ARM/install/setup.bash
 
-然后在另一个终端播放 bag：
-
-```bash
-ros2 bag play <your_bag_path>
-```
-
-这条链适合做：
-
-- 参数细调
-- 地图质量复盘
-- 不上车的离线重建
-
-### 5.3 保存地图
-
-LIO-SAM 运行稳定后，可以调用保存服务：
-
-```bash
-ros2 service call /lio_sam/save_map lio_sam/srv/SaveMap
-```
-
-推荐显式指定目录和分辨率：
-
-```bash
-ros2 service call /lio_sam/save_map lio_sam/srv/SaveMap "{resolution: 0.2, destination: '/home/robot/autoware_data/maps/wvcsc_lio_sam'}"
-```
-
-保存后建议立即检查：
-
-```bash
-pcl_viewer /home/robot/autoware_data/maps/wvcsc_lio_sam/GlobalMap.pcd
-```
-
-如果地图存在以下问题，需要优先回查时间同步和外参：
-
-- 明显撕裂
-- 墙体重复重影
-- 上下跳动
-- 转弯处扭曲
-
-## 6. 正式地图资产如何落地给 Autoware
-
-Autoware 正式地图目录建议统一为：
-
-```text
-/home/robot/autoware_data/maps/wvcsc_map/
-├── pointcloud_map.pcd
-├── lanelet2_map.osm
-├── map_projector_info.yaml
-└── map_config.yaml
-```
-
-角色分工要彻底分清：
-
-- `my_navigation2/maps/*.pgm`：历史 2D 栅格地图，仅供 Nav2 或参考
-- `my_cartographer`：2D/3D 前期勘察或建图实验工具
-- `LIO-SAM-ROS2`：正式 `pointcloud_map.pcd` 生产工具链
-- `Autoware map bundle`：正式实车运行地图资产
-
-如果还没有正式点云地图，临时过渡可以用：
-
-```bash
-ros2 run wvcsc_autoware_bringup pgm_to_fake_pcd.py   --yaml /home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml   --output /home/robot/autoware_data/maps/wvcsc_fake_map/pointcloud_map.pcd
-```
-
-但要明确：
-
-```text
-fake pcd 只用于联调，不用于正式 NDT 定位交付
-```
-
-更完整的地图准备步骤见 [autoware_map_workflow.md](/home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_autoware_bringup/docs/autoware_map_workflow.md)。
-
-## 7. `full_real_vehicle.launch.xml` 的逐层部署顺序
-
-### 7.1 第一步：只拉硬件链
-
-```bash
 ros2 launch wvcsc_autoware_bringup hardware.launch.xml
 ```
 
-这一层应该拉起：
-
-- `wvcsc_vehicle_launch/vehicle.launch.xml`
-- `wvcsc_sensor_kit_launch/sensing.launch.xml`
-- `can_bridge`
-- `wtb_car_driver`
-- `wvcsc_vehicle_interface`
-- `gnss_bridge.launch.xml`
-
-重点检查 TF：
-
-```text
-base_footprint
-base_link
-sensor_kit_base_link
-laser
-gyro_link
-gnss_link
-```
-
-重点检查 topic：
-
-```text
-/sensing/lidar/pointcloud_raw
-/sensing/imu/tamagawa/imu_raw
-/sensing/gnss/nav_sat_fix
-/vehicle/status/velocity_status
-/vehicle/status/steering_status
-/car_odom
-/twist_cmd
-```
-
-### 7.2 第二步：拉 localization
-
-过渡 EKF：
+### 7.3 硬件链验证
 
 ```bash
-ros2 launch wvcsc_autoware_bringup localization.launch.xml backend:=ekf
+# TF
+ros2 run tf2_ros tf2_echo base_link laser
+ros2 run tf2_ros tf2_echo base_link gyro_link
+
+# LiDAR
+ros2 topic hz /sensing/lidar/pointcloud_raw
+ros2 topic echo /sensing/lidar/pointcloud_raw --once
+
+# IMU
+ros2 topic hz /sensing/imu/tamagawa/imu_raw
+ros2 topic echo /sensing/imu/tamagawa/imu_raw --once
+
+# 底盘
+ros2 topic echo /car_odom --once
+ros2 topic echo /vehicle/status/velocity_status --once
 ```
 
-正式方向：
+---
+
+## 8. 运行时启动
+
+### 8.1 Hybrid模式（推荐首次联调）
+
+**无感知，专注验证定位+规划+控制。**
 
 ```bash
-ros2 launch wvcsc_autoware_bringup localization.launch.xml backend:=autoware_ndt
+# 清理旧进程
+pkill -f "ros2 launch wvcsc_autoware_bringup"
+pkill -f component_container
+pkill -f rviz2
+ros2 daemon stop; ros2 daemon start
+
+# 启动
+source /opt/ros/humble/setup.bash
+source /home/eisa/autoware/install/setup.bash
+source /home/eisa/WVCSC_S2Z_UTB_ARM/install/setup.bash
+
+ros2 launch wvcsc_autoware_bringup hybrid_real_vehicle.launch.xml \
+  map_path:=/home/eisa/autoware_data/maps/wvcsc_map \
+  rviz:=true
 ```
 
-当前建议先用 RViz 手动初始化位姿，因为：
+启动模块：硬件 ✅ | 定位 ✅ | 规划 ✅ | 控制 ✅ | 感知 ❌
 
-- GNSS fix 已经 bridge 到 `/sensing/gnss/nav_sat_fix`
-- 但 `/sensing/gnss/pose_with_covariance` 还未补齐
+### 8.2 Full模式
 
-此阶段重点检查：
-
-```text
-/sensing/imu/imu_data
-/localization/pose_estimator/pose_with_covariance
-/localization/twist_estimator/twist_with_covariance
-/localization/kinematic_state
-```
-
-### 7.3 第三步：只拉 Autoware 主栈
+**完整自动驾驶。需预先下载ML模型。**
 
 ```bash
-ros2 launch wvcsc_autoware_bringup autoware_stack.launch.xml   map_path:=/home/robot/autoware_data/maps/wvcsc_map   launch_perception:=false
+ros2 launch wvcsc_autoware_bringup full_real_vehicle.launch.xml \
+  map_path:=/home/eisa/autoware_data/maps/wvcsc_map \
+  rviz:=true
 ```
 
-这一层会打开：
+启动模块：硬件 ✅ | 定位 ✅ | 规划 ✅ | 控制 ✅ | 感知 ✅
 
-- `map`
-- `system`
-- `planning`
-- `control`
-- `api`
-- `rviz`
-
-重点检查：
-
-```text
-/planning/mission_planning/route
-/planning/trajectory
-/control/command/control_cmd
-/control/command/gear_cmd
-/api/routing/state
-/api/operation_mode/state
-```
-
-### 7.4 第四步：半实车模式
+### 8.3 等效 planning_simulator → 实车
 
 ```bash
-ros2 launch wvcsc_autoware_bringup hybrid_real_vehicle.launch.xml   map_path:=/home/robot/autoware_data/maps/wvcsc_map   localization_backend:=autoware_ndt
+# 仿真
+ros2 launch autoware_launch planning_simulator.launch.xml \
+  map_path:=/path/to/map vehicle_model:=wvcsc_vehicle sensor_model:=wvcsc_sensor_kit
+
+# 等效实车
+ros2 launch wvcsc_autoware_bringup full_real_vehicle.launch.xml \
+  map_path:=/path/to/map
 ```
 
-这个模式适合先验证：
+`vehicle_model`/`sensor_model` 在WVCSC bringup中已默认为对应值。
 
-```text
-route -> planning -> control_cmd -> wvcsc_vehicle_interface -> /twist_cmd -> wtb_car_driver
-```
+---
 
-建议：
+## 9. 运行时验证
 
-- 低速 `0.1 ~ 0.2 m/s`
-- 先短距离路线
-- 保留人工接管
-
-### 7.5 第五步：全实车模式
+### 9.1 定位链
 
 ```bash
-ros2 launch wvcsc_autoware_bringup full_real_vehicle.launch.xml   map_path:=/home/robot/autoware_data/maps/wvcsc_map   localization_backend:=autoware_ndt
+ros2 topic hz /localization/pose_estimator/pose_with_covariance
+ros2 topic hz /localization/kinematic_state
+ros2 run tf2_ros tf2_echo map base_link
+ros2 service list | grep trigger_node
+# 期望: /localization/pose_estimator/trigger_node
+#       /localization/pose_twist_fusion_filter/trigger_node
 ```
 
-当前它已经包含正式主链：
+**NDT初始化：** WVCSC无GNSS，在RViz使用 `2D Pose Estimate` 手动给定初始位姿。
 
-- `map`
-- `perception`
-- `planning`
-- `control`
-- `api`
-- `system`
-
-因此它已经具备：
-
-```text
-地图 -> 定位 -> 感知 -> 规划 -> 控制 -> 车辆接口 -> 底盘
-```
-
-但它和 `planning_simulator.launch.xml` 最大区别是：
-
-- 没有 dummy vehicle
-- 没有 dummy localization
-- 没有 dummy perception
-
-所以真链路任何一层缺口都会直接暴露出来。
-
-## 8. 当前 planning/control 是否已经完整
-
-答案是：
-
-```text
-是，当前 full_real_vehicle.launch.xml 已经通过 autoware.launch.xml 拉起正式 planning/control 主链。
-```
-
-其中规划层会下钻到：
-
-- `mission_planner`
-- `behavior_path_planner`
-- `behavior_velocity_planner`
-- `motion_velocity_planner`
-- `scenario_selector`
-- `velocity_smoother`
-
-控制层会下钻到：
-
-- `trajectory_follower_node`
-- `vehicle_cmd_gate`
-- `autoware_shift_decider`
-- `operation_mode_transition_manager`
-- `control_validator`
-- `lane_departure_checker`
-- `autonomous_emergency_braking`
-
-控制输出链路是：
-
-```text
-/control/command/control_cmd
--> wvcsc_vehicle_interface
--> /twist_cmd
--> wtb_car_driver
-```
-
-所以当前真正的重点不是再补一个规划层或控制层入口，而是：
-
-- 补正式地图资产
-- 补定位初始化闭环
-- 保证传感器输入质量
-
-## 9. 推荐的完整部署顺序
-
-建议严格按这个顺序推进：
-
-1. 安装 `ros-humble-gtsam`，确保 `lio_sam` 能独立编译。
-2. 检查 `/sensing/lidar/pointcloud_raw` 是否包含 `ring` 和 `time`。
-3. 检查 `/sensing/imu/tamagawa/imu_raw` 频率、frame、时间同步。
-4. 用 `run_wvcsc_mapping.launch.py` 做直播建图或 `run_wvcsc_offline_mapping.launch.py` 做离线建图。
-5. 保存 `pointcloud_map.pcd` 并人工检查地图质量。
-6. 补齐 `lanelet2_map.osm`、`map_projector_info.yaml`、`map_config.yaml`。
-7. 先跑 `hybrid_real_vehicle.launch.xml`。
-8. 再跑 `full_real_vehicle.launch.xml`。
-9. 先 RViz 手动初始化，GNSS 自动初始化留到后续阶段。
-
-## 10. 常见故障表
-
-### 10.1 `GTSAM` 缺失
-
-现象：
-
-```text
-Could not find a package configuration file provided by "GTSAM"
-```
-
-处理：
+### 9.2 地图加载
 
 ```bash
-sudo apt-get install -y ros-humble-gtsam
+ros2 topic list | grep '^/map'
+ros2 topic info /map/pointcloud_map -v
 ```
 
-### 10.2 LIO-SAM 一启动就抖动、扭曲、抽搐
+### 9.3 控制链
 
-优先检查：
+```bash
+ros2 topic echo /control/command/control_cmd --once
+ros2 topic echo /twist_cmd --once
+```
 
-- LiDAR 与 IMU 时间不同步
-- 点云 `time` 字段格式不对
-- IMU 外参错误
-- `extrinsicTrans/extrinsicRot/extrinsicRPY` 不匹配
+---
 
-### 10.3 点云无法被 LIO-SAM 正常消费
+## 10. RViz 配置
 
-优先检查：
+当前使用 WVCSC 专用配置：`wvcsc_autoware_bringup/rviz/wvcsc_autoware.rviz`
 
-- 是否有 `ring`
-- 是否有 `time`
-- 点类型是否被中间节点改写
-- `/sensing/lidar/pointcloud_raw` 是否仍然是带多字段的机械雷达点云
+此配置的 `TopDownOrtho` 初始视角已对准 `wvcsc_map` 中心附近 `(-27, 54)`。
 
-### 10.4 NDT 有地图但定位不稳
+如果地图已加载但RViz黑屏：
+1. `Views → Current View` → `Type = TopDownOrtho` / `X≈-27` / `Y≈54` / `Scale≈180`
+2. `Map → PointCloudMap` → `Size = 2` / `Alpha = 1.0` / `Color Transformer = FlatColor`
 
-优先检查：
+---
 
-- `pointcloud_map.pcd` 是否质量足够
-- 是否还在用 fake pcd
-- 初始位姿是否给对
-- `map_projector_info.yaml` 是否合理
-- `laser`、`base_link`、`gyro_link` TF 是否一致
+## 11. 启动顺序
 
-### 10.5 `full_real_vehicle.launch.xml` 启动了但车不动
+```
+1. 确认硬件上电 (网线/LiDAR/IMU/CAN)
+2. hardware.launch.xml → 验证TF和话题
+3. hybrid_real_vehicle.launch.xml → 手动初始化定位 → 验证规划控制
+4. full_real_vehicle.launch.xml (感知就绪后)
+```
 
-优先顺序：
+---
 
-1. 看 `/planning/trajectory` 是否存在。
-2. 看 `/control/command/control_cmd` 是否存在。
-3. 看 `wvcsc_vehicle_interface` 是否把控制命令转成 `/twist_cmd`。
-4. 看 `wtb_car_driver` 是否接收到底盘指令。
-5. 看底盘状态 `/vehicle/status/*` 是否正常回传。
+## 12. 故障排查
 
-## 11. 当前建议保留和不保留的文档边界
+### 12.1 LiDAR无数据
 
-当前 `wvcsc_autoware_bringup/docs` 建议只长期保留：
+```bash
+ros2 topic info /sensing/lidar/pointcloud_raw -v
+ip addr                                    # 确认有192.168.1.x
+ping 192.168.1.200                         # LiDAR IP
+```
 
-- `real_vehicle_bringup.md`
-- `autoware_map_workflow.md`
-- `map_projector_info.example.yaml`
-- `map_config.example.yaml`
+常见原因：网卡未配IP、雷达未上电、QoS不匹配。
 
-其余与主手册内容重叠的 md 已建议合并收敛，避免后续越看越乱。
+### 12.2 `Waiting for IMU data ...`
+
+LIO-SAM建图时出现此消息 → 已修复。`imageProjection.cpp` 现在兼容LSLiDAR的负值time约定。若仍出现，确认 `/sensing/imu/tamagawa/imu_raw` 有数据且frame_id为 `gyro_link`。
+
+### 12.3 `package 'autoware_launch' not found`
+
+Autoware工作区的 `autoware_launch` 未编译：
+
+```bash
+cd /home/eisa/autoware
+colcon build --packages-up-to autoware_launch --symlink-install
+```
+
+### 12.4 缺少 ML 模型文件
+
+```
+No such file: '.../lidar_centerpoint/centerpoint_tiny_ml_package.param.yaml'
+```
+
+先跑 `hybrid_real_vehicle`（无感知），或下载模型：
+
+```bash
+mkdir -p /home/eisa/autoware_data/ml_models
+cd /home/eisa/autoware_data/ml_models
+git clone https://github.com/autowarefoundation/autoware_ml_data.git lidar_centerpoint
+```
+
+### 12.5 点云格式错误
+
+```
+The pointcloud layout is not compatible with PointXYZIRCAEDT or PointXYZIRC
+```
+
+确认NDT输入是 `/sensing/lidar/pointcloud_autoware`（经 `pointcloud_xyzirt_to_xyzirc_node` 转换），字段为 `x y z intensity return_type channel`。
+
+### 12.6 Ctrl+Z 后无法重启
+
+Ctrl+Z 挂起进程而非终止。清理：
+
+```bash
+kill %1 %2 %3 2>/dev/null
+pkill -f "ros2 launch"
+pkill -f rviz2
+ros2 daemon stop; ros2 daemon start
+```
+
+### 12.7 编译假死
+
+工控机编译 Autoware 必须限制资源：
+
+```bash
+MAKEFLAGS=-j2 colcon build --symlink-install --executor sequential
+```
+
+增大swap（`/dev/shm` 7.8G通常够用）：
+
+```bash
+sudo fallocate -l 16G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+```
+
+### 12.8 `/tf has not received`
+
+NDT未初始化前 `map → base_link` 不存在是正常的。先用 `2D Pose Estimate` 给初值。
+
+### 12.9 `wtb_car` 刷屏 `Received 'start'`
+
+旧版 `wvcsc_vehicle_interface` 重复发布 `/run_static`。已修复为仅在start/stop变化时发布。如仍出现，确认编译并source了最新版本。
+
+---
+
+## 13. 已知限制
+
+| 限制 | 说明 |
+|------|------|
+| 无GNSS | 定位仅依赖 NDT + LiDAR + IMU + 轮速计 |
+| 无自动初始化 | 需在 RViz 手动 `2D Pose Estimate` |
+| ML 模型 | `full_real_vehicle` 需预先下载 lidar_centerpoint |
+| C16 LiDAR | 点云较稀疏，建议建图时低速多角度覆盖 |
+| 工控机资源 | 全量编译需低并行，swap 建议 ≥ 16G |

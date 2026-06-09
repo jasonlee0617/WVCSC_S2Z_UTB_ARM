@@ -10,8 +10,9 @@
     vehicle_length: 1.30
     vehicle_height: 1.00
 
-    # Wheel center positions in wtb_car.xacro are x=+/-0.35 and y=+/-0.43.
-    wheel_base: 0.70
+    # The visual wheel centers in wtb_car.xacro remain at x=+/-0.35, but the
+    # real car uses a calibrated wheelbase of 0.82 m in wtb_car.
+    wheel_base: 0.82
     wheel_tread: 0.86
     wheel_radius: 0.20
     wheel_width: 0.12
@@ -23,10 +24,10 @@
     max_acceleration: 1.0
     min_acceleration: -1.0
 
-    cog_to_rear_axle: 0.35
-    cog_to_front_axle: 0.35
+    cog_to_rear_axle: 0.41
+    cog_to_front_axle: 0.41
 
-    front_overhang: 0.30
-    rear_overhang: 0.30
+    front_overhang: 0.24
+    rear_overhang: 0.24
     left_overhang: 0.06
     right_overhang: 0.06

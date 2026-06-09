@@ -11,7 +11,7 @@ from ament_index_python.packages import get_package_share_directory
 #def launch(launch_descriptor, argv):
 def generate_launch_description():
     config = os.path.join(
-        get_package_share_directory('common_sensor_launch'),
+        get_package_share_directory('wvcsc_common_sensor_launch'),
         'params',
         'yesense_config.yaml',
     )

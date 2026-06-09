@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <string>
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -90,7 +91,7 @@ private:
     } else {
       run_msg.data = "start";
     }
-    run_static_pub_->publish(run_msg);
+    publishRunStaticIfChanged(run_msg.data);
     publishGearReport();
   }
 
@@ -101,7 +102,8 @@ private:
     latest_heading_rate_ = msg->twist.twist.angular.z;
 
     autoware_vehicle_msgs::msg::VelocityReport report;
-    report.header = msg->header;
+    report.header.stamp = msg->header.stamp;
+    report.header.frame_id = "base_link";
     report.longitudinal_velocity = latest_velocity_;
     report.lateral_velocity = latest_lateral_velocity_;
     report.heading_rate = latest_heading_rate_;
@@ -160,6 +162,18 @@ private:
     gear_report_pub_->publish(report);
   }
 
+  void publishRunStaticIfChanged(const std::string & command)
+  {
+    if (command == last_run_static_command_) {
+      return;
+    }
+
+    std_msgs::msg::String run_msg;
+    run_msg.data = command;
+    run_static_pub_->publish(run_msg);
+    last_run_static_command_ = command;
+  }
+
   double max_speed_{1.0};
   double max_steering_angle_{0.6109};
   double command_timeout_sec_{0.5};
@@ -173,6 +187,7 @@ private:
   double latest_lateral_velocity_{0.0};
   double latest_heading_rate_{0.0};
   double latest_steering_angle_{0.0};
+  std::string last_run_static_command_;
 
   rclcpp::Subscription<autoware_control_msgs::msg::Control>::SharedPtr control_cmd_sub_;
   rclcpp::Subscription<autoware_vehicle_msgs::msg::GearCommand>::SharedPtr gear_cmd_sub_;

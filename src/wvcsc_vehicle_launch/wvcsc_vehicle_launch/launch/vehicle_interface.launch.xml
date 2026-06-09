@@ -6,7 +6,32 @@
   <arg name="use_sim_time" default="false"/>
   <arg name="vehicle_interface_param_path" default="$(find-pkg-share wvcsc_vehicle_interface)/config/vehicle_interface_params.yaml"/>
 
-  <node pkg="wvcsc_vehicle_interface" exec="vehicle_interface_node" name="wvcsc_vehicle_interface" output="screen">
+  <!-- launch_vehicle_hardware: set false from vehicle_hardware.launch.xml
+       to avoid double-launching can_bridge + wtb_car. -->
+  <arg name="launch_vehicle_hardware" default="true"/>
+
+  <group if="$(var launch_vehicle_hardware)">
+    <include file="$(find-pkg-share can_bridge)/launch/can_bridge.launch.py"/>
+
+    <node pkg="wtb_car_driver" exec="wtb_car" name="wtb_car" output="screen">
+      <param name="WHEELBASE" value="0.82"/>
+      <param name="vel_scale" value="1.0"/>
+      <param name="steer_offset" value="0.0"/>
+      <param name="min_speed" value="0.0005"/>
+      <param name="max_speed" value="1.0"/>
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+    </node>
+  </group>
+
+  <!-- joint_state_publisher: 发布 non-fixed (continuous) joint 的零状态
+       (轮子 joint)，robot_state_publisher 才能发布轮子 TF frame -->
+  <node pkg="joint_state_publisher" exec="joint_state_publisher"
+        name="joint_state_publisher">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+
+  <node pkg="wvcsc_vehicle_interface" exec="vehicle_interface_node"
+        name="wvcsc_vehicle_interface" output="screen">
     <param from="$(var vehicle_interface_param_path)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
   </node>

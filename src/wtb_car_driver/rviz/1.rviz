@@ -140,7 +140,7 @@ Visualization Manager:
           Value: false
         gyro_link:
           Value: false
-        laser_link:
+        laser:
           Value: false
         left_front_link:
           Value: false
@@ -163,7 +163,7 @@ Visualization Manager:
             base_link:
               gyro_link:
                 {}
-              laser_link:
+              laser:
                 {}
               left_front_link:
                 {}

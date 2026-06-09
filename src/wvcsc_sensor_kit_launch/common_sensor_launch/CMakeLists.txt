@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(common_sensor_launch)
+project(wvcsc_common_sensor_launch)
 
 find_package(ament_cmake_auto REQUIRED)
 find_package(PCL REQUIRED)
@@ -31,11 +31,15 @@ include_directories(
 )
 
 add_executable(point_cloud_transformer src/point_cloud_transformer.cpp)
-target_link_libraries(point_cloud_transformer ${PCL_LIBRARIES})   
+target_link_libraries(point_cloud_transformer ${PCL_LIBRARIES})
 ament_target_dependencies(point_cloud_transformer pcl_conversions tf2_eigen tf2_geometry_msgs)
+
+add_executable(pointcloud_xyzirt_to_xyzirc src/pointcloud_xyzirt_to_xyzirc_node.cpp)
+ament_target_dependencies(pointcloud_xyzirt_to_xyzirc rclcpp sensor_msgs)
 
 install(TARGETS
     point_cloud_transformer
+    pointcloud_xyzirt_to_xyzirc
     DESTINATION lib/${PROJECT_NAME}
     )
 

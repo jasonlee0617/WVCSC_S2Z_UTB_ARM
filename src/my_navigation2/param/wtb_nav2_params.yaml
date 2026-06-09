@@ -45,7 +45,7 @@ amcl:
     z_max: 0.05 # 激光最大值概率
     z_rand: 0.3 # 激光随机值概率
     z_short: 0.05 # 激光短距离概率
-    scan_topic: /scan_raw # 激光话题
+    scan_topic: scan # 激光话题
     always_update: true # 强制每帧更新
 
 amcl_map_client:
@@ -182,8 +182,8 @@ local_costmap:
       height: 10 # 高度（保留，同上）
       resolution: 0.05 # 分辨率
       # footprint: "[ [0.6, -0.3], [0.6, 0.3], [-0.6, 0.3], [-0.6, -0.3] ]" 
-      footprint: "[[0.65, -0.35], [0.65, 0.35], [-0.65, 0.35], [-0.65, -0.35] ]"
-      footprint_padding: 0.05 # 快速解锁规划，先收敛到较小安全边距
+      footprint: "[[0.8, -0.4], [0.8, 0.4], [-0.8, 0.4], [-0.8, -0.4] ]"
+      footprint_padding: 0.2 # 安全边距（保留，可增至0.3）
       plugins: ["obstacle_layer", "inflation_layer"]
       # 障碍物层配置（保留，优化参数）
       obstacle_layer:
@@ -192,15 +192,15 @@ local_costmap:
         observation_sources: scan
         combination_method: 1 # 最大值组合
         scan:
-          topic: /scan_raw
+          topic: /scan
           max_obstacle_height: 3.0 # 最大障碍物高度
           clearing: True # 清除障碍
           marking: True # 标记障碍
           data_type: "LaserScan" # 数据类型
           raytrace_max_range: 20.0 # 光线追踪最大范围
-          raytrace_min_range: 0.25 # 抑制近距离自车回波
+          raytrace_min_range: 0.0 # 光线追踪最小范围
           obstacle_max_range: 11.0 # 障碍标记最大范围
-          obstacle_min_range: 0.25 # 抑制近距离自车回波
+          obstacle_min_range: 0.0 # 障碍标记最小范围
           observation_persistence: 0.0 # 观测持久化
           expected_update_rate: 1.0 # 期望更新频率
           obstacle_range: 10.0 # 障碍范围
@@ -212,7 +212,7 @@ local_costmap:
         # 高 cost_scaling_factor → “只有非常靠近障碍物才危险”
         # 低 cost_scaling_factor → “离障碍物较远也觉得有点危险”
         cost_scaling_factor: 1.0 # 代价缩放因子
-        inflation_radius: 0.55
+        inflation_radius: 1.5 
      
       # 静态层配置（保留，虽未在plugins中，但若需全局地图可开启）
       static_layer:
@@ -236,8 +236,8 @@ global_costmap:
       use_sim_time: False # 关闭模拟时间
       # 与本地代价地图统一footprint
       # footprint: "[ [0.6, -0.3], [0.6, 0.3], [-0.6, 0.3], [-0.6, -0.3] ]"
-      footprint: "[[0.65, -0.35], [0.65, 0.35], [-0.65, 0.35], [-0.65, -0.35] ]"
-      footprint_padding: 0.05 # 快速解锁规划，先收敛到较小安全边距
+      footprint: "[[0.8, -0.4], [0.8, 0.4], [-0.8, 0.4], [-0.8, -0.4] ]"
+      footprint_padding: 0.2 # 安全边距
       resolution: 0.05 # 分辨率
       track_unknown_space: false # 不跟踪未知空间
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"] # 插件
@@ -248,15 +248,15 @@ global_costmap:
         observation_sources: scan
         combination_method: 1
         scan:
-          topic: /scan_raw
+          topic: /scan
           max_obstacle_height: 2.0
           clearing: True
           marking: True
           data_type: "LaserScan"
           raytrace_max_range: 20.0
-          raytrace_min_range: 0.25
+          raytrace_min_range: 0.0
           obstacle_max_range: 11.0
-          obstacle_min_range: 0.25
+          obstacle_min_range: 0.0
           observation_persistence: 0.0
           expected_update_rate: 1.0
       # 静态层配置
@@ -269,7 +269,7 @@ global_costmap:
         # 高 cost_scaling_factor → “只有非常靠近障碍物才危险”
         # 低 cost_scaling_factor → “离障碍物较远也觉得有点危险”
         cost_scaling_factor: 1.0
-        inflation_radius: 0.45
+        inflation_radius: 0.8
       always_send_full_costmap: True # 发送完整代价地图
 
   global_costmap_client:
@@ -282,7 +282,7 @@ global_costmap:
 map_server:
   ros__parameters:
     use_sim_time: False
-    yaml_filename: "map_wtb_demo.yaml" 
+    yaml_filename: "turtlebot3_world.yaml" 
 
 map_saver:
   ros__parameters:

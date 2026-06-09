@@ -6,5 +6,13 @@
     <include file="$(find-pkg-share fdilink_ahrs)/launch/ahrs_driver_autoware.launch.py">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
     </include>
+
+    <!-- Relay: /sensing/imu/tamagawa/imu_raw → /sensing/imu/imu_data
+         Autoware gyro_odometer and EKF localizer subscribe to /sensing/imu/imu_data
+         but fdilink_ahrs publishes to /sensing/imu/tamagawa/imu_raw -->
+    <node pkg="topic_tools" exec="relay" name="wvcsc_imu_to_autoware_relay">
+      <param name="input_topic" value="/sensing/imu/tamagawa/imu_raw"/>
+      <param name="output_topic" value="/sensing/imu/imu_data"/>
+    </node>
   </group>
 </launch>

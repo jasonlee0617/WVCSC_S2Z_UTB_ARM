@@ -112,7 +112,6 @@ def generate_launch_description():
                          ('cloud_in', '/point_cloud_raw'),
                         ('scan', '/scan')],
             parameters=[{
-                # 'target_frame': 'laser_link',
                 'target_frame': 'laser',
                 'min_height': -0.75,
                 'max_height': 0.5,
