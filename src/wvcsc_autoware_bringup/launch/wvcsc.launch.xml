@@ -3,24 +3,45 @@
   <!-- ================================================================
        WVCSC 单命令启动入口
        用法: ros2 launch wvcsc_autoware_bringup wvcsc.launch.xml
-               map_path:=/home/eisa/autoware_data/maps/wvcsc_map
+               map_path:=/home/eisa/autoware_map/maps/wvcsc_map
+
+       WVCSC 自有配置位于 config/localization/，包含:
+       - NDT 协方差放大 (C16 稀疏点云适配)
+       - EKF process_noise 放宽 (fdilink IMU 适配)
+       - crop_box_filter 量程 (C16 适配)
        ================================================================ -->
   <arg name="map_path" description="point cloud and lanelet2 map directory path"/>
+  <arg name="use_sim_time" default="false"/>
+  <arg name="vehicle_model" default="wvcsc_vehicle"/>
+  <arg name="system_run_mode" default="online"/>
 
   <!-- 车辆硬件 (can_bridge + wtb_car + vehicle_interface + URDF) -->
-  <include file="$(find-pkg-share wvcsc_autoware_bringup)/launch/vehicle_hardware.launch.xml"/>
+  <include file="$(find-pkg-share wvcsc_autoware_bringup)/launch/vehicle_hardware.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+  </include>
 
   <!-- 传感器硬件 (LiDAR + IMU) -->
-  <include file="$(find-pkg-share wvcsc_autoware_bringup)/launch/sensor_hardware.launch.xml"/>
+  <include file="$(find-pkg-share wvcsc_autoware_bringup)/launch/sensor_hardware.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+  </include>
 
-  <!-- Autoware 全栈 (launch_vehicle:=false 避免重复启动 vehicle_interface) -->
+  <!-- 定位链 (WVCSC 自定义参数, 替代 autoware 默认定位配置) -->
+  <include file="$(find-pkg-share autoware_launch)/launch/components/tier4_localization_component.launch.xml">
+    <arg name="loc_config_path"
+         value="$(find-pkg-share wvcsc_autoware_bringup)/config/localization"/>
+    <arg name="vehicle_model" value="$(var vehicle_model)"/>
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="system_run_mode" value="$(var system_run_mode)"/>
+  </include>
+
+  <!-- Autoware 全栈 (车辆/传感器/定位 已由 WVCSC 接管) -->
   <include file="$(find-pkg-share autoware_launch)/launch/autoware.launch.xml">
     <arg name="map_path" value="$(var map_path)"/>
     <arg name="vehicle_model" value="wvcsc_vehicle"/>
     <arg name="sensor_model" value="wvcsc_sensor_kit"/>
     <arg name="launch_vehicle" value="false"/>
     <arg name="launch_sensing" value="false"/>
-    <arg name="launch_localization" value="true"/>
+    <arg name="launch_localization" value="false"/>
     <arg name="launch_perception" value="false"/>
     <arg name="launch_system" value="true"/>
     <arg name="launch_map" value="true"/>

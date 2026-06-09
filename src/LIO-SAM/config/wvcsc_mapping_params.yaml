@@ -4,7 +4,7 @@
 
     # Topics
     pointCloudTopic: "/sensing/lidar/pointcloud_raw"
-    imuTopic: "/sensing/imu/tamagawa/imu_raw"
+    imuTopic: "/imu"
     odomTopic: "odometry/imu"
 
     # Frames

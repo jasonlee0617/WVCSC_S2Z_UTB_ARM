@@ -27,21 +27,27 @@ def generate_launch_description():
     launch_hardware_declare = DeclareLaunchArgument('launch_hardware', default_value='true')
     launch_rviz_declare = DeclareLaunchArgument('launch_rviz', default_value='false')
 
-    # In live WVCSC mapping, vehicle TF ownership stays in the validated
-    # hardware chain: robot_state_publisher provides the static vehicle/sensor
-    # tree and EKF provides odom -> base_footprint. LIO-SAM publishes mapping
-    # topics only when publishOdometryTf is false in the parameter file.
-    hardware = IncludeLaunchDescription(
-        AnyLaunchDescriptionSource(os.path.join(bringup_dir, 'launch', 'hardware.launch.xml')),
+    # Vehicle hardware: can_bridge + wtb_car + URDF TF + EKF
+    # (hardware.launch.xml was split into vehicle + sensor during refactoring)
+    vehicle_hw = IncludeLaunchDescription(
+        AnyLaunchDescriptionSource(os.path.join(bringup_dir, 'launch', 'vehicle_hardware.launch.xml')),
+        condition=IfCondition(launch_hardware),
+        launch_arguments={
+            'use_sim_time': use_sim_time,
+            'launch_ekf': 'true',
+            'relay_imu_to_ekf_topic': 'false',
+            'input_imu_topic': '/imu',
+            'ekf_imu_topic': '/imu',
+        }.items(),
+    )
+
+    sensor_hw = IncludeLaunchDescription(
+        AnyLaunchDescriptionSource(os.path.join(bringup_dir, 'launch', 'sensor_hardware.launch.xml')),
         condition=IfCondition(launch_hardware),
         launch_arguments={
             'use_sim_time': use_sim_time,
             'launch_driver': 'true',
-            'launch_ekf': 'true',
             'launch_pointcloud_to_laserscan': 'true',
-            'relay_imu_to_ekf_topic': 'true',
-            'input_imu_topic': '/sensing/imu/tamagawa/imu_raw',
-            'ekf_imu_topic': '/imu',
         }.items(),
     )
 
@@ -70,7 +76,8 @@ def generate_launch_description():
         use_sim_time_declare,
         launch_hardware_declare,
         launch_rviz_declare,
-        hardware,
+        vehicle_hw,
+        sensor_hw,
         static_map_to_odom,
         Node(package='lio_sam', executable='lio_sam_imuPreintegration', name='lio_sam_imuPreintegration', parameters=[params_file], output='screen'),
         Node(package='lio_sam', executable='lio_sam_imageProjection', name='lio_sam_imageProjection', parameters=[params_file], output='screen'),

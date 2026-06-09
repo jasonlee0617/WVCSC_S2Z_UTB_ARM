@@ -15,11 +15,11 @@ ekf_filter_node:
         debug_out_file: /path/to/debug/file.txt
 
         # TF帧配置
-        publish_tf: true  # 发布odom→base_footprint的TF
+        publish_tf: true  # 发布odom→base_link的TF (与URDF base_link→base_footprint配合)
         publish_acceleration: false  # 不发布加速度
-        map_frame: map              
-        odom_frame: odom            
-        base_link_frame: base_footprint  
+        map_frame: map
+        odom_frame: odom
+        base_link_frame: base_link  # base_link是URDF树的根，EKF发布odom→base_link
         world_frame: odom            # 与odom_frame一致，不使用map帧的定位
 
         # 里程计（/car_odom）配置

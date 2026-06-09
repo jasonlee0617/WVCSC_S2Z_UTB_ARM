@@ -3,7 +3,7 @@ ahrs_driver_node:  # 节点名称（需与启动文件中节点名称一致）
     if_debug_: False
     serial_port_: '/dev/FDI_IMU_GNSS'
     serial_baud_: 921600
-    imu_topic: '/sensing/imu/tamagawa/imu_raw'
+    imu_topic: '/imu'
     imu_frame_id_: 'gyro_link'
     mag_pose_2d_topic: '/mag_pose_2d'
     Magnetic_topic: '/magnetic'
