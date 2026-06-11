@@ -1,0 +1,2 @@
+# Ensure Autoware can load the acados solver dependencies used by path_optimizer.
+ament_prepend_unique_value LD_LIBRARY_PATH "/home/eisa/.local/acados/lib"

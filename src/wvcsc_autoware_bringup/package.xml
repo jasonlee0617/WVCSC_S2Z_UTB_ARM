@@ -3,28 +3,11 @@
 <package format="3">
   <name>wvcsc_autoware_bringup</name>
   <version>0.0.0</version>
-  <description>WVCSC Autoware bringup entrypoints for hybrid and full real-vehicle operation.</description>
+  <description>Deprecated migration shell. Runtime entrypoints, env hooks, and docs are being moved out of this package.</description>
   <maintainer email="robot@todo.todo">robot</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-
-  <depend>rclcpp</depend>
-  <depend>sensor_msgs</depend>
-
-  <exec_depend>autoware_launch</exec_depend>
-  <exec_depend>can_bridge</exec_depend>
-  <exec_depend>fdilink_ahrs</exec_depend>
-  <exec_depend>lslidar_driver</exec_depend>
-  <exec_depend>pointcloud_to_laserscan</exec_depend>
-  <exec_depend>robot_localization</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
-  <exec_depend>topic_tools</exec_depend>
-  <exec_depend>python3</exec_depend>
-  <exec_depend>wtb_car_driver</exec_depend>
-  <exec_depend>wvcsc_sensor_kit_launch</exec_depend>
-  <exec_depend>wvcsc_vehicle_interface</exec_depend>
-  <exec_depend>wvcsc_vehicle_launch</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -1,5 +1,7 @@
 ﻿#include <ahrs_driver.h>
 
+#include <algorithm>
+
 rclcpp::Node::SharedPtr nh_=nullptr;
 
 // FDILink命名空间，包含AHRS设备通信相关功能
@@ -12,6 +14,22 @@ namespace FDILink
 ahrsBringup::ahrsBringup()
 : rclcpp::Node ("ahrs_bringup")
 {
+  auto load_covariance = [this](const std::string & name, std::array<double, 9> & target) {
+    std::vector<double> values(target.begin(), target.end());
+    this->declare_parameter<std::vector<double>>(name, values);
+    this->get_parameter(name, values);
+
+    if (values.size() != target.size()) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "Parameter %s must contain %zu elements. Keep defaults.",
+        name.c_str(), target.size());
+      return;
+    }
+
+    std::copy(values.begin(), values.end(), target.begin());
+  };
+
   //topic_name & frame_id  加载参数服务器
   //声明和获取ROS2参数，用于配置话题名称、串口参数等
   this->declare_parameter("if_debug_",false);
@@ -50,6 +68,10 @@ ahrsBringup::ahrsBringup()
 
   this->declare_parameter<std::int64_t>("serial_baud_",921600);
   this->get_parameter("serial_baud_", serial_baud_);  
+
+  load_covariance("imu_orientation_covariance", imu_orientation_covariance_);
+  load_covariance("imu_angular_velocity_covariance", imu_angular_velocity_covariance_);
+  load_covariance("imu_linear_acceleration_covariance", imu_linear_acceleration_covariance_);
 
 
   
@@ -478,6 +500,9 @@ void ahrsBringup::processLoop()  // 数据处理过程
         imu_data.linear_acceleration.y = -imu_frame_.frame.data.data_pack.accelerometer_y;
         imu_data.linear_acceleration.z = -imu_frame_.frame.data.data_pack.accelerometer_z;
       }
+      imu_data.orientation_covariance = imu_orientation_covariance_;
+      imu_data.angular_velocity_covariance = imu_angular_velocity_covariance_;
+      imu_data.linear_acceleration_covariance = imu_linear_acceleration_covariance_;
       imu_pub_->publish(imu_data);
 }
     //读取AHRS数据进行解析，并发布相关话题

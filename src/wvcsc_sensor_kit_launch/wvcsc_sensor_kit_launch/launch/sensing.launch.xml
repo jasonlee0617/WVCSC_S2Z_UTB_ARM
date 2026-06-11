@@ -3,6 +3,7 @@
   <arg name="vehicle_mirror_param_file" default="$(find-pkg-share wvcsc_vehicle_description)/config/mirror.param.yaml"/>
   <arg name="pointcloud_container_name" default="pointcloud_container"/>
   <arg name="launch_pointcloud_to_laserscan" default="true"/>
+  <arg name="launch_traffic_light_heartbeat" default="true"/>
   <arg name="vehicle_id" default="$(env VEHICLE_ID default)"/>
   <arg name="use_sim_time" default="false"/>
 
@@ -24,5 +25,12 @@
       <arg name="input_vehicle_velocity_topic" value="/vehicle/status/velocity_status"/>
       <arg name="output_twist_with_covariance" value="/sensing/vehicle_velocity_converter/twist_with_covariance"/>
     </include>
+
+    <node if="$(var launch_traffic_light_heartbeat)"
+          pkg="wvcsc_sensor_kit_launch"
+          exec="traffic_light_heartbeat.py"
+          name="traffic_light_heartbeat">
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+    </node>
   </group>
 </launch>

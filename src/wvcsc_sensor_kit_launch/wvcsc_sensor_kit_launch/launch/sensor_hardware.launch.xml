@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="use_sim_time" default="false"/>
+  <arg name="launch_driver" default="true"/>
+  <arg name="sensor_model" default="wvcsc_sensor_kit"/>
+  <arg name="launch_pointcloud_to_laserscan" default="false"/>
+
+  <include file="$(find-pkg-share wvcsc_sensor_kit_launch)/launch/sensing.launch.xml">
+    <arg name="launch_driver" value="$(var launch_driver)"/>
+    <arg name="launch_pointcloud_to_laserscan" value="$(var launch_pointcloud_to_laserscan)"/>
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+  </include>
+</launch>

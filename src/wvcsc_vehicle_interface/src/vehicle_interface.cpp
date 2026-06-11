@@ -11,6 +11,7 @@
 
 #include <autoware_control_msgs/msg/control.hpp>
 #include <autoware_vehicle_msgs/msg/control_mode_report.hpp>
+#include <autoware_vehicle_msgs/srv/control_mode_command.hpp>
 #include <autoware_vehicle_msgs/msg/gear_command.hpp>
 #include <autoware_vehicle_msgs/msg/gear_report.hpp>
 #include <autoware_vehicle_msgs/msg/steering_report.hpp>
@@ -55,8 +56,15 @@ public:
       create_publisher<autoware_vehicle_msgs::msg::ControlModeReport>("/vehicle/status/control_mode", 10);
     gear_report_pub_ =
       create_publisher<autoware_vehicle_msgs::msg::GearReport>("/vehicle/status/gear_status", 10);
+    control_mode_srv_ =
+      create_service<autoware_vehicle_msgs::srv::ControlModeCommand>(
+      "/control/control_mode_request",
+      std::bind(
+        &VehicleInterface::onControlModeRequest, this, std::placeholders::_1,
+        std::placeholders::_2));
 
     current_gear_ = autoware_vehicle_msgs::msg::GearCommand::DRIVE;
+    current_control_mode_ = autoware_vehicle_msgs::msg::ControlModeReport::MANUAL;
     last_control_time_ = now();
     status_timer_ = create_wall_timer(100ms, std::bind(&VehicleInterface::onTimer, this));
 
@@ -69,7 +77,12 @@ public:
 private:
   void onControlCmd(const autoware_control_msgs::msg::Control::SharedPtr msg)
   {
+    if (!isAutonomousControlMode()) {
+      return;
+    }
+
     last_control_time_ = now();
+
     const double speed = std::clamp(
       static_cast<double>(msg->longitudinal.velocity), -max_speed_, max_speed_);
     const double steer = std::clamp(
@@ -82,16 +95,11 @@ private:
   {
     current_gear_ = msg->command;
 
-    std_msgs::msg::String run_msg;
     if (
       msg->command == autoware_vehicle_msgs::msg::GearCommand::PARK ||
       msg->command == autoware_vehicle_msgs::msg::GearCommand::NEUTRAL) {
-      run_msg.data = "stop";
       publishChassisCommand(0.0, 0.0);
-    } else {
-      run_msg.data = "start";
     }
-    publishRunStaticIfChanged(run_msg.data);
     publishGearReport();
   }
 
@@ -118,20 +126,29 @@ private:
 
   void onTimer()
   {
-    const double elapsed = (now() - last_control_time_).seconds();
-    if (elapsed > command_timeout_sec_) {
+    const auto current_time = now();
+    const double elapsed = (current_time - last_control_time_).seconds();
+
+    if (isAutonomousControlMode() && elapsed > command_timeout_sec_) {
       publishChassisCommand(0.0, 0.0);
     }
 
     autoware_vehicle_msgs::msg::SteeringReport steering;
-    steering.stamp = now();
+    steering.stamp = current_time;
     steering.steering_tire_angle = latest_steering_angle_;
     steering_report_pub_->publish(steering);
 
     autoware_vehicle_msgs::msg::ControlModeReport mode;
-    mode.stamp = now();
-    mode.mode = autoware_vehicle_msgs::msg::ControlModeReport::AUTONOMOUS;
+    mode.stamp = current_time;
+    mode.mode = current_control_mode_;
     control_mode_pub_->publish(mode);
+
+    // Periodically ensure chassis is in DRIVE/start state
+    if (current_gear_ == autoware_vehicle_msgs::msg::GearCommand::DRIVE) {
+      std_msgs::msg::String run_msg;
+      run_msg.data = "start";
+      run_static_pub_->publish(run_msg);
+    }
 
     publishGearReport();
   }
@@ -162,16 +179,41 @@ private:
     gear_report_pub_->publish(report);
   }
 
-  void publishRunStaticIfChanged(const std::string & command)
+  bool isAutonomousControlMode() const
   {
-    if (command == last_run_static_command_) {
-      return;
-    }
+    return
+      current_control_mode_ == autoware_vehicle_msgs::msg::ControlModeReport::AUTONOMOUS ||
+      current_control_mode_ ==
+        autoware_vehicle_msgs::msg::ControlModeReport::AUTONOMOUS_STEER_ONLY ||
+      current_control_mode_ ==
+        autoware_vehicle_msgs::msg::ControlModeReport::AUTONOMOUS_VELOCITY_ONLY;
+  }
 
-    std_msgs::msg::String run_msg;
-    run_msg.data = command;
-    run_static_pub_->publish(run_msg);
-    last_run_static_command_ = command;
+  void onControlModeRequest(
+    const autoware_vehicle_msgs::srv::ControlModeCommand::Request::SharedPtr request,
+    autoware_vehicle_msgs::srv::ControlModeCommand::Response::SharedPtr response)
+  {
+    switch (request->mode) {
+      case autoware_vehicle_msgs::srv::ControlModeCommand::Request::AUTONOMOUS:
+      case autoware_vehicle_msgs::srv::ControlModeCommand::Request::AUTONOMOUS_STEER_ONLY:
+      case autoware_vehicle_msgs::srv::ControlModeCommand::Request::AUTONOMOUS_VELOCITY_ONLY:
+      case autoware_vehicle_msgs::srv::ControlModeCommand::Request::MANUAL:
+        current_control_mode_ = request->mode;
+        if (!isAutonomousControlMode()) {
+          publishChassisCommand(0.0, 0.0);
+        }
+        last_control_time_ = now();
+        response->success = true;
+        RCLCPP_INFO(get_logger(), "Control mode changed to %u", current_control_mode_);
+        return;
+      case autoware_vehicle_msgs::srv::ControlModeCommand::Request::NO_COMMAND:
+        response->success = true;
+        return;
+      default:
+        response->success = false;
+        RCLCPP_WARN(get_logger(), "Unsupported control mode request: %u", request->mode);
+        return;
+    }
   }
 
   double max_speed_{1.0};
@@ -182,17 +224,18 @@ private:
   std::string twist_cmd_topic_{"/twist_cmd"};
 
   uint8_t current_gear_{autoware_vehicle_msgs::msg::GearCommand::DRIVE};
+  uint8_t current_control_mode_{autoware_vehicle_msgs::msg::ControlModeReport::MANUAL};
   rclcpp::Time last_control_time_;
   double latest_velocity_{0.0};
   double latest_lateral_velocity_{0.0};
   double latest_heading_rate_{0.0};
   double latest_steering_angle_{0.0};
-  std::string last_run_static_command_;
 
   rclcpp::Subscription<autoware_control_msgs::msg::Control>::SharedPtr control_cmd_sub_;
   rclcpp::Subscription<autoware_vehicle_msgs::msg::GearCommand>::SharedPtr gear_cmd_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<wtb_car_driver::msg::CarMsg>::SharedPtr car_status_sub_;
+  rclcpp::Service<autoware_vehicle_msgs::srv::ControlModeCommand>::SharedPtr control_mode_srv_;
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_cmd_pub_;

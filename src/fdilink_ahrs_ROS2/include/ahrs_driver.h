@@ -4,6 +4,7 @@
 
 #include <inttypes.h>
 #include <memory>
+#include <array>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <iostream>
@@ -89,6 +90,18 @@ private:
   std::string latlon_topic="latlon";
   std::string Euler_angles_topic="/Euler_angles", Magnetic_topic="/Magnetic";
   std::string gps_topic="/gps/fix",twist_topic="/system_speed",NED_odom_topic="/NED_odometry";
+  std::array<double, 9> imu_orientation_covariance_{{
+    0.05, 0.0, 0.0,
+    0.0, 0.05, 0.0,
+    0.0, 0.0, 0.10}};
+  std::array<double, 9> imu_angular_velocity_covariance_{{
+    0.001, 0.0, 0.0,
+    0.0, 0.001, 0.0,
+    0.0, 0.0, 0.0025}};
+  std::array<double, 9> imu_linear_acceleration_covariance_{{
+    0.10, 0.0, 0.0,
+    0.0, 0.10, 0.0,
+    0.0, 0.0, 0.15}};
 
 
   //Publisher

@@ -13,7 +13,9 @@
   <exec_depend>fdilink_ahrs</exec_depend>
   <exec_depend>pointcloud_to_laserscan</exec_depend>
   <exec_depend>autoware_vehicle_velocity_converter</exec_depend>
+  <exec_depend>autoware_perception_msgs</exec_depend>
   <exec_depend>can_bridge</exec_depend>
+  <exec_depend>rclpy</exec_depend>
   <exec_depend>wtb_car_driver</exec_depend>
   <exec_depend>wvcsc_vehicle_launch</exec_depend>
   <export>

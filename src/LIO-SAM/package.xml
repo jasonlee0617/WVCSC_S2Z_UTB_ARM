@@ -52,6 +52,8 @@
   <exec_depend>gtsam</exec_depend>
   <exec_depend>eigen</exec_depend>
   <exec_depend>pcl_conversions</exec_depend>
+  <exec_depend>wvcsc_sensor_kit_launch</exec_depend>
+  <exec_depend>wvcsc_vehicle_launch</exec_depend>
   
   <member_of_group>rosidl_interface_packages</member_of_group>
 

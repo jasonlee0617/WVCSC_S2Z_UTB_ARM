@@ -11,7 +11,8 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     share_dir = get_package_share_directory('lio_sam')
-    bringup_dir = get_package_share_directory('wvcsc_autoware_bringup')
+    vehicle_launch_dir = get_package_share_directory('wvcsc_vehicle_launch')
+    sensor_launch_dir = get_package_share_directory('wvcsc_sensor_kit_launch')
 
     params_file = LaunchConfiguration('params_file')
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -30,7 +31,7 @@ def generate_launch_description():
     # Vehicle hardware: can_bridge + wtb_car + URDF TF + EKF
     # (hardware.launch.xml was split into vehicle + sensor during refactoring)
     vehicle_hw = IncludeLaunchDescription(
-        AnyLaunchDescriptionSource(os.path.join(bringup_dir, 'launch', 'vehicle_hardware.launch.xml')),
+        AnyLaunchDescriptionSource(os.path.join(vehicle_launch_dir, 'launch', 'vehicle_hardware.launch.xml')),
         condition=IfCondition(launch_hardware),
         launch_arguments={
             'use_sim_time': use_sim_time,
@@ -42,7 +43,7 @@ def generate_launch_description():
     )
 
     sensor_hw = IncludeLaunchDescription(
-        AnyLaunchDescriptionSource(os.path.join(bringup_dir, 'launch', 'sensor_hardware.launch.xml')),
+        AnyLaunchDescriptionSource(os.path.join(sensor_launch_dir, 'launch', 'sensor_hardware.launch.xml')),
         condition=IfCondition(launch_hardware),
         launch_arguments={
             'use_sim_time': use_sim_time,

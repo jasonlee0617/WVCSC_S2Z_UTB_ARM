@@ -18,8 +18,8 @@
     twist_measurement:
       # for twist measurement
       twist_additional_delay: 0.0
-      twist_smoothing_steps: 2
-      max_twist_queue_size: 5 # if multiple measurements arrive within one ekf_dt, this limits must be bigger than smoothing_steps
+      twist_smoothing_steps: 0
+      max_twist_queue_size: 0 # if multiple measurements arrive within one ekf_dt, this limits must be bigger than smoothing_steps
       twist_gate_dist: 46.1 # corresponds to significance level = 10^-10
 
     process_noise:

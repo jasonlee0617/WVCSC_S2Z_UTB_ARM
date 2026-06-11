@@ -503,6 +503,23 @@ private:
         odom.twist.twist.linear.y = 0.0;
         odom.twist.twist.angular.z = wz;
 
+        // Provide non-zero covariance so downstream fusion does not see a singular measurement.
+        odom.pose.covariance.fill(0.0);
+        odom.pose.covariance[0] = 0.05;   // x
+        odom.pose.covariance[7] = 0.05;   // y
+        odom.pose.covariance[14] = 9999.0;  // z unused in 2D
+        odom.pose.covariance[21] = 9999.0;  // roll unused in 2D
+        odom.pose.covariance[28] = 9999.0;  // pitch unused in 2D
+        odom.pose.covariance[35] = 0.10;  // yaw
+
+        odom.twist.covariance.fill(0.0);
+        odom.twist.covariance[0] = 0.04;    // vx
+        odom.twist.covariance[7] = 9999.0;  // vy unused
+        odom.twist.covariance[14] = 9999.0; // vz unused
+        odom.twist.covariance[21] = 9999.0; // wx unused
+        odom.twist.covariance[28] = 9999.0; // wy unused
+        odom.twist.covariance[35] = 0.04;   // wz
+
         // 发布里程计数据
         odom_pub_->publish(odom);
         
@@ -593,6 +610,12 @@ private:
     // 回调函数，处理接收到的使能消息
     void run_static_callback(const std_msgs::msg::String::SharedPtr msg)
     {
+        if (msg->data == last_run_static_command_)
+        {
+            return;
+        }
+
+        last_run_static_command_ = msg->data;
         RCLCPP_INFO(rclcpp::get_logger("string_subscriber"), "Received: '%s'", msg->data.c_str());
 
         if (msg->data == "start")
@@ -671,6 +694,7 @@ private:
     bool enable_run_ = true; // 是否可以控制
     double stop_time_threshold = 3.0; // 停止时间阈值（秒）
     rclcpp::Time enable_last_time; //记录接收到stop信息的时间
+    std::string last_run_static_command_;
 
 
   
@@ -696,5 +720,3 @@ int main(int argc, char * argv[])
     rclcpp::shutdown();
     return 0;
 }
-
-

@@ -1,46 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <launch>
-  <!-- ================================================================
-       WVCSC 车辆硬件层
-       负责：CAN 通信 → 底盘驱动 → Autoware 车辆接口 → EKF
-       不负责：LiDAR / IMU 等传感器驱动（见 sensor_hardware.launch.xml）
-       ================================================================ -->
   <arg name="use_sim_time" default="false"/>
   <arg name="vehicle_model" default="wvcsc_vehicle"/>
   <arg name="sensor_model" default="wvcsc_sensor_kit"/>
   <arg name="vehicle_id" default="$(env VEHICLE_ID default)"/>
 
-  <!-- 底盘标定参数（与 wtb_car_driver 和 wvcsc_vehicle_description 保持一致） -->
   <arg name="wheelbase" default="0.82"/>
   <arg name="vel_scale" default="1.0"/>
   <arg name="steer_offset" default="0.0"/>
   <arg name="min_speed" default="0.0005"/>
   <arg name="max_speed" default="1.0"/>
 
-  <!-- EKF 配置 -->
   <arg name="launch_ekf" default="false"/>
   <arg name="relay_imu_to_ekf_topic" default="true"/>
   <arg name="input_imu_topic" default="/imu"/>
   <arg name="ekf_imu_topic" default="/imu"/>
-  <arg name="ekf_param_file" default="$(find-pkg-share wvcsc_autoware_bringup)/config/ekf_wtb_fdimu.yaml"/>
+  <arg name="ekf_param_file" default="$(find-pkg-share wvcsc_vehicle_launch)/config/ekf_wtb_fdimu.yaml"/>
 
-  <!-- ================================================================
-       1. 车体 URDF 模型 (robot_state_publisher)
-       ================================================================ -->
   <include file="$(find-pkg-share wvcsc_vehicle_launch)/launch/vehicle.launch.xml">
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="vehicle_model" value="$(var vehicle_model)"/>
     <arg name="sensor_model" value="$(var sensor_model)"/>
   </include>
 
-  <!-- ================================================================
-       2. CAN ↔ ROS2 桥接
-       ================================================================ -->
   <include file="$(find-pkg-share can_bridge)/launch/can_bridge.launch.py"/>
 
-  <!-- ================================================================
-       3. 底盘驱动 (Ackermann 运动学 + CAN 协议编解码)
-       ================================================================ -->
   <node pkg="wtb_car_driver" exec="wtb_car" name="wtb_car" output="screen">
     <param name="WHEELBASE" value="$(var wheelbase)"/>
     <param name="vel_scale" value="$(var vel_scale)"/>
@@ -50,18 +34,12 @@
     <param name="use_sim_time" value="$(var use_sim_time)"/>
   </node>
 
-  <!-- ================================================================
-       4. IMU topic 中继：Autoware 话题 → EKF 期望的 /imu 话题
-       ================================================================ -->
   <node if="$(var relay_imu_to_ekf_topic)" pkg="topic_tools" exec="relay"
         name="wvcsc_imu_to_ekf_imu_relay">
     <param name="input_topic" value="$(var input_imu_topic)"/>
     <param name="output_topic" value="$(var ekf_imu_topic)"/>
   </node>
 
-  <!-- ================================================================
-       5. EKF 传感器融合 (可选)
-       ================================================================ -->
   <node if="$(var launch_ekf)" pkg="robot_localization" exec="ekf_node"
         name="ekf_filter_node" output="screen">
     <param from="$(var ekf_param_file)"/>
@@ -69,9 +47,6 @@
     <remap from="/odometry/filtered" to="/ekf_odom"/>
   </node>
 
-  <!-- ================================================================
-       6. Autoware 车辆接口适配器
-       ================================================================ -->
   <include file="$(find-pkg-share wvcsc_vehicle_launch)/launch/vehicle_interface.launch.xml">
     <arg name="vehicle_id" value="$(var vehicle_id)"/>
     <arg name="use_sim_time" value="$(var use_sim_time)"/>

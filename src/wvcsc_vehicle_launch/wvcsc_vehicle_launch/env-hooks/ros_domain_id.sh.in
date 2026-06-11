@@ -1,0 +1,6 @@
+# Keep this workspace off the default ROS 2 domain unless the user has
+# explicitly selected one. This avoids DDS cross-talk with other Autoware
+# stacks on the same network.
+if [ -z "${ROS_DOMAIN_ID:-}" ]; then
+  export ROS_DOMAIN_ID=88
+fi

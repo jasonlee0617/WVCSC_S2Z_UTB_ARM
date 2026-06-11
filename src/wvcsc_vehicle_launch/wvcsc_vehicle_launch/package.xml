@@ -7,6 +7,10 @@
   <maintainer email="robot@todo.todo">robot</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>can_bridge</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>topic_tools</exec_depend>
+  <exec_depend>wtb_car_driver</exec_depend>
   <exec_depend>wvcsc_vehicle_description</exec_depend>
   <exec_depend>wvcsc_sensor_kit_description</exec_depend>
   <exec_depend>wvcsc_vehicle_interface</exec_depend>
