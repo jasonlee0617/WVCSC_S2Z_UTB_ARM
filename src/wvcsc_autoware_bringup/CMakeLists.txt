@@ -3,7 +3,7 @@ project(wvcsc_autoware_bringup)
 
 find_package(ament_cmake REQUIRED)
 
-install(DIRECTORY docs
+install(DIRECTORY 
   DESTINATION share/${PROJECT_NAME}
 )
 
