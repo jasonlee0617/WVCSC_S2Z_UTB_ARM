@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>trajectory_retime_server</name>
+  <version>0.1.0</version>
+  <description>Robot-agnostic MoveIt trajectory retiming service.</description>
+  <maintainer email="robot@todo.todo">robot</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <build_depend>rosidl_default_generators</build_depend>
+  <depend>moveit_core</depend>
+  <depend>moveit_msgs</depend>
+  <depend>moveit_ros_planning</depend>
+  <depend>rclcpp</depend>
+  <depend>trajectory_msgs</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

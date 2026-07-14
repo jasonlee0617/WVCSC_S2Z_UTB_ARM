@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="alicia_m_v1_1_follower">
+    <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
+    <xacro:arg name="ros2_control_plugin" default="mock_components/GenericSystem" />
+    <xacro:arg name="serial_port" default="/dev/ttyACM0" />
+    <xacro:arg name="baudrate" default="1000000" />
+    <xacro:arg name="control_mode" default="pv" />
+    <xacro:arg name="default_speed" default="1.0" />
+    <xacro:arg name="mit_kp" default="50.0" />
+    <xacro:arg name="mit_kd" default="2.0" />
+
+    <!-- 导入 URDF 模型 -->
+    <xacro:include filename="$(find alicia_m_descriptions)/urdf/Alicia_M_v1_1/Alicia_M_v1_1_follower.urdf" />
+
+    <!-- 导入 ros2_control 配置 -->
+    <xacro:include filename="alicia_m_v1_1_follower.ros2_control.xacro" />
+
+    <xacro:alicia_m_v1_1_follower_ros2_control
+        name="AliciaHardware"
+        initial_positions_file="$(arg initial_positions_file)"
+        ros2_control_plugin="$(arg ros2_control_plugin)"
+        serial_port="$(arg serial_port)"
+        baudrate="$(arg baudrate)"
+        control_mode="$(arg control_mode)"
+        default_speed="$(arg default_speed)"
+        mit_kp="$(arg mit_kp)"
+        mit_kd="$(arg mit_kd)"/>
+
+</robot>

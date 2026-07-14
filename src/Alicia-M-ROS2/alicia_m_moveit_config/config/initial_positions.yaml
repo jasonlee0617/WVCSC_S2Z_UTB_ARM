@@ -1,0 +1,10 @@
+# Shared collision-free startup pose for Alicia-M ros2_control models.
+
+initial_positions:
+  joint1: 0.0
+  joint2: 0.0
+  joint3: 0.0
+  joint4: 0.0
+  joint5: 0.0
+  joint6: 0.0
+  left_finger: 0.0

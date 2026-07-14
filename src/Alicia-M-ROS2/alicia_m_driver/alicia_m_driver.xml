@@ -1,0 +1,10 @@
+<library path="alicia_m_driver">
+  <class name="alicia_m_driver/AliciaHardwareInterface"
+         type="alicia_m_driver::AliciaHardwareInterface"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Alicia-M 机械臂 ros2_control 硬件接口插件，
+      通过串口通信协议（PV/MIT 模式）控制 6 轴关节和夹爪。
+    </description>
+  </class>
+</library>

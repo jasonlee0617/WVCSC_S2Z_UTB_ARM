@@ -1,0 +1,565 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  xmlns:xacro="http://www.ros.org/wiki/xacro"
+  name="alicia_m_v1_1_follower">
+  <xacro:arg name="alicia_base_link" default="base_link" />
+  <xacro:arg name="use_collision_meshes" default="true" />
+   <mujoco>
+    <compiler meshdir="../../meshes/Alicia_M_v1_1/follower" discardvisual="false" />
+  </mujoco>
+  <link
+    name="$(arg alicia_base_link)">
+    <inertial>
+      <origin
+        xyz="-0.0074155 8.4202E-06 0.038118"
+        rpy="0 0 0" />
+      <mass
+        value="2.5385" />
+      <inertia
+        ixx="0.0058527"
+        ixy="2.114E-07"
+        ixz="1.4479E-06"
+        iyy="0.0045151"
+        iyz="3.0868E-08"
+        izz="0.0084155" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <xacro:if value="$(arg use_collision_meshes)">
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/base_link.STL" />
+      </geometry>
+    </collision>
+    </xacro:if>
+  </link>
+  <link
+    name="link1">
+    <inertial>
+      <origin
+        xyz="0.00037898 -0.0010139 0.039387"
+        rpy="0 0 0" />
+      <mass
+        value="0.54365" />
+      <inertia
+        ixx="0.00018974"
+        ixy="-3.0439E-07"
+        ixz="-2.5092E-07"
+        iyy="0.00022251"
+        iyz="4.4259E-07"
+        izz="0.0002033" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <xacro:if value="$(arg use_collision_meshes)">
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link1.STL" />
+      </geometry>
+    </collision>
+    </xacro:if>
+  </link>
+  <joint
+    name="joint1"
+    type="revolute">
+    <origin
+      xyz="0 0 0.10705"
+      rpy="0 0 0" />
+    <parent
+      link="$(arg alicia_base_link)" />
+    <child
+      link="link1" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.75"
+      upper="2.75"
+      effort="5"
+      velocity="10" />
+  </joint>
+  <link
+    name="link2">
+    <inertial>
+      <origin
+        xyz="-0.19722 0.016179 0.00075589"
+        rpy="0 0 0" />
+      <mass
+        value="1.1153" />
+      <inertia
+        ixx="0.00057637"
+        ixy="0.00022961"
+        ixz="-1.956E-07"
+        iyy="0.0033441"
+        iyz="6.7003E-07"
+        izz="0.0032279" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <xacro:if value="$(arg use_collision_meshes)">
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link2.STL" />
+      </geometry>
+    </collision>
+    </xacro:if>
+  </link>
+  <joint
+    name="joint2"
+    type="revolute">
+    <origin
+      xyz="0 0 0.046"
+      rpy="1.5708 0 0" />
+    <parent
+      link="link1" />
+    <child
+      link="link2" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.14"
+      upper="0"
+      effort="5"
+      velocity="10" />
+  </joint>
+  <link
+    name="link3">
+    <inertial>
+      <origin
+        xyz="0.026259 -0.064912 -0.00065987"
+        rpy="0 0 0" />
+      <mass
+        value="0.4356" />
+      <inertia
+        ixx="0.00012982"
+        ixy="9.5271E-06"
+        ixz="-6.8812E-08"
+        iyy="0.0001789"
+        iyz="1.5081E-07"
+        izz="0.00014855" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <xacro:if value="$(arg use_collision_meshes)">
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link3.STL" />
+      </geometry>
+    </collision>
+    </xacro:if>
+  </link>
+  <joint
+    name="joint3"
+    type="revolute">
+    <origin
+      xyz="-0.28185 0.040324 0"
+      rpy="0 0 1.5708" />
+    <parent
+      link="link2" />
+    <child
+      link="link3" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-3.14"
+      upper="0"
+      effort="5"
+      velocity="10" />
+  </joint>
+  <link
+    name="link4">
+    <inertial>
+      <origin
+        xyz="3.9183E-06 0.001144 0.11644"
+        rpy="0 0 0" />
+      <mass
+        value="0.57265" />
+      <inertia
+        ixx="0.00034557"
+        ixy="-1.3549E-07"
+        ixz="-1.4243E-09"
+        iyy="0.00037178"
+        iyz="-7.3926E-08"
+        izz="0.00019935" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link4.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <xacro:if value="$(arg use_collision_meshes)">
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link4.STL" />
+      </geometry>
+    </collision>
+    </xacro:if>
+  </link>
+  <joint
+    name="joint4"
+    type="revolute">
+    <origin
+      xyz="0.028563 -0.091416 0"
+      rpy="-1.5708 0 -3.1412" />
+    <parent
+      link="link3" />
+    <child
+      link="link4" />
+    <axis
+      xyz="-0.00034722 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="5"
+      velocity="10" />
+  </joint>
+  <link
+    name="link5">
+    <inertial>
+      <origin
+        xyz="-0.0001129 0.054381 0.0022373"
+        rpy="0 0 0" />
+      <mass
+        value="0.38891" />
+      <inertia
+        ixx="0.00010415"
+        ixy="-1.2554E-07"
+        ixz="-1.4534E-07"
+        iyy="0.0001484"
+        iyz="5.2027E-08"
+        izz="0.00011043" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link5.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <xacro:if value="$(arg use_collision_meshes)">
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link5.STL" />
+      </geometry>
+    </collision>
+    </xacro:if>
+  </link>
+  <joint
+    name="joint5"
+    type="revolute">
+    <origin
+      xyz="-8.0556E-05 0 0.151"
+      rpy="1.5708 0.00034722 0" />
+    <parent
+      link="link4" />
+    <child
+      link="link5" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="5"
+      velocity="10" />
+  </joint>
+  <link
+    name="link6">
+    <inertial>
+      <origin
+        xyz="-0.00011097 -0.00066921 0.038228"
+        rpy="0 0 0" />
+      <mass
+        value="0.35658" />
+      <inertia
+        ixx="0.00018353"
+        ixy="5.0323E-08"
+        ixz="-1.1884E-07"
+        iyy="9.5615E-05"
+        iyz="-1.2974E-08"
+        izz="0.00021713" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link6.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <xacro:if value="$(arg use_collision_meshes)">
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link6.STL" />
+      </geometry>
+    </collision>
+    </xacro:if>
+  </link>
+  <joint
+    name="joint6"
+    type="revolute">
+    <origin
+      xyz="5.2431E-05 0.081 0"
+      rpy="-1.5708 0 0.00034722" />
+    <parent
+      link="link5" />
+    <child
+      link="link6" />
+    <axis
+      xyz="-0.00034722 0 1" />
+    <limit
+      lower="-2.75"
+      upper="2.75"
+      effort="5"
+      velocity="10" />
+  </joint>
+  <link
+    name="link7">
+    <inertial>
+      <origin
+        xyz="-0.0062638 -0.056089 0.0037593"
+        rpy="0 0 0" />
+      <mass
+        value="0.048674" />
+      <inertia
+        ixx="2.5291E-05"
+        ixy="-1.0647E-06"
+        ixz="1.8963E-07"
+        iyy="1.9457E-05"
+        iyz="2.7404E-06"
+        izz="1.9529E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link7.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <xacro:if value="$(arg use_collision_meshes)">
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link7.STL" />
+      </geometry>
+    </collision>
+    </xacro:if>
+  </link>
+  <joint
+    name="left_finger"
+    type="prismatic">
+    <origin
+      xyz="0 -0.048175 0.151"
+      rpy="1.5708 0.00034722 0" />
+    <parent
+      link="link6" />
+    <child
+      link="link7" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-0.05"
+      upper="0.0"
+      effort="5"
+      velocity="10" />
+  </joint>
+  <link
+    name="link8">
+    <inertial>
+      <origin
+        xyz="0.0062638 -0.056089 -0.0037593"
+        rpy="0 0 0" />
+      <mass
+        value="0.048674" />
+      <inertia
+        ixx="2.5291E-05"
+        ixy="1.0647E-06"
+        ixz="1.8963E-07"
+        iyy="1.9457E-05"
+        iyz="-2.7404E-06"
+        izz="1.9529E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link8.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.15 0.15 0.15 1" />
+      </material>
+    </visual>
+    <xacro:if value="$(arg use_collision_meshes)">
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://alicia_m_descriptions/meshes/Alicia_M_v1_1/follower/link8.STL" />
+      </geometry>
+    </collision>
+    </xacro:if>
+  </link>
+  <joint
+    name="right_finger"
+    type="prismatic">
+    <origin
+      xyz="0 0.046825 0.151"
+      rpy="1.5708 0.00034722 0" />
+    <parent
+      link="link6" />
+    <child
+      link="link8" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0.0"
+      upper="0.05"
+      effort="5"
+      velocity="10" />
+    <mimic joint="left_finger" multiplier="-1.0" offset="0" />
+  </joint>
+  <link
+    name="tool0">
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+      <material
+        name="green_virtual_sphere_material">
+        <color
+          rgba="0 1 0 1" />
+      </material>
+    </visual>
+  </link>
+  <joint
+    name="tool0_fixed_joint"
+    type="fixed">
+    <origin
+      xyz="0 0 0.15"
+      rpy="0 0 0" />
+    <parent
+      link="link6" />
+    <child
+      link="tool0" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+</robot>

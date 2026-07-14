@@ -1,0 +1,19 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: alicia_m_descriptions
+    relative_path: urdf/Alicia_M_v1_1/Alicia_M_v1_1_follower.urdf
+  srdf:
+    relative_path: config/alicia_m_v1_1_follower.srdf
+  package_settings:
+    author_name: Synria Robotics
+    author_email: support@synriarobotics.ai
+    generated_timestamp: 1772260186
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
+  modified_urdf:
+    xacros:
+      - control_xacro
