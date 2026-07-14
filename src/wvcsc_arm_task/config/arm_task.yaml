@@ -1,0 +1,9 @@
+wvcsc_spray_task:
+  ros__parameters:
+    home_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    observe_left_pose: [0.65, -1.35, -1.05, 0.0, -0.75, 0.65]
+    observe_right_pose: [-0.65, -1.35, -1.05, 0.0, -0.75, -0.65]
+    legacy_spray_side: left
+    legacy_spray_duration: 2.0
+    min_spray_duration: 0.2
+    max_spray_duration: 10.0

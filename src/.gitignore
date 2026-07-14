@@ -33,8 +33,6 @@ CMakeCache.txt
 cmake_install.cmake
 Makefile
 *.o
-*.so
-*.so.*
 *.a
 *.out
 

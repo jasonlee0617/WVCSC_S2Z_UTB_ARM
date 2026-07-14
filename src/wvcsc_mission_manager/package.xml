@@ -1,19 +1,19 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>wvcsc_arm_task</name>
+  <name>wvcsc_mission_manager</name>
   <version>0.1.0</version>
-  <description>Alicia-M observation and simulated spraying task.</description>
+  <description>Mission state machine for UAV, Nav2 and Alicia-M coordination.</description>
   <maintainer email="robot@example.com">robot</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>action_msgs</exec_depend>
-  <exec_depend>control_msgs</exec_depend>
-  <exec_depend>moveit_msgs</exec_depend>
-  <exec_depend>pymoveit2</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
-  <exec_depend>trajectory_retime_server</exec_depend>
   <exec_depend>wvcsc_interfaces</exec_depend>
   <test_depend>ament_pytest</test_depend>
   <test_depend>python3-pytest</test_depend>

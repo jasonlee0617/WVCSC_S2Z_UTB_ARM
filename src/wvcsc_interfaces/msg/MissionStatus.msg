@@ -1,0 +1,23 @@
+uint8 IDLE=0
+uint8 WAITING_FOR_TASKS=1
+uint8 READY=2
+uint8 NAVIGATING=3
+uint8 VERIFYING_STOP=4
+uint8 ARM_SPRAYING=5
+uint8 TARGET_COMPLETED=6
+uint8 PAUSED=7
+uint8 MISSION_COMPLETED=8
+uint8 CANCELED=9
+uint8 FAILED=10
+
+std_msgs/Header header
+string mission_id
+uint8 state
+string state_text
+string current_tree_id
+uint32 current_index
+uint32 total_targets
+uint32 completed_targets
+string last_error
+bool nav_goal_active
+bool arm_goal_active

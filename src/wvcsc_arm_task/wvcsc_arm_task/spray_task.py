@@ -1,12 +1,16 @@
-"""MoveIt-based simulated spraying sequence for Alicia-M."""
+"""MoveIt-based simulated spraying Action for Alicia-M."""
 
+import math
 import threading
+import time
 
 import rclpy
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from wvcsc_interfaces.action import ExecuteSpray
 
 from .motion_control import normalize_command
 from .motion_state import MotionControlState
@@ -14,20 +18,29 @@ from .node_parameters import create_alicia_moveit
 
 
 class SprayTask(Node):
-    HOME = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    OBSERVE_LEFT = [0.65, -1.35, -1.05, 0.0, -0.75, 0.65]
-    OBSERVE_RIGHT = [-0.65, -1.35, -1.05, 0.0, -0.75, -0.65]
-
     def __init__(self):
         super().__init__('wvcsc_spray_task')
-        self.declare_parameter('spray_side', 'left')
-        self.declare_parameter('spray_duration', 2.0)
+        self._declare_parameters()
+        self._home = self._joint_parameter('home_pose')
+        self._observe_left = self._joint_parameter('observe_left_pose')
+        self._observe_right = self._joint_parameter('observe_right_pose')
+        self._min_duration = float(self.get_parameter('min_spray_duration').value)
+        self._max_duration = float(self.get_parameter('max_spray_duration').value)
         self.state = MotionControlState()
         self.arm, self._callback_group = create_alicia_moveit(self, self.state)
-        self.service = self.create_service(
-            Trigger,
+        self._action_server = ActionServer(
+            self,
+            ExecuteSpray,
             '/arm/execute_spray',
-            self.execute,
+            execute_callback=self._execute_action,
+            goal_callback=self._goal_callback,
+            cancel_callback=self._cancel_callback,
+            callback_group=self._callback_group,
+        )
+        self._legacy_service = self.create_service(
+            Trigger,
+            '/arm/execute_spray_legacy',
+            self._execute_legacy,
             callback_group=self._callback_group,
         )
         self.command_sub = self.create_subscription(
@@ -41,6 +54,25 @@ class SprayTask(Node):
         self._busy_mutex = threading.Lock()
         self._busy = False
 
+    def _declare_parameters(self):
+        parameters = {
+            'home_pose': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            'observe_left_pose': [0.65, -1.35, -1.05, 0.0, -0.75, 0.65],
+            'observe_right_pose': [-0.65, -1.35, -1.05, 0.0, -0.75, -0.65],
+            'legacy_spray_side': 'left',
+            'legacy_spray_duration': 2.0,
+            'min_spray_duration': 0.2,
+            'max_spray_duration': 10.0,
+        }
+        for name, default in parameters.items():
+            self.declare_parameter(name, default)
+
+    def _joint_parameter(self, name):
+        values = [float(value) for value in self.get_parameter(name).value]
+        if len(values) != 6 or not all(math.isfinite(value) for value in values):
+            raise ValueError(f'{name} must contain six finite joint positions')
+        return values
+
     def _on_motion_command(self, message):
         command = normalize_command(message.data)
         if command in ('stop', 'reset'):
@@ -49,47 +81,155 @@ class SprayTask(Node):
             self.arm.cancel()
         elif command == 'resume':
             self.state.resume()
-            if not self._busy:
+            if not self._is_busy():
                 self._abort.clear()
 
-    def execute(self, _request, response):
-        with self._busy_mutex:
-            if self._busy:
-                response.message = 'spray task is already running'
-                return response
-            if self.state.locked:
-                response.message = 'motion is locked; send resume before starting'
-                return response
-            self._busy = True
+    def _goal_callback(self, request):
+        error = self._validate_goal(
+            request.mission_id, request.tree_id,
+            request.spray_side, request.spray_duration)
+        if error:
+            self.get_logger().warn(f'[ARM] rejected goal: {error}')
+            return GoalResponse.REJECT
+        if not self._claim():
+            self.get_logger().warn('[ARM] rejected goal: busy or motion locked')
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
 
-        side = str(self.get_parameter('spray_side').value).lower()
-        self._abort.clear()
-        threading.Thread(
-            target=self.run_sequence, args=(side,), daemon=True).start()
-        response.success = True
-        response.message = f'{side} spray sequence accepted'
-        return response
+    def _cancel_callback(self, _goal_handle):
+        self.state.stop()
+        self._abort.set()
+        self.arm.cancel()
+        return CancelResponse.ACCEPT
+
+    def _execute_action(self, goal_handle):
+        request = goal_handle.request
+        result = ExecuteSpray.Result()
+        try:
+            code, message = self._run_sequence(
+                request.spray_side,
+                float(request.spray_duration),
+                cancel_requested=lambda: goal_handle.is_cancel_requested,
+                feedback=lambda phase, progress, text: self._feedback(
+                    goal_handle, phase, progress, text),
+            )
+            result.success = code == ExecuteSpray.Result.OK
+            result.error_code = code
+            result.message = message
+            if result.success:
+                goal_handle.succeed()
+            elif code == ExecuteSpray.Result.CANCELED and goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+            else:
+                goal_handle.abort()
+            return result
+        except Exception as error:
+            self.get_logger().error(f'[ARM] internal error: {error}')
+            result.success = False
+            result.error_code = ExecuteSpray.Result.INTERNAL_ERROR
+            result.message = str(error)
+            goal_handle.abort()
+            return result
+        finally:
+            self._release()
+
+    def _run_sequence(self, side, duration, cancel_requested, feedback):
+        observe = self._observe_right if side == 'right' else self._observe_left
+        feedback(ExecuteSpray.Feedback.MOVING_TO_OBSERVE, 0.1, 'MOVING_TO_OBSERVE')
+        if not self._move(observe):
+            if self._aborted(cancel_requested):
+                return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
+            if not self._move(self._home):
+                return ExecuteSpray.Result.HOME_FAILED, 'observe and HOME motion failed'
+            return ExecuteSpray.Result.OBSERVE_FAILED, 'observation motion failed'
+
+        feedback(ExecuteSpray.Feedback.SPRAYING, 0.5, 'SPRAYING')
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            if self._aborted(cancel_requested):
+                return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+        if self._aborted(cancel_requested):
+            return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
+        feedback(ExecuteSpray.Feedback.RETURNING_HOME, 0.8, 'RETURNING_HOME')
+        if not self._move(self._home):
+            if self._aborted(cancel_requested):
+                return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
+            return ExecuteSpray.Result.HOME_FAILED, 'HOME motion failed'
+        feedback(ExecuteSpray.Feedback.COMPLETED, 1.0, 'COMPLETED')
+        return ExecuteSpray.Result.OK, 'spray sequence completed at HOME'
 
     def _move(self, positions):
-        if self._abort.is_set() or not self.arm.move_joints(positions):
-            raise RuntimeError('arm motion was stopped or failed')
+        return not self._abort.is_set() and self.arm.move_joints(positions)
 
-    def run_sequence(self, side):
-        observe = self.OBSERVE_RIGHT if side == 'right' else self.OBSERVE_LEFT
+    def _aborted(self, cancel_requested):
+        return self._abort.is_set() or cancel_requested()
+
+    @staticmethod
+    def _feedback(goal_handle, phase, progress, text):
+        message = ExecuteSpray.Feedback()
+        message.phase = phase
+        message.progress = progress
+        message.phase_text = text
+        goal_handle.publish_feedback(message)
+
+    def _execute_legacy(self, _request, response):
+        side = str(self.get_parameter('legacy_spray_side').value).lower()
+        duration = float(self.get_parameter('legacy_spray_duration').value)
+        error = self._validate_goal('legacy', 'legacy', side, duration)
+        if error:
+            response.message = error
+            return response
+        if not self._claim():
+            response.message = 'spray task is busy or motion is locked'
+            return response
+        threading.Thread(
+            target=self._run_legacy, args=(side, duration), daemon=True).start()
+        response.success = True
+        response.message = f'{side} legacy spray sequence accepted'
+        return response
+
+    def _run_legacy(self, side, duration):
         try:
-            self.get_logger().info('Moving Alicia-M to observation pose')
-            self._move(observe)
-            duration = float(self.get_parameter('spray_duration').value)
-            self.get_logger().info(f'Simulated spraying for {duration:.1f} s')
-            if self._abort.wait(max(0.0, duration)):
-                raise RuntimeError('spraying was stopped')
-            self.get_logger().info('Returning Alicia-M to HOME')
-            self._move(self.HOME)
-        except RuntimeError as error:
-            self.get_logger().error(str(error))
+            code, message = self._run_sequence(
+                side, duration, cancel_requested=lambda: False,
+                feedback=lambda *_args: None)
+            log = (
+                self.get_logger().info
+                if code == ExecuteSpray.Result.OK
+                else self.get_logger().error
+            )
+            log(f'[ARM] legacy result code={code}: {message}')
         finally:
-            with self._busy_mutex:
-                self._busy = False
+            self._release()
+
+    def _validate_goal(self, mission_id, tree_id, side, duration):
+        if not str(mission_id).strip() or not str(tree_id).strip():
+            return 'mission_id and tree_id are required'
+        if side not in ('left', 'right'):
+            return 'spray_side must be left or right'
+        if not math.isfinite(duration) or not self._min_duration <= duration <= self._max_duration:
+            return 'spray_duration out of range'
+        return ''
+
+    def _claim(self):
+        with self._busy_mutex:
+            if self._busy or self.state.locked:
+                return False
+            self._busy = True
+            self._abort.clear()
+            return True
+
+    def _release(self):
+        with self._busy_mutex:
+            self._busy = False
+            if not self.state.locked:
+                self._abort.clear()
+
+    def _is_busy(self):
+        with self._busy_mutex:
+            return self._busy
 
 
 def main():
@@ -105,4 +245,3 @@ def main():
         executor.shutdown()
         node.destroy_node()
         rclpy.try_shutdown()
-

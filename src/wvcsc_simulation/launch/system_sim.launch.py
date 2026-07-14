@@ -30,12 +30,18 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration('use_rviz')
     enable_arm_control = LaunchConfiguration('enable_arm_control')
     enable_ackermann = LaunchConfiguration('enable_ackermann')
+    use_mock_uav = LaunchConfiguration('use_mock_uav')
+    use_mission_manager = LaunchConfiguration('use_mission_manager')
+    auto_start_mission = LaunchConfiguration('auto_start_mission')
+    mock_target_config = LaunchConfiguration('mock_target_config')
     description_share = get_package_share_directory('wvcsc_description')
     simulation_share = get_package_share_directory('wvcsc_simulation')
+    arm_task_share = get_package_share_directory('wvcsc_arm_task')
+    mission_share = get_package_share_directory('wvcsc_mission_manager')
+    uav_share = get_package_share_directory('wvcsc_uav_gateway')
     moveit_share = get_package_share_directory('alicia_m_moveit_config')
     gazebo_share = get_package_share_directory('gazebo_ros')
     nav2_share = get_package_share_directory('nav2_bringup')
-    navigation_share = get_package_share_directory('my_navigation2')
     alicia_model_root = os.path.dirname(get_package_share_directory('alicia_m_descriptions'))
     gazebo_model_path = os.pathsep.join(filter(None, [
         alicia_model_root,
@@ -65,7 +71,8 @@ def generate_launch_description():
     semantic = semantic.replace('base_link="base_link"', 'base_link="alicia_base_link"')
     semantic = semantic.replace('link1="base_link"', 'link1="alicia_base_link"')
     semantic = semantic.replace(
-        '<virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="base_link"/>', '')
+        '<virtual_joint name="virtual_joint" type="fixed" '
+        'parent_frame="world" child_link="base_link"/>', '')
     robot_description_semantic = {'robot_description_semantic': semantic}
 
     kinematics = load_yaml('alicia_m_moveit_config', 'config/kinematics.yaml')
@@ -133,7 +140,13 @@ def generate_launch_description():
     )
     vehicle_sim = Node(
         package='wvcsc_simulation', executable='ackermann_sim.py',
-        parameters=[{'use_sim_time': True}], output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'wheel_base': 0.67,
+            'max_steering_angle': 0.48,
+            'max_linear_speed': 0.8,
+            'command_timeout': 0.5,
+        }], output='screen',
         condition=IfCondition(enable_ackermann),
     )
     move_group = Node(
@@ -187,33 +200,71 @@ def generate_launch_description():
     ])
     spray_task = TimerAction(period=7.0, actions=[
         Node(package='wvcsc_arm_task', executable='spray_task',
-             parameters=[arm_task_parameters],
+             parameters=[
+                 os.path.join(arm_task_share, 'config', 'arm_task.yaml'),
+                 arm_task_parameters,
+             ],
              condition=IfCondition(enable_arm_control), output='screen'),
     ])
-    odom_world = Node(
+    world_map = Node(
         package='tf2_ros', executable='static_transform_publisher',
         arguments=['--x', '0', '--y', '0', '--z', '0', '--roll', '0', '--pitch', '0', '--yaw', '0',
-                   '--frame-id', 'world', '--child-frame-id', 'odom'],
+                   '--frame-id', 'world', '--child-frame-id', 'map'],
         output='log',
     )
-
+    map_odom = Node(
+        package='tf2_ros', executable='static_transform_publisher',
+        arguments=['--x', '0', '--y', '0', '--z', '0', '--roll', '0', '--pitch', '0', '--yaw', '0',
+                   '--frame-id', 'map', '--child-frame-id', 'odom'],
+        output='log',
+    )
+    nav2_params = os.path.join(simulation_share, 'config', 'nav2_sim.yaml')
+    map_server = Node(
+        package='nav2_map_server', executable='map_server', name='map_server',
+        parameters=[nav2_params, {
+            'yaml_filename': os.path.join(simulation_share, 'maps', 'orchard.yaml'),
+            'use_sim_time': True,
+        }],
+        condition=IfCondition(use_nav2), output='screen',
+    )
+    map_lifecycle = Node(
+        package='nav2_lifecycle_manager', executable='lifecycle_manager',
+        name='lifecycle_manager_map',
+        parameters=[{
+            'use_sim_time': True,
+            'autostart': True,
+            'node_names': ['map_server'],
+        }],
+        condition=IfCondition(use_nav2), output='screen',
+    )
     nav2 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(nav2_share, 'launch', 'bringup_launch.py')),
+        PythonLaunchDescriptionSource(os.path.join(nav2_share, 'launch', 'navigation_launch.py')),
         launch_arguments={
-            'map': os.path.join(simulation_share, 'maps', 'orchard.yaml'),
             'use_sim_time': 'True',
-            'params_file': os.path.join(navigation_share, 'param', 'wtb_nav2_params.yaml'),
+            'params_file': nav2_params,
             'autostart': 'True',
+            'use_composition': 'False',
         }.items(),
         condition=IfCondition(use_nav2),
     )
-    initial_pose = ExecuteProcess(
-        cmd=[
-            'ros2', 'topic', 'pub', '--once', '/initialpose',
-            'geometry_msgs/msg/PoseWithCovarianceStamped',
-            '{header: {frame_id: map}, pose: {pose: {orientation: {w: 1.0}}}}',
+    mission_manager = Node(
+        package='wvcsc_mission_manager', executable='mission_manager',
+        parameters=[
+            os.path.join(mission_share, 'config', 'mission_manager.yaml'),
+            {
+                'auto_start': ParameterValue(auto_start_mission, value_type=bool),
+                'use_sim_time': True,
+            },
         ],
-        condition=IfCondition(use_nav2), output='log',
+        condition=IfCondition(use_mission_manager), output='screen',
+    )
+    mock_uav = Node(
+        package='wvcsc_uav_gateway', executable='mock_uav_gateway',
+        parameters=[{
+            'config_file': mock_target_config,
+            'use_sim_time': True,
+        }],
+        condition=IfCondition(use_mock_uav), output='screen',
     )
     rviz = Node(
         package='rviz2', executable='rviz2',
@@ -224,7 +275,7 @@ def generate_launch_description():
         target_action=spawn,
         on_exit=[
             TimerAction(period=5.0, actions=[unpause, vehicle_sim]),
-            TimerAction(period=6.0, actions=[nav2, initial_pose]),
+            TimerAction(period=6.0, actions=[map_server, map_lifecycle, nav2]),
         ],
     ))
 
@@ -233,11 +284,18 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('enable_arm_control', default_value='true'),
         DeclareLaunchArgument('enable_ackermann', default_value='true'),
+        DeclareLaunchArgument('use_mock_uav', default_value='true'),
+        DeclareLaunchArgument('use_mission_manager', default_value='true'),
+        DeclareLaunchArgument('auto_start_mission', default_value='false'),
+        DeclareLaunchArgument(
+            'mock_target_config',
+            default_value=os.path.join(uav_share, 'config', 'mock_targets.yaml')),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_MODEL_PATH', gazebo_model_path),
         gazebo,
         state_publisher,
-        odom_world,
+        world_map,
+        map_odom,
         spawn,
         post_spawn,
         move_group,
@@ -247,5 +305,7 @@ def generate_launch_description():
         arm_controller,
         gripper_controller,
         spray_task,
+        mission_manager,
+        mock_uav,
         rviz,
     ])

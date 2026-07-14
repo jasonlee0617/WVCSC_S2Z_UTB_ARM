@@ -1,0 +1,18 @@
+mission:
+  mission_id: orchard_demo_001
+  source_mode: mock
+  frame_id: map
+  publish_delay_sec: 8.0
+  trees:
+    - tree_id: tree_01
+      confidence: 0.96
+      position: {x: 3.0, y: 2.0, z: 0.0}
+      spray_side: left
+      spray_duration: 2.0
+      evidence_uri: mock://tree_01
+    - tree_id: tree_02
+      confidence: 0.94
+      position: {x: 5.0, y: -2.0, z: 0.0}
+      spray_side: right
+      spray_duration: 2.0
+      evidence_uri: mock://tree_02

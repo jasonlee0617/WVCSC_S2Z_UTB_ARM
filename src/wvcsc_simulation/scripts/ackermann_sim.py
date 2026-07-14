@@ -12,10 +12,23 @@ from tf2_ros import TransformBroadcaster
 
 class AckermannSim(Node):
     UPDATE_PERIOD = 0.05
-    COMMAND_TIMEOUT = 0.5
 
     def __init__(self):
         super().__init__('ackermann_sim')
+        self.declare_parameter('wheel_base', 0.67)
+        self.declare_parameter('max_steering_angle', 0.48)
+        self.declare_parameter('max_linear_speed', 0.8)
+        self.declare_parameter('command_timeout', 0.5)
+        self.wheel_base = float(self.get_parameter('wheel_base').value)
+        self.max_steering_angle = float(
+            self.get_parameter('max_steering_angle').value)
+        self.max_linear_speed = float(
+            self.get_parameter('max_linear_speed').value)
+        self.command_timeout = float(
+            self.get_parameter('command_timeout').value)
+        if (self.wheel_base <= 0.0 or
+                not 0.0 < self.max_steering_angle < math.pi / 2.0):
+            raise ValueError('invalid Ackermann geometry parameters')
         self.x = self.y = self.yaw = 0.0
         self.speed = self.yaw_rate = 0.0
         self.last_time = self.get_clock().now()
@@ -29,8 +42,19 @@ class AckermannSim(Node):
         self.create_timer(self.UPDATE_PERIOD, self.update)
 
     def command(self, message):
-        self.speed = max(-0.8, min(0.8, message.linear.x))
-        self.yaw_rate = max(-0.8, min(0.8, message.angular.z))
+        self.speed = max(
+            -self.max_linear_speed,
+            min(self.max_linear_speed, message.linear.x),
+        )
+        if abs(self.speed) < 1e-4:
+            self.yaw_rate = 0.0
+        else:
+            max_yaw_rate = (
+                abs(self.speed) * math.tan(self.max_steering_angle)
+                / self.wheel_base
+            )
+            self.yaw_rate = max(
+                -max_yaw_rate, min(max_yaw_rate, message.angular.z))
         self.last_command_time = self.get_clock().now()
 
     def update(self):
@@ -41,7 +65,8 @@ class AckermannSim(Node):
             return
 
         if (self.last_command_time is not None and
-                (now - self.last_command_time).nanoseconds * 1e-9 > self.COMMAND_TIMEOUT):
+                (now - self.last_command_time).nanoseconds * 1e-9
+                > self.command_timeout):
             self.speed = self.yaw_rate = 0.0
 
         self.yaw += self.yaw_rate * dt

@@ -1,0 +1,28 @@
+# Goal
+string mission_id
+string tree_id
+string spray_side
+float32 spray_duration
+---
+# Result
+uint16 OK=0
+uint16 INVALID_GOAL=1
+uint16 BUSY=2
+uint16 LOCKED=3
+uint16 OBSERVE_FAILED=4
+uint16 CANCELED=5
+uint16 HOME_FAILED=6
+uint16 INTERNAL_ERROR=7
+bool success
+uint16 error_code
+string message
+---
+# Feedback
+uint8 ACCEPTED=0
+uint8 MOVING_TO_OBSERVE=1
+uint8 SPRAYING=2
+uint8 RETURNING_HOME=3
+uint8 COMPLETED=4
+uint8 phase
+float32 progress
+string phase_text

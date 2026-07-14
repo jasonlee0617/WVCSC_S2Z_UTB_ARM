@@ -1,0 +1,21 @@
+mission_manager:
+  ros__parameters:
+    auto_start: false
+    map_frame: map
+    nav_action_name: /navigate_to_pose
+    spray_action_name: /arm/execute_spray
+    road_center_y: 0.0
+    road_yaw: 0.0
+    standoff_distance: 1.5
+    nav_goal_timeout_sec: 120.0
+    spray_goal_timeout_sec: 60.0
+    linear_stop_threshold: 0.03
+    angular_stop_threshold: 0.03
+    stop_stable_duration_sec: 1.0
+    odom_stale_timeout_sec: 1.0
+    stop_verify_timeout_sec: 5.0
+    confidence_threshold: 0.5
+    max_targets: 20
+    max_abs_coordinate: 50.0
+    min_spray_duration: 0.2
+    max_spray_duration: 10.0
