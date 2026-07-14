@@ -1,0 +1,7 @@
+wvcsc_spray_simulator:
+  ros__parameters:
+    action_name: /spray/execute
+    active_topic: /spray/simulated_active
+    emergency_stop_topic: /safety/emergency_stop
+    min_duration: 0.2
+    max_duration: 10.0

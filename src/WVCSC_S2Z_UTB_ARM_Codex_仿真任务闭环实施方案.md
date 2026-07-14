@@ -4,7 +4,7 @@
 > 项目工作区：`/home/robot/WVCSC_S2Z_UTB_ARM`  
 > 目标环境：Ubuntu 22.04 + ROS 2 Humble + Gazebo Classic + Nav2 + MoveIt2  
 > 编制日期：2026-07-14  
-> 当前阶段：统一复合机器人仿真已经具备基础，小车导航与机械臂喷洒任务尚未通过统一任务管理器完整串联
+> 当前阶段：基础任务闭环和第二阶段 Replay/Web/RGB 门控/喷洒 Action 代码已完成并通过 89 项自动测试；真实 Gazebo、Nav2、MoveIt2 和硬件联调待按第 22～23 节验收
 
 ---
 
@@ -1632,7 +1632,7 @@ colcon test：通过数量
 2. 正式 Action 为 `/arm/execute_spray`；兼容 Trigger 为 `/arm/execute_spray_legacy`。
 3. 仿真固定使用 `world -> map -> odom -> base_footprint`，不启动 AMCL；`AckermannSim` 独占发布 `odom -> base_footprint`。
 4. 增加 `/mission/reset`，终态任务显式 reset 后再接收新任务。
-5. 当前不增加 Marker、自动重试、Web、视觉和真实硬件逻辑。
+5. 第 21 节记录的是第一阶段依赖延后版边界；Web、Replay、RGB 门控和喷洒执行边界已在第 23 节进入第二阶段实现。Marker、自动重试和真实硬件逻辑仍未增加。
 
 ## 21.3 已完成代码
 
@@ -1817,6 +1817,9 @@ colcon build --symlink-install \
     wvcsc_interfaces \
     wvcsc_uav_gateway \
     wvcsc_mission_manager \
+    wvcsc_web_ui \
+    wvcsc_rgb_vision \
+    wvcsc_spray_controller \
     pymoveit2 \
     trajectory_retime_server \
     wvcsc_arm_task \
@@ -1843,6 +1846,9 @@ colcon test \
     wvcsc_interfaces \
     wvcsc_uav_gateway \
     wvcsc_mission_manager \
+    wvcsc_web_ui \
+    wvcsc_rgb_vision \
+    wvcsc_spray_controller \
     wvcsc_arm_task \
     trajectory_retime_server \
   --event-handlers console_direct+
@@ -1851,11 +1857,15 @@ colcon test-result --verbose
 
 ros2 interface show wvcsc_interfaces/msg/DiseaseTree
 ros2 interface show wvcsc_interfaces/msg/DiseaseTreeArray
+ros2 interface show wvcsc_interfaces/msg/MissionPlan
 ros2 interface show wvcsc_interfaces/msg/MissionStatus
+ros2 interface show wvcsc_interfaces/msg/Target2D
+ros2 interface show wvcsc_interfaces/action/AlignTarget
 ros2 interface show wvcsc_interfaces/action/ExecuteSpray
+ros2 interface show wvcsc_interfaces/action/Spray
 ```
 
-当前无 CAN 阶段基线是 `52 tests, 0 errors, 0 failures, 0 skipped`。测试数减少或出现失败时，先保存完整日志，不要直接修改验收数字。
+第一阶段历史基线为 `52 tests`；第 23 节第二阶段当前基线为 `89 tests, 0 errors, 0 failures, 0 skipped`。测试数减少或出现失败时，先保存完整日志，不要直接修改验收数字。
 
 ## 22.6 Gate E：真实 Gazebo 单轮闭环
 
@@ -1968,3 +1978,308 @@ world -> map -> odom -> base_footprint -> base_link
 - 将真实日志路径、成功次数和异常测试结果填回第 21.5 节。
 
 在此之前，方案状态保持“代码/Fake 闭环完成，真实仿真验收未完成”。
+
+---
+
+# 23. 第二阶段扩展执行与明日交接（2026-07-14）
+
+## 23.1 本阶段目标和结论
+
+本阶段按照《智能农林病虫害空地协同自主防治系统技术方案 V2.0》的后续目标，在不虚构无人机、C10 相机、喷洒 IO 和 CAN 硬件协议的前提下，继续建立可替换的仿真接口边界：
+
+```text
+Mock / Replay 无人机任务
+  -> MissionPlan 与逐目标状态
+  -> Nav2 停靠和停稳互锁
+  -> Alicia-M 观察位姿
+  -> 可选 RGB 对准门控
+  -> 可选独立喷洒 Action
+  -> Alicia-M HOME
+  -> 下一目标 / 返回待命点
+  -> Web 任务级展示和控制
+```
+
+当前结论：**第二阶段接口、节点、Web、Fake/单元测试和 Launch 装配代码已经完成；真实 Gazebo 全链路、真实视觉伺服和硬件接入仍未验收。**
+
+本阶段坚持以下边界：
+
+- 不修改 `can_bridge`、`wtb_car_driver` 的硬件构建逻辑；
+- 不创建假的 `libcontrolcan.so`；
+- 不猜测真实无人机网络协议、C10 驱动话题或水泵 GPIO/CAN 协议；
+- 浏览器不直接控制 `/cmd_vel`、机械臂控制器或喷洒继电器；
+- 浏览器按钮不能被宣传为硬件级急停；
+- 默认参数保持第一阶段定时模拟喷洒行为，新增视觉和独立喷洒 Action 均为显式开关。
+
+## 23.2 已完成的包、接口和文件
+
+| 包 | 本阶段完成内容 | 关键文件 |
+|---|---|---|
+| `wvcsc_interfaces` | 任务计划、逐目标状态、RGB 目标、视觉对准和喷洒 Action | `msg/MissionPlan.msg`、`msg/MissionTargetPlan.msg`、`msg/MissionTargetStatus.msg`、`msg/Target2D.msg`、`action/AlignTarget.action`、`action/Spray.action` |
+| `wvcsc_uav_gateway` | YAML 定时 Replay；Mock/Replay 共用消息工厂和严格校验 | `replay_uav_gateway.py`、`message_factory.py`、`config/replay_targets.yaml` |
+| `wvcsc_mission_manager` | 发布任务计划；逐目标结果；跳过当前目标；手动/自动返回 HOME | `core.py`、`mission_manager.py`、`config/mission_manager.yaml` |
+| `wvcsc_web_ui` | FastAPI + WebSocket 单页操作台；任务地图、队列、状态、日志和高层按钮 | `web_server.py`、`state.py`、`static/index.html` |
+| `wvcsc_rgb_vision` | RGB-only `Target2D` 对准门控和 Mock 目标源 | `core.py`、`alignment_gate.py`、`mock_vision.py` |
+| `wvcsc_spray_controller` | 仿真 `/spray/execute`；互斥、取消、急停输入和输出必关 | `core.py`、`spray_simulator.py`、`config/spray_sim.yaml` |
+| `wvcsc_arm_task` | 可选串联 `AlignTarget` 和 `Spray`；失败后尝试 HOME；保持旧定时模式 | `spray_task.py`、`config/arm_task.yaml` |
+| `wvcsc_simulation` | 装配 Replay、Web、RGB 门控、Mock RGB、喷洒模拟器和返回 HOME 开关 | `launch/system_sim.launch.py` |
+
+没有新增重复的 `wvcsc_bringup` 包。当前 `wvcsc_simulation/system_sim.launch.py` 已承担仿真组合启动职责；应在真实硬件启动参数和依赖明确后，再建立 `wvcsc_bringup` 的 `sim/mock/hardware/competition` 配置，避免现在只增加一层无功能包装。
+
+## 23.3 新增正式接口
+
+| 名称 | 类型 | 语义 |
+|---|---|---|
+| `/mission/plan` | `MissionPlan` Topic | 任务管理器生成的病树、停靠位姿和 HOME；Reliable + Transient Local |
+| `/mission/status` | `MissionStatus` Topic | 包含完成数、跳过数和每个 `tree_id` 的精确状态 |
+| `/mission/skip_current` | `std_srvs/Trigger` | 仅在安全阶段跳过，不允许在机械臂活动中跳过 |
+| `/mission/return_home` | `std_srvs/Trigger` | 无活动 Goal 且处于允许阶段时导航回 HOME |
+| `/vision/target` | `Target2D` Topic | RGB 检测框、图像尺寸、置信度、任务 ID 和目标 ID |
+| `/vision/align_target` | `AlignTarget` Action | 要求新鲜、同任务同目标、连续 N 帧像素误差达标 |
+| `/spray/execute` | `Spray` Action | 独立喷洒执行边界；支持互斥、取消和急停中止 |
+| `/spray/simulated_active` | `std_msgs/Bool` Topic | 仿真喷洒输出；成功、取消、异常和退出后都必须为 `false` |
+| `/safety/emergency_stop` | `std_msgs/Bool` Topic | 当前仅作为喷洒模拟器的软件互锁输入，不等同物理急停 |
+
+`ExecuteSpray` 结果新增：
+
+```text
+VISION_FAILED=8
+SPRAY_FAILED=9
+```
+
+反馈新增：
+
+```text
+ALIGNING=5
+```
+
+默认配置：
+
+```yaml
+use_vision_alignment: false
+use_spray_action: false
+```
+
+因此未启用新开关时，原有流程仍为：观察位姿 → 可中断定时等待 → HOME。
+
+## 23.4 已实现的安全语义
+
+1. `skip_current` 只允许在 `READY`、导航已暂停且旧 Goal 已收敛、或 `VERIFYING_STOP` 阶段调用；`ARM_SPRAYING` 阶段必须使用 `cancel`。
+2. 手动 `/mission/return_home` 到达 HOME 后任务进入 `CANCELED`，避免把未执行完的任务误报为成功。
+3. 配置 `return_home_after_finish=true` 时，最后一个目标完成后自动导航 HOME，成功后才进入 `MISSION_COMPLETED`。
+4. RGB 门控按 `(mission_id, tree_id)` 统计连续稳定帧；每个新 Goal 清空旧帧，旧任务或旧画面不能直接满足新 Goal。
+5. `SpraySimulator` 在 `finally`、cancel、急停和节点退出路径中关闭模拟输出。
+6. 视觉失败或喷洒失败时，机械臂在未收到 cancel/stop 的条件下尝试回 HOME，然后向任务管理器报告失败；任务管理器保持 fail-fast。
+7. Web 只暴露 `start/pause/resume/skip_current/return_home/cancel/reset`，没有任意底盘、关节轨迹和 IO 接口。
+8. 父 `ExecuteSpray` 取消或子 Action 超时时，会在有界时间内取消并等待子 Goal 终态，减少父 Goal 结束后遗留活动视觉/喷洒 Goal 的风险。
+
+## 23.5 构建、测试和静态验收证据
+
+不依赖 CAN 的九个包已在全新临时前缀构建：
+
+```text
+wvcsc_interfaces
+wvcsc_uav_gateway
+wvcsc_mission_manager
+wvcsc_web_ui
+wvcsc_rgb_vision
+wvcsc_spray_controller
+pymoveit2
+trajectory_retime_server
+wvcsc_arm_task
+
+Summary: 9 packages finished [14.1s]
+```
+
+描述和仿真包也已单独构建：
+
+```text
+Summary: 2 packages finished [31.2s]
+```
+
+测试明细：
+
+| 包 | 数量 | 主要覆盖 |
+|---|---:|---|
+| `wvcsc_uav_gateway` | 11 | Mock 持久发布、Replay 顺序、字段和事件校验 |
+| `wvcsc_mission_manager` | 28 | 双目标、失败分支、计划、跳过、返回、取消、reset |
+| `wvcsc_web_ui` | 6 | 状态序列化、命令白名单、ROS Client 注册 |
+| `wvcsc_rgb_vision` | 5 | 新鲜度、像素阈值、连续帧、任务隔离、Action 成功 |
+| `wvcsc_spray_controller` | 7 | 参数、互斥、急停、Action 成功/取消、输出关闭 |
+| `wvcsc_arm_task` | 29 | 原有回归、可选 Vision/Spray 成功失败链、ROS Action 串联和父子 cancel 传播 |
+| `trajectory_retime_server` | 3 | 2 项 GTest 加 1 项 CTest 聚合记录 |
+
+```text
+Summary: 89 tests, 0 errors, 0 failures, 0 skipped
+```
+
+附加静态验收：
+
+- `git diff --check` 通过；
+- 新增 Python 节点和 Launch 通过 `py_compile`；
+- 14 个本阶段生产 Python 源文件通过 `ament_flake8`；
+- `ros2 pkg executables` 可发现新增入口；
+- `MissionPlan`、`AlignTarget`、`Spray` 和扩展后的 `ExecuteSpray` 可由 `ros2 interface show` 解析；
+- `system_sim.launch.py --show-args` 解析成功，所有新增 Launch 参数可见。
+
+测试和构建目录位于 `/tmp/wvcsc_future_all`，重启后可能消失，不能代替仓库内的明日正式构建日志。
+
+## 23.6 推荐的扩展仿真启动方式
+
+明日完成 Gate A～D 后，先使用 Mock 数据启动完整扩展链：
+
+```bash
+cd /home/robot/WVCSC_S2Z_UTB_ARM
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 launch wvcsc_simulation system_sim.launch.py \
+  gui:=false \
+  use_rviz:=false \
+  use_nav2:=true \
+  use_mock_uav:=true \
+  use_replay_uav:=false \
+  use_mission_manager:=true \
+  use_web_ui:=true \
+  use_mock_vision:=true \
+  use_vision_alignment:=true \
+  use_spray_simulator:=true \
+  use_spray_action:=true \
+  return_home_after_finish:=true \
+  auto_start_mission:=false
+```
+
+浏览器地址：
+
+```text
+http://127.0.0.1:8080
+```
+
+必须只启用一个无人机来源。验证 Replay 时改为：
+
+```text
+use_mock_uav:=false
+use_replay_uav:=true
+```
+
+不要同时启动 Mock 和 Replay 发布器。
+
+扩展链期望状态：
+
+```text
+READY
+-> NAVIGATING
+-> VERIFYING_STOP
+-> ARM_SPRAYING
+   -> MOVING_TO_OBSERVE
+   -> ALIGNING
+   -> SPRAYING
+   -> RETURNING_HOME
+-> 下一目标
+-> RETURNING_HOME（整车）
+-> MISSION_COMPLETED
+```
+
+## 23.7 明日优先执行顺序
+
+### Gate 0：先保护今晚改动
+
+今晚新增内容目前仍是工作区改动。公司电脑同步前执行：
+
+```bash
+cd /home/robot/WVCSC_S2Z_UTB_ARM/src
+git status --short
+git diff --check
+git diff --stat
+```
+
+先按团队流程提交或妥善保存，再执行 `git pull --ff-only`。不要在有未保存改动时使用 `git reset --hard`、`git checkout -- .` 或强制覆盖。
+
+### Gate 1：外部依赖
+
+按第 22.2、22.3 节确认两份 `libcontrolcan.so` 和 Nav2 `libdiagnostic_updater.so`。这仍是完整工作区构建和真实导航的首要阻塞。
+
+### Gate 2：正式构建与 87 项基线
+
+执行更新后的第 22.4、22.5 节。通过条件：
+
+- 新增九个核心包均构建；
+- `wvcsc_description`、`wvcsc_simulation` 构建；
+- 测试不少于当前 89 项且零失败；
+- 新消息和 Action 均能解析。
+
+### Gate 3：保守基础链
+
+先保持：
+
+```text
+use_vision_alignment:=false
+use_spray_action:=false
+```
+
+完成原两目标真实 Gazebo 3/3，确认 Nav2、停稳、Alicia-M 观察/HOME 和 TF 基础链没有回归。
+
+### Gate 4：逐个启用新增边界
+
+按以下顺序启用，禁止一次同时排查所有层：
+
+1. `use_web_ui:=true`，只检查快照、地图和任务级按钮；
+2. `use_mock_vision:=true use_vision_alignment:=true`，检查每个目标出现 `ALIGNING`；
+3. `use_spray_simulator:=true use_spray_action:=true`，检查 `/spray/simulated_active` 的 `true -> false`；
+4. `return_home_after_finish:=true`，检查最后整车返回 HOME；
+5. 改用 Replay，确认任务来源为 `replay` 且顺序一致。
+
+### Gate 5：新增异常验收
+
+1. 将 Mock RGB 像素误差设为阈值外，确认不触发 Spray 且任务 fail-fast；
+2. 停止 Mock RGB 发布，确认 `TARGET_STALE/TIMEOUT`；
+3. 在喷洒前发布 `/safety/emergency_stop=true`，确认 Spray Goal 被拒绝或中止且输出为 `false`；
+4. 喷洒期间调用 `/mission/cancel`，确认 Arm/Spray Goal 最终均无活动句柄；
+5. 导航暂停并等待 Goal 收敛后调用 `skip_current`，确认目标标记 `SKIPPED`；
+6. 在允许阶段调用 `return_home`，确认到达后状态为 `CANCELED` 而不是伪成功；
+7. Web 断开时 ROS 任务状态机应继续按自身安全规则运行，不依赖页面连接维持互锁。
+
+## 23.8 后续确定会增加、但本轮不应伪实现的内容
+
+| 后续能力 | 推荐包/文件 | 开始实现前必须确认 |
+|---|---|---|
+| 真实无人机 Live 接入 | `wvcsc_uav_gateway/live_uav_gateway.py`、`config/live_uav.yaml` | 传输协议、坐标系、时间戳、ACK/重发、证据 URI 或视频地址 |
+| Replay 视频同步 | `replay_video_gateway.py` 或独立媒体进程 | 视频编码、时间基准、任务事件与帧的同步格式 |
+| Synria C10 驱动 | `wvcsc_rgb_vision/launch/c10_camera.launch.py` | UVC/厂家驱动、`image_raw`、`camera_info`、设备固定名 |
+| RGB 检测 | `detector_node.py`、模型配置 | 比赛标志类型、模型权重、类别、曝光、误检验收集 |
+| 单目距离/PnP | `monocular_geometry.py` | C10 内参、标志真实尺寸、畸变、工作距离 |
+| 真实视觉伺服 | `visual_servo_node.py` 或 MoveIt Servo 适配 | 控制频率、关节/笛卡尔限幅、丢失恢复、控制权仲裁 |
+| 手眼标定 | `config/camera_intrinsics.yaml`、`config/handeye.yaml` | `tool0 -> camera_link` 实测结果和 15～25 组有效样本 |
+| 真实喷洒后端 | `spray_hardware.py`、`config/spray_hardware.yaml` | GPIO/CAN/串口协议、常闭逻辑、看门狗、液位/流量、断电行为 |
+| 物理安全总线 | 独立硬件急停和状态输入节点 | 急停回路、底盘/机械臂驱动停机接口、人工复位流程 |
+| 正式 `wvcsc_bringup` | `system_hardware.launch.py`、`competition.launch.py` | 上述真实设备入口和互斥模式已经稳定 |
+| Web 视频/真实地图 | 扩展 `wvcsc_web_ui` | 压缩图像来源、`/map`、机器人实时位姿、路径话题和局域网带宽 |
+| 运行记录 | 优先 `rosbag2` + 启动脚本，不先造新日志框架 | 需要保存的话题、存储周期、比赛数据清理策略 |
+
+当前 `AlignTarget` 只是 RGB 结果的**对准确认门**，不会主动给机械臂发送视觉伺服速度；当前 `SpraySimulator` 只是仿真执行器，不会操作真实泵阀；当前 Replay 只回放任务事件，不播放视频。这三点不得在演示说明中夸大。
+
+## 23.9 当前仍未完成的真实验收
+
+- 完整工作区包含 CAN 驱动的正式构建；
+- Nav2 系统库 ABI 修复后的真实运行；
+- Gazebo 两目标基础链和扩展链各连续 3/3；
+- Alicia-M MoveIt2 中真实执行“观察 → 视觉门控 → 喷洒 Action → HOME”；
+- cancel 后 Nav2、Arm、Align、Spray 四层均无残留 Goal；
+- `view_frames` 证明 TF 无重复父节点；
+- Web 在运行中展示真实 `/map`、机器人位姿、路径和视频；
+- Synria C10 图像、标定、检测和真实视觉伺服；
+- 真实喷洒 IO、物理急停和故障安全关闭；
+- 真实无人机 Live 协议和网络中断/重发测试；
+- 最终 10 轮三目标成功率 `>=90%` 压力验收。
+
+## 23.10 更新后的完成定义
+
+当前只能标记为：
+
+```text
+接口与第二阶段 Fake 功能完成
+代码构建和 89 项自动测试完成
+Launch 静态装配完成
+真实 Gazebo/设备验收未完成
+```
+
+只有第 22 节 Gate A～F、基础链 3/3、扩展链 3/3、异常验收、TF 验收和真实设备替换均有日志证据后，才能把整个 V2.0 技术目标标记为完整实现。

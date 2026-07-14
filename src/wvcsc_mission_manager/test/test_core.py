@@ -36,6 +36,49 @@ def test_two_target_success_path():
     assert core.nav_succeeded() and core.stop_verified() and core.arm_succeeded()
     assert core.state == MissionState.MISSION_COMPLETED
     assert core.completed_targets == 2
+    assert core.target_outcomes == [core.COMPLETED, core.COMPLETED]
+
+
+def test_optional_return_home_finishes_only_after_home_navigation():
+    core = MissionCore()
+    core.load('demo', [_targets()[0]])
+    core.start()
+    assert core.nav_succeeded() and core.stop_verified()
+    assert core.arm_succeeded(return_home=True)
+    assert core.state == MissionState.RETURNING_HOME
+    assert core.home_succeeded()
+    assert core.state == MissionState.MISSION_COMPLETED
+
+
+def test_safe_skip_and_manual_return_home_semantics():
+    core = MissionCore()
+    core.load('demo', _targets())
+    assert core.skip_current()
+    assert core.state == MissionState.READY
+    assert core.current_target.tree_id == 'tree_2'
+    assert core.skipped_targets == 1
+    assert core.target_outcomes == [core.SKIPPED, core.PENDING]
+    assert core.return_home()
+    assert core.home_succeeded(canceled=True)
+    assert core.state == MissionState.CANCELED
+
+
+def test_skip_is_rejected_while_arm_is_active():
+    core = MissionCore()
+    core.load('demo', _targets())
+    core.start()
+    core.nav_succeeded()
+    core.stop_verified()
+    assert not core.skip_current()
+    assert core.current_index == 0
+
+
+def test_failure_marks_only_the_active_target():
+    core = MissionCore()
+    core.load('demo', _targets())
+    core.start()
+    core.fail('nav failed')
+    assert core.target_outcomes == [core.FAILED, core.PENDING]
 
 
 def test_duplicate_pause_cancel_and_reset_semantics():

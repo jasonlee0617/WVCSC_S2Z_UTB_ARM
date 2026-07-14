@@ -2,7 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from wvcsc_uav_gateway.validation import load_and_validate
+from wvcsc_uav_gateway.validation import (
+    load_and_validate,
+    load_and_validate_replay,
+)
 
 
 def _write(tmp_path, text):
@@ -52,3 +55,58 @@ def test_rejects_duplicate_tree_id(tmp_path):
 '''
     with pytest.raises(ValueError):
         load_and_validate(_write(tmp_path, VALID + duplicate))
+
+
+def test_accepts_ordered_replay_events(tmp_path):
+    replay = '''
+replay:
+  playback_rate: 2.0
+  loop: false
+  events:
+    - at_sec: 0.1
+      mission:
+        mission_id: replay_1
+        frame_id: map
+        source_mode: replay
+        trees:
+          - tree_id: tree_1
+            confidence: 0.9
+            position: {x: 3.0, y: 2.0}
+            spray_side: left
+            spray_duration: 2.0
+'''
+    config = load_and_validate_replay(_write(tmp_path, replay))
+    assert config['playback_rate'] == 2.0
+    assert config['events'][0]['mission']['source_mode'] == 'replay'
+
+
+@pytest.mark.parametrize('replacement', [
+    'at_sec: -0.1',
+    'source_mode: live',
+    'playback_rate: 0.0',
+])
+def test_rejects_invalid_replay_config(tmp_path, replacement):
+    replay = '''
+replay:
+  playback_rate: 1.0
+  events:
+    - at_sec: 0.1
+      mission:
+        mission_id: replay_1
+        frame_id: map
+        source_mode: replay
+        trees:
+          - tree_id: tree_1
+            confidence: 0.9
+            position: {x: 3.0, y: 2.0}
+            spray_side: left
+            spray_duration: 2.0
+'''
+    if replacement.startswith('playback_rate'):
+        invalid = replay.replace('playback_rate: 1.0', replacement)
+    elif replacement.startswith('source_mode'):
+        invalid = replay.replace('source_mode: replay', replacement)
+    else:
+        invalid = replay.replace('at_sec: 0.1', replacement)
+    with pytest.raises(ValueError):
+        load_and_validate_replay(_write(tmp_path, invalid))

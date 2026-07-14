@@ -1,8 +1,9 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from wvcsc_interfaces.msg import DiseaseTree, DiseaseTreeArray
+from wvcsc_interfaces.msg import DiseaseTreeArray
 
+from .message_factory import mission_message
 from .validation import load_and_validate
 
 
@@ -34,22 +35,8 @@ class MockUavGateway(Node):
 
     def _publish_once(self):
         self._timer.cancel()
-        message = DiseaseTreeArray()
-        message.header.stamp = self.get_clock().now().to_msg()
-        message.header.frame_id = self._config['frame_id']
-        message.mission_id = self._config['mission_id']
-        message.source_mode = self._config['source_mode']
-        for item in self._config['trees']:
-            tree = DiseaseTree()
-            tree.tree_id = item['tree_id']
-            tree.confidence = item['confidence']
-            tree.position.x = item['position']['x']
-            tree.position.y = item['position']['y']
-            tree.position.z = item['position']['z']
-            tree.spray_side = item['spray_side']
-            tree.spray_duration = item['spray_duration']
-            tree.evidence_uri = item['evidence_uri']
-            message.trees.append(tree)
+        message = mission_message(
+            self._config, self.get_clock().now().to_msg())
         self._publisher.publish(message)
         self.get_logger().info(
             f"[UAV_GATEWAY] published mission={message.mission_id} "

@@ -21,6 +21,7 @@ class _Sequence:
     _run_sequence = SprayTask._run_sequence
     _move = SprayTask._move
     _aborted = SprayTask._aborted
+    _run_timer_spray = SprayTask._run_timer_spray
     _validate_goal = SprayTask._validate_goal
     _claim = SprayTask._claim
     _release = SprayTask._release
@@ -34,6 +35,8 @@ class _Sequence:
         self._busy = False
         self._min_duration = 0.2
         self._max_duration = 10.0
+        self._use_vision_alignment = False
+        self._use_spray_action = False
         self.state = MotionControlState()
         self.arm = _Arm(outcomes)
 
@@ -101,3 +104,39 @@ def test_busy_and_locked_sequences_cannot_claim_a_goal():
     sequence._release()
     sequence.state.stop()
     assert not sequence._claim()
+
+
+def test_optional_vision_and_spray_failures_return_home():
+    vision = _Sequence([True, True])
+    vision._use_vision_alignment = True
+    vision._align_target = lambda *_args: (False, False, 'target stale')
+    (code, _message), _feedback = _run(vision)
+    assert code == ExecuteSpray.Result.VISION_FAILED
+    assert vision.arm.calls == [['left'], ['home']]
+
+    spray = _Sequence([True, True])
+    spray._use_spray_action = True
+    spray._spray_target = lambda *_args: (False, False, 'valve failed')
+    (code, _message), _feedback = _run(spray)
+    assert code == ExecuteSpray.Result.SPRAY_FAILED
+    assert spray.arm.calls == [['left'], ['home']]
+
+
+def test_optional_vision_and_spray_success_preserve_home_requirement():
+    sequence = _Sequence([True, True])
+    sequence._use_vision_alignment = True
+    sequence._use_spray_action = True
+    sequence._align_target = lambda *_args: (True, False, 'aligned')
+    sequence._spray_target = lambda *_args: (True, False, 'sprayed')
+
+    (code, _message), feedback = _run(sequence)
+
+    assert code == ExecuteSpray.Result.OK
+    assert sequence.arm.calls == [['left'], ['home']]
+    assert [item[0] for item in feedback] == [
+        ExecuteSpray.Feedback.MOVING_TO_OBSERVE,
+        ExecuteSpray.Feedback.ALIGNING,
+        ExecuteSpray.Feedback.SPRAYING,
+        ExecuteSpray.Feedback.RETURNING_HOME,
+        ExecuteSpray.Feedback.COMPLETED,
+    ]

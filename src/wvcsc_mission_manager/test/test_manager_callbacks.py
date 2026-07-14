@@ -26,6 +26,9 @@ class _Logger:
     def error(self, _message):
         pass
 
+    def info(self, _message):
+        pass
+
 
 class _Detector:
     def __init__(self, status=StopDetector.WAITING):
@@ -37,6 +40,14 @@ class _Detector:
 
     def stop(self):
         self.stopped = True
+
+
+class _NavClient:
+    def __init__(self, ready=True):
+        self.ready = ready
+
+    def server_is_ready(self):
+        return self.ready
 
 
 class _Harness:
@@ -53,11 +64,17 @@ class _Harness:
         self._nav_timeout = 5.0
         self._spray_timeout = 5.0
         self._auto_start = False
+        self._return_home_after_finish = False
+        self._manual_return_home = False
+        self._home_pose = (0.0, 0.0, 0.0)
         self._stop_detector = _Detector()
+        self._nav_client = _NavClient()
         self.failures = []
         self.nav_cancels = 0
         self.spray_cancels = 0
         self.status_updates = 0
+        self._navigation_active = MissionManager._navigation_active.__get__(
+            self, _Harness)
 
     def _fail(self, message):
         self.failures.append(str(message))
@@ -109,6 +126,7 @@ def _message(frame='map', x=3.0, count=1):
     return SimpleNamespace(
         header=SimpleNamespace(frame_id=frame),
         mission_id='demo',
+        source_mode='mock',
         trees=trees,
     )
 
@@ -201,6 +219,15 @@ def test_invalid_frame_coordinate_and_target_count_are_rejected():
             continue
         raise AssertionError('invalid mission was accepted')
 
+    invalid_source = _message()
+    invalid_source.source_mode = 'serial'
+    try:
+        MissionManager._validate_message(validator, invalid_source)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('invalid source_mode was accepted')
+
 
 def test_start_rejects_when_action_servers_are_absent():
     harness = _Harness(MissionState.READY)
@@ -226,3 +253,77 @@ def test_cancel_stops_both_active_children():
     assert harness._stop_detector.stopped
     assert harness.nav_cancels == 1
     assert harness.spray_cancels == 1
+
+
+def test_last_target_can_require_return_home_navigation():
+    harness = _Harness(MissionState.ARM_SPRAYING)
+    harness._return_home_after_finish = True
+    harness._send_nav_goal = lambda: setattr(harness, 'nav_sent', True)
+    result = SimpleNamespace(success=True, error_code=0, message='HOME')
+
+    MissionManager._spray_result(
+        harness,
+        _Future(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED, result=result)),
+    )
+
+    assert harness.core.state == MissionState.RETURNING_HOME
+    assert harness.nav_sent
+
+
+def test_return_home_nav_success_completes_mission():
+    harness = _Harness(MissionState.RETURNING_HOME)
+
+    MissionManager._nav_result(
+        harness,
+        _Future(SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED)),
+    )
+
+    assert harness.core.state == MissionState.MISSION_COMPLETED
+
+
+def test_manual_return_home_nav_success_cancels_remaining_mission():
+    harness = _Harness(MissionState.RETURNING_HOME)
+    harness._manual_return_home = True
+
+    MissionManager._nav_result(
+        harness,
+        _Future(SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED)),
+    )
+
+    assert harness.core.state == MissionState.CANCELED
+
+
+def test_skip_requires_paused_navigation_to_settle():
+    harness = _Harness(MissionState.PAUSED)
+    harness._reply = MissionManager._reply
+    response = SimpleNamespace(success=None, message='')
+
+    MissionManager._skip_current(harness, None, response)
+    assert not response.success
+    assert harness.core.skipped_targets == 0
+
+    harness._nav_handle = None
+    harness._nav_pending = False
+    MissionManager._skip_current(harness, None, response)
+    assert response.success
+    assert harness.core.skipped_targets == 1
+    assert harness.core.state == MissionState.MISSION_COMPLETED
+
+
+def test_manual_return_home_is_started_only_from_safe_settled_state():
+    harness = _Harness(MissionState.READY)
+    harness._reply = MissionManager._reply
+    harness._nav_handle = None
+    harness._spray_handle = None
+    harness._nav_pending = False
+    harness._spray_pending = False
+    harness._send_nav_goal = lambda: setattr(harness, 'nav_sent', True)
+    response = SimpleNamespace(success=None, message='')
+
+    MissionManager._return_home(harness, None, response)
+
+    assert response.success
+    assert harness._manual_return_home
+    assert harness.core.state == MissionState.RETURNING_HOME
+    assert harness.nav_sent

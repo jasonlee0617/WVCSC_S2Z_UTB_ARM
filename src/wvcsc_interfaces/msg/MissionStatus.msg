@@ -9,6 +9,7 @@ uint8 PAUSED=7
 uint8 MISSION_COMPLETED=8
 uint8 CANCELED=9
 uint8 FAILED=10
+uint8 RETURNING_HOME=11
 
 std_msgs/Header header
 string mission_id
@@ -18,6 +19,8 @@ string current_tree_id
 uint32 current_index
 uint32 total_targets
 uint32 completed_targets
+uint32 skipped_targets
+wvcsc_interfaces/MissionTargetStatus[] target_statuses
 string last_error
 bool nav_goal_active
 bool arm_goal_active

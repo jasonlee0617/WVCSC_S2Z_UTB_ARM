@@ -9,8 +9,14 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DiseaseTree.msg"
   "msg/DiseaseTreeArray.msg"
+  "msg/MissionTargetPlan.msg"
+  "msg/MissionTargetStatus.msg"
+  "msg/MissionPlan.msg"
   "msg/MissionStatus.msg"
+  "msg/Target2D.msg"
+  "action/AlignTarget.action"
   "action/ExecuteSpray.action"
+  "action/Spray.action"
   DEPENDENCIES geometry_msgs std_msgs
 )
 

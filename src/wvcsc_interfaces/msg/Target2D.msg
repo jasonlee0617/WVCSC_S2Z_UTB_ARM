@@ -1,0 +1,11 @@
+std_msgs/Header header
+string mission_id
+string tree_id
+bool valid
+float32 confidence
+float32 center_u
+float32 center_v
+float32 width
+float32 height
+uint32 image_width
+uint32 image_height

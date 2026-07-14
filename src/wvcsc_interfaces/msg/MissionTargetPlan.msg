@@ -1,0 +1,2 @@
+wvcsc_interfaces/DiseaseTree target
+geometry_msgs/Pose docking_pose

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WVCSC 空地协同任务台</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #0b1220; color: #e5edf8; }
+    header { padding: 18px 24px; background: #111c31; display: flex; justify-content: space-between; }
+    main { padding: 20px; display: grid; gap: 16px; grid-template-columns: 1fr 2fr; }
+    section { background: #121d30; border: 1px solid #263957; border-radius: 10px; padding: 16px; }
+    h1, h2 { margin: 0 0 12px; } h1 { font-size: 20px; } h2 { font-size: 16px; }
+    .value { font-size: 28px; font-weight: 700; color: #5eead4; }
+    .error { color: #fca5a5; white-space: pre-wrap; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+    button { border: 0; border-radius: 6px; padding: 10px 14px; background: #2563eb; color: white; cursor: pointer; }
+    button.danger { background: #b91c1c; } button:disabled { opacity: .45; cursor: wait; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px; border-bottom: 1px solid #263957; text-align: left; }
+    .muted { color: #94a3b8; } .ok { color: #86efac; } .bad { color: #fca5a5; }
+    #events { max-height: 180px; overflow: auto; font-family: monospace; font-size: 12px; }
+    #mission-map { width: 100%; min-height: 280px; background: #0b1220; border-radius: 8px; }
+    .legend { display: flex; gap: 16px; font-size: 12px; margin-top: 8px; }
+    @media (max-width: 850px) { main { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header><h1>WVCSC 空地协同任务台</h1><span id="connection" class="bad">ROS 未连接</span></header>
+  <main>
+    <section>
+      <h2>任务状态</h2>
+      <div id="state" class="value">UNKNOWN</div>
+      <p>任务：<span id="mission-id">-</span></p>
+      <p>数据源：<span id="source-mode">-</span></p>
+      <p>当前目标：<span id="current-tree">-</span></p>
+      <p>进度：<span id="progress">0 / 0</span></p>
+      <p id="last-error" class="error"></p>
+      <div class="controls">
+        <button data-command="start">开始</button>
+        <button data-command="pause">暂停</button>
+        <button data-command="resume">恢复</button>
+        <button data-command="skip_current">跳过当前</button>
+        <button data-command="return_home">返回待命</button>
+        <button data-command="cancel" class="danger">取消</button>
+        <button data-command="reset">复位任务</button>
+      </div>
+    </section>
+    <section>
+      <h2>病树任务列表</h2>
+      <table><thead><tr><th>ID</th><th>坐标</th><th>侧别</th><th>置信度</th><th>喷洒(s)</th><th>状态</th><th>原因</th></tr></thead><tbody id="targets"></tbody></table>
+    </section>
+    <section style="grid-column:1/-1">
+      <h2>任务地图（病树 / 停靠点 / HOME）</h2>
+      <svg id="mission-map" viewBox="0 0 800 300" role="img" aria-label="任务目标与停靠位姿"></svg>
+      <div class="legend"><span>🔴 病树</span><span>🔵 停靠点</span><span>🟡 HOME</span></div>
+    </section>
+    <section style="grid-column:1/-1">
+      <h2>操作记录</h2><div id="events" class="muted"></div>
+    </section>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const escapeHtml = value => String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+    let lastStateKey = '';
+    function log(text) {
+      const row = document.createElement('div');
+      row.textContent = `${new Date().toLocaleTimeString()} ${text}`;
+      $('events').prepend(row);
+    }
+    function render(data) {
+      $('connection').textContent = data.connected ? 'ROS 已连接' : 'ROS 未连接';
+      $('connection').className = data.connected ? 'ok' : 'bad';
+      const status = data.status || {};
+      $('state').textContent = status.state_text || 'UNKNOWN';
+      $('mission-id').textContent = status.mission_id || '-';
+      $('source-mode').textContent = data.mission?.source_mode || '-';
+      $('current-tree').textContent = status.current_tree_id || '-';
+      $('progress').textContent = `${status.completed_targets || 0} / ${status.total_targets || 0}`;
+      $('last-error').textContent = status.last_error || '';
+      const trees = data.mission?.trees || [];
+      const completed = status.completed_targets || 0;
+      const skipped = status.skipped_targets || 0;
+      const targetStatuses = Object.fromEntries((status.target_statuses || []).map(item => [item.tree_id, item]));
+      $('targets').innerHTML = trees.map(t => {
+        const labels = {PENDING: '待执行', CURRENT: status.state_text || '当前', COMPLETED: '已完成', SKIPPED: '已跳过', FAILED: '失败'};
+        const targetStatus = targetStatuses[t.tree_id] || {};
+        const targetState = labels[targetStatus.state_text] || '待执行';
+        return `<tr><td>${escapeHtml(t.tree_id)}</td><td>${t.position.x.toFixed(2)}, ${t.position.y.toFixed(2)}</td><td>${escapeHtml(t.spray_side)}</td><td>${(t.confidence * 100).toFixed(0)}%</td><td>${t.spray_duration.toFixed(1)}</td><td>${escapeHtml(targetState)}</td><td>${escapeHtml(targetStatus.message || '')}</td></tr>`;
+      }).join('');
+      $('progress').textContent = `${completed} 完成 / ${skipped} 跳过 / ${status.total_targets || 0} 总数`;
+      renderMap(data.plan);
+      const stateKey = `${status.mission_id || ''}|${status.state_text || ''}|${status.current_tree_id || ''}|${status.last_error || ''}`;
+      if (stateKey !== lastStateKey) {
+        lastStateKey = stateKey;
+        log(`状态更新：${status.state_text || '等待 ROS'}`);
+      }
+    }
+    function renderMap(plan) {
+      const svg = $('mission-map');
+      const targets = plan?.targets || [];
+      if (!targets.length) { svg.innerHTML = '<text x="20" y="35" fill="#94a3b8">等待任务规划</text>'; return; }
+      const points = targets.flatMap(t => [t.tree_position, t.docking_pose.position]);
+      points.push(plan.home_pose.position);
+      const xs = points.map(p => p.x), ys = points.map(p => p.y);
+      const minX = Math.min(...xs) - 1, maxX = Math.max(...xs) + 1;
+      const minY = Math.min(...ys) - 1, maxY = Math.max(...ys) + 1;
+      const sx = x => 40 + (x - minX) * 720 / Math.max(1, maxX - minX);
+      const sy = y => 260 - (y - minY) * 220 / Math.max(1, maxY - minY);
+      const roadY = sy(0);
+      const lines = targets.map(t => `<line x1="${sx(t.tree_position.x)}" y1="${sy(t.tree_position.y)}" x2="${sx(t.docking_pose.position.x)}" y2="${sy(t.docking_pose.position.y)}" stroke="#64748b" stroke-dasharray="5 5"/>`).join('');
+      const marks = targets.map(t => `<g><circle cx="${sx(t.tree_position.x)}" cy="${sy(t.tree_position.y)}" r="7" fill="#ef4444"/><circle cx="${sx(t.docking_pose.position.x)}" cy="${sy(t.docking_pose.position.y)}" r="6" fill="#3b82f6"/><text x="${sx(t.tree_position.x) + 10}" y="${sy(t.tree_position.y) - 8}" fill="#e5edf8" font-size="12">${escapeHtml(t.tree_id)}</text></g>`).join('');
+      const home = plan.home_pose.position;
+      svg.innerHTML = `<line x1="30" y1="${roadY}" x2="770" y2="${roadY}" stroke="#475569" stroke-width="10" opacity=".45"/>${lines}${marks}<circle cx="${sx(home.x)}" cy="${sy(home.y)}" r="8" fill="#facc15"/><text x="${sx(home.x) + 11}" y="${sy(home.y) + 4}" fill="#fef08a" font-size="12">HOME</text>`;
+    }
+    function connect() {
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      const socket = new WebSocket(`${scheme}://${location.host}/ws/status`);
+      socket.onmessage = event => render(JSON.parse(event.data));
+      socket.onclose = () => { $('connection').textContent = '连接中断'; $('connection').className = 'bad'; setTimeout(connect, 1000); };
+    }
+    document.querySelectorAll('button[data-command]').forEach(button => {
+      button.onclick = async () => {
+        button.disabled = true;
+        const command = button.dataset.command;
+        try {
+          const response = await fetch(`/api/mission/${command}`, {method: 'POST'});
+          const body = await response.json();
+          log(response.ok ? `${command}: ${body.message}` : `${command} 失败: ${body.detail}`);
+        } catch (error) { log(`${command} 请求异常: ${error}`); }
+        finally { button.disabled = false; }
+      };
+    });
+    connect();
+  </script>
+</body>
+</html>

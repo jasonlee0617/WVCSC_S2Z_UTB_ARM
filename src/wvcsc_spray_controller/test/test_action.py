@@ -1,0 +1,102 @@
+import os
+import time
+
+os.environ['ROS_DOMAIN_ID'] = '84'
+os.environ.setdefault('ROS_LOG_DIR', '/tmp/wvcsc_spray_test_logs')
+
+from action_msgs.msg import GoalStatus
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.context import Context
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool
+from wvcsc_interfaces.action import Spray
+
+from wvcsc_spray_controller.spray_simulator import SpraySimulator
+
+
+def _spin_until(executor, predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        executor.spin_once(timeout_sec=0.02)
+        if predicate():
+            return True
+    return False
+
+
+def _goal(duration):
+    goal = Spray.Goal()
+    goal.mission_id = 'test_mission'
+    goal.tree_id = 'tree_01'
+    goal.duration = duration
+    goal.mode = 'continuous'
+    return goal
+
+
+def test_success_and_cancel_always_close_simulated_actuator():
+    context = Context()
+    rclpy.init(context=context)
+    server = SpraySimulator(context=context)
+    client_node = Node('spray_action_test_client', context=context)
+    client = ActionClient(client_node, Spray, '/spray/execute')
+    active_samples = []
+    qos = QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+    client_node.create_subscription(
+        Bool, '/spray/simulated_active',
+        lambda message: active_samples.append(message.data), qos)
+    emergency_stop = client_node.create_publisher(
+        Bool, '/safety/emergency_stop', qos)
+    executor = MultiThreadedExecutor(num_threads=3, context=context)
+    executor.add_node(server)
+    executor.add_node(client_node)
+    try:
+        assert _spin_until(executor, client.server_is_ready)
+        send = client.send_goal_async(_goal(0.2))
+        assert _spin_until(executor, send.done)
+        result_future = send.result().get_result_async()
+        assert _spin_until(executor, result_future.done)
+        assert result_future.result().status == GoalStatus.STATUS_SUCCEEDED
+        assert result_future.result().result.success
+        assert True in active_samples and active_samples[-1] is False
+
+        send = client.send_goal_async(_goal(1.0))
+        assert _spin_until(executor, send.done)
+        handle = send.result()
+        assert handle.accepted
+        assert _spin_until(
+            executor, lambda: bool(active_samples) and active_samples[-1] is True)
+        cancel = handle.cancel_goal_async()
+        assert _spin_until(executor, cancel.done)
+        result_future = handle.get_result_async()
+        assert _spin_until(executor, result_future.done)
+        assert result_future.result().status == GoalStatus.STATUS_CANCELED
+        assert active_samples[-1] is False
+
+        send = client.send_goal_async(_goal(1.0))
+        assert _spin_until(executor, send.done)
+        handle = send.result()
+        assert handle.accepted
+        assert _spin_until(
+            executor, lambda: bool(active_samples) and active_samples[-1] is True)
+        emergency_stop.publish(Bool(data=True))
+        result_future = handle.get_result_async()
+        assert _spin_until(executor, result_future.done)
+        wrapped = result_future.result()
+        assert wrapped.status == GoalStatus.STATUS_ABORTED
+        assert wrapped.result.error_code == Spray.Result.EMERGENCY_STOPPED
+        assert active_samples[-1] is False
+    finally:
+        server.force_off()
+        client.destroy()
+        server._server.destroy()
+        for node in (client_node, server):
+            executor.remove_node(node)
+            node.destroy_node()
+        executor.shutdown(timeout_sec=1.0)
+        context.try_shutdown()

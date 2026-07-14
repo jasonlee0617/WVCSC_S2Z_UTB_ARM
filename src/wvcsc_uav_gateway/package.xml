@@ -2,7 +2,7 @@
 <package format="3">
   <name>wvcsc_uav_gateway</name>
   <version>0.1.0</version>
-  <description>Mock UAV disease-tree mission publisher.</description>
+  <description>Mock and replay UAV disease-tree mission gateway.</description>
   <maintainer email="robot@example.com">robot</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>

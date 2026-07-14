@@ -1,6 +1,9 @@
 import os
 import time
 
+os.environ['ROS_DOMAIN_ID'] = '81'
+os.environ.setdefault('ROS_LOG_DIR', '/tmp/wvcsc_uav_test_logs')
+
 import rclpy
 from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
@@ -10,9 +13,6 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from wvcsc_interfaces.msg import DiseaseTreeArray
 
 from wvcsc_uav_gateway.mock_uav_gateway import MockUavGateway
-
-
-os.environ.setdefault('ROS_LOG_DIR', '/tmp/wvcsc_uav_test_logs')
 
 
 def _spin_until(executor, predicate, timeout=3.0):

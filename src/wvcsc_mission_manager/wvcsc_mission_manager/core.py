@@ -15,6 +15,7 @@ class MissionState(IntEnum):
     MISSION_COMPLETED = 8
     CANCELED = 9
     FAILED = 10
+    RETURNING_HOME = 11
 
 
 @dataclass(frozen=True)
@@ -30,11 +31,16 @@ class Target:
 
 
 class MissionCore:
+    PENDING = 'PENDING'
+    COMPLETED = 'COMPLETED'
+    SKIPPED = 'SKIPPED'
+    FAILED = 'FAILED'
     ACTIVE = {
         MissionState.NAVIGATING,
         MissionState.VERIFYING_STOP,
         MissionState.ARM_SPRAYING,
         MissionState.PAUSED,
+        MissionState.RETURNING_HOME,
     }
     TERMINAL = {
         MissionState.MISSION_COMPLETED,
@@ -48,6 +54,8 @@ class MissionCore:
         self.targets = ()
         self.current_index = 0
         self.completed_targets = 0
+        self.skipped_targets = 0
+        self.target_outcomes = []
         self.last_error = ''
 
     @property
@@ -67,6 +75,8 @@ class MissionCore:
         self.targets = tuple(targets)
         self.current_index = 0
         self.completed_targets = 0
+        self.skipped_targets = 0
+        self.target_outcomes = [self.PENDING] * len(self.targets)
         self.last_error = ''
         self.state = MissionState.READY
         return 'accepted'
@@ -80,17 +90,57 @@ class MissionCore:
     def stop_verified(self):
         return self._transition(MissionState.VERIFYING_STOP, MissionState.ARM_SPRAYING)
 
-    def arm_succeeded(self):
+    def arm_succeeded(self, return_home=False):
         if self.state != MissionState.ARM_SPRAYING:
             return False
+        self.target_outcomes[self.current_index] = self.COMPLETED
         self.completed_targets += 1
         self.current_index += 1
         self.state = (
             MissionState.NAVIGATING
             if self.current_index < len(self.targets)
-            else MissionState.MISSION_COMPLETED
+            else (
+                MissionState.RETURNING_HOME
+                if return_home else MissionState.MISSION_COMPLETED
+            )
         )
         return True
+
+    def skip_current(self, return_home=False):
+        if self.state not in {
+                MissionState.READY,
+                MissionState.PAUSED,
+                MissionState.VERIFYING_STOP}:
+            return False
+        previous_state = self.state
+        self.target_outcomes[self.current_index] = self.SKIPPED
+        self.current_index += 1
+        self.skipped_targets += 1
+        if self.current_index >= len(self.targets):
+            self.state = (
+                MissionState.RETURNING_HOME
+                if return_home else MissionState.MISSION_COMPLETED
+            )
+        elif previous_state == MissionState.VERIFYING_STOP:
+            self.state = MissionState.NAVIGATING
+        else:
+            self.state = previous_state
+        return True
+
+    def return_home(self):
+        if self.state not in {
+                MissionState.READY,
+                MissionState.PAUSED,
+                MissionState.VERIFYING_STOP}:
+            return False
+        self.state = MissionState.RETURNING_HOME
+        return True
+
+    def home_succeeded(self, canceled=False):
+        target = (
+            MissionState.CANCELED if canceled
+            else MissionState.MISSION_COMPLETED)
+        return self._transition(MissionState.RETURNING_HOME, target)
 
     def pause(self):
         return self._transition(MissionState.NAVIGATING, MissionState.PAUSED)
@@ -107,7 +157,12 @@ class MissionCore:
     def fail(self, message):
         if self.state in self.TERMINAL:
             return False
+        previous_state = self.state
         self.last_error = str(message)
+        if (previous_state != MissionState.RETURNING_HOME and
+                self.current_index < len(self.target_outcomes) and
+                self.target_outcomes[self.current_index] == self.PENDING):
+            self.target_outcomes[self.current_index] = self.FAILED
         self.state = MissionState.FAILED
         return True
 

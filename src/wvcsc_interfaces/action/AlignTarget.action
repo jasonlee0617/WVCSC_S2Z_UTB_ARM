@@ -1,0 +1,25 @@
+# Goal
+string mission_id
+string tree_id
+float32 timeout
+---
+# Result
+uint16 OK=0
+uint16 INVALID_GOAL=1
+uint16 BUSY=2
+uint16 TIMEOUT=3
+uint16 TARGET_STALE=4
+uint16 CANCELED=5
+bool success
+uint16 error_code
+string message
+float32 final_error_u
+float32 final_error_v
+---
+# Feedback
+uint8 ACQUIRING=0
+uint8 ALIGNED=1
+uint8 phase
+float32 error_u
+float32 error_v
+uint32 stable_frames

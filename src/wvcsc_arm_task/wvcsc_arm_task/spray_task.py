@@ -5,12 +5,18 @@ import threading
 import time
 
 import rclpy
-from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from action_msgs.msg import GoalStatus
+from rclpy.action import (
+    ActionClient,
+    ActionServer,
+    CancelResponse,
+    GoalResponse,
+)
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
-from wvcsc_interfaces.action import ExecuteSpray
+from wvcsc_interfaces.action import AlignTarget, ExecuteSpray, Spray
 
 from .motion_control import normalize_command
 from .motion_state import MotionControlState
@@ -26,8 +32,30 @@ class SprayTask(Node):
         self._observe_right = self._joint_parameter('observe_right_pose')
         self._min_duration = float(self.get_parameter('min_spray_duration').value)
         self._max_duration = float(self.get_parameter('max_spray_duration').value)
+        self._use_vision_alignment = bool(
+            self.get_parameter('use_vision_alignment').value)
+        self._use_spray_action = bool(
+            self.get_parameter('use_spray_action').value)
+        self._vision_timeout = float(
+            self.get_parameter('vision_timeout_sec').value)
+        self._downstream_server_timeout = float(
+            self.get_parameter('downstream_server_timeout_sec').value)
+        self._downstream_margin = float(
+            self.get_parameter('downstream_result_margin_sec').value)
         self.state = MotionControlState()
         self.arm, self._callback_group = create_alicia_moveit(self, self.state)
+        self._vision_client = ActionClient(
+            self,
+            AlignTarget,
+            str(self.get_parameter('vision_action_name').value),
+            callback_group=self._callback_group,
+        )
+        self._spray_client = ActionClient(
+            self,
+            Spray,
+            str(self.get_parameter('spray_action_name').value),
+            callback_group=self._callback_group,
+        )
         self._action_server = ActionServer(
             self,
             ExecuteSpray,
@@ -63,6 +91,13 @@ class SprayTask(Node):
             'legacy_spray_duration': 2.0,
             'min_spray_duration': 0.2,
             'max_spray_duration': 10.0,
+            'use_vision_alignment': False,
+            'vision_action_name': '/vision/align_target',
+            'vision_timeout_sec': 5.0,
+            'use_spray_action': False,
+            'spray_action_name': '/spray/execute',
+            'downstream_server_timeout_sec': 2.0,
+            'downstream_result_margin_sec': 2.0,
         }
         for name, default in parameters.items():
             self.declare_parameter(name, default)
@@ -112,6 +147,8 @@ class SprayTask(Node):
                 cancel_requested=lambda: goal_handle.is_cancel_requested,
                 feedback=lambda phase, progress, text: self._feedback(
                     goal_handle, phase, progress, text),
+                mission_id=request.mission_id,
+                tree_id=request.tree_id,
             )
             result.success = code == ExecuteSpray.Result.OK
             result.error_code = code
@@ -133,7 +170,9 @@ class SprayTask(Node):
         finally:
             self._release()
 
-    def _run_sequence(self, side, duration, cancel_requested, feedback):
+    def _run_sequence(
+            self, side, duration, cancel_requested, feedback,
+            mission_id='legacy', tree_id='legacy'):
         observe = self._observe_right if side == 'right' else self._observe_left
         feedback(ExecuteSpray.Feedback.MOVING_TO_OBSERVE, 0.1, 'MOVING_TO_OBSERVE')
         if not self._move(observe):
@@ -143,12 +182,43 @@ class SprayTask(Node):
                 return ExecuteSpray.Result.HOME_FAILED, 'observe and HOME motion failed'
             return ExecuteSpray.Result.OBSERVE_FAILED, 'observation motion failed'
 
+        if self._use_vision_alignment:
+            feedback(ExecuteSpray.Feedback.ALIGNING, 0.35, 'ALIGNING')
+            ok, canceled, message = self._align_target(
+                mission_id, tree_id, cancel_requested)
+            if not ok:
+                if canceled:
+                    return ExecuteSpray.Result.CANCELED, message
+                feedback(
+                    ExecuteSpray.Feedback.RETURNING_HOME,
+                    0.8,
+                    'RETURNING_HOME',
+                )
+                if not self._move(self._home):
+                    return ExecuteSpray.Result.HOME_FAILED, (
+                        f'{message}; HOME motion failed')
+                return ExecuteSpray.Result.VISION_FAILED, message
+
         feedback(ExecuteSpray.Feedback.SPRAYING, 0.5, 'SPRAYING')
-        deadline = time.monotonic() + duration
-        while time.monotonic() < deadline:
-            if self._aborted(cancel_requested):
+        if self._use_spray_action:
+            ok, canceled, message = self._spray_target(
+                mission_id, tree_id, duration, cancel_requested)
+            if not ok:
+                if canceled:
+                    return ExecuteSpray.Result.CANCELED, message
+                feedback(
+                    ExecuteSpray.Feedback.RETURNING_HOME,
+                    0.8,
+                    'RETURNING_HOME',
+                )
+                if not self._move(self._home):
+                    return ExecuteSpray.Result.HOME_FAILED, (
+                        f'{message}; HOME motion failed')
+                return ExecuteSpray.Result.SPRAY_FAILED, message
+        else:
+            canceled = not self._run_timer_spray(duration, cancel_requested)
+            if canceled:
                 return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
-            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
         if self._aborted(cancel_requested):
             return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
@@ -159,6 +229,126 @@ class SprayTask(Node):
             return ExecuteSpray.Result.HOME_FAILED, 'HOME motion failed'
         feedback(ExecuteSpray.Feedback.COMPLETED, 1.0, 'COMPLETED')
         return ExecuteSpray.Result.OK, 'spray sequence completed at HOME'
+
+    def _run_timer_spray(self, duration, cancel_requested):
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            if self._aborted(cancel_requested):
+                return False
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        return not self._aborted(cancel_requested)
+
+    def _align_target(self, mission_id, tree_id, cancel_requested):
+        goal = AlignTarget.Goal()
+        goal.mission_id = mission_id
+        goal.tree_id = tree_id
+        goal.timeout = self._vision_timeout
+        wrapped, canceled, error = self._run_downstream_action(
+            self._vision_client,
+            goal,
+            self._vision_timeout + self._downstream_margin,
+            cancel_requested,
+            'vision alignment',
+        )
+        if wrapped is None:
+            return False, canceled, error
+        result = wrapped.result
+        ok = wrapped.status == GoalStatus.STATUS_SUCCEEDED and result.success
+        return ok, False, result.message or f'vision status={wrapped.status}'
+
+    def _spray_target(
+            self, mission_id, tree_id, duration, cancel_requested):
+        goal = Spray.Goal()
+        goal.mission_id = mission_id
+        goal.tree_id = tree_id
+        goal.duration = duration
+        goal.mode = 'continuous'
+        wrapped, canceled, error = self._run_downstream_action(
+            self._spray_client,
+            goal,
+            duration + self._downstream_margin,
+            cancel_requested,
+            'spray actuator',
+        )
+        if wrapped is None:
+            return False, canceled, error
+        result = wrapped.result
+        ok = wrapped.status == GoalStatus.STATUS_SUCCEEDED and result.success
+        return ok, False, result.message or f'spray status={wrapped.status}'
+
+    def _run_downstream_action(
+            self, client, goal, result_timeout, cancel_requested, label):
+        deadline = time.monotonic() + self._downstream_server_timeout
+        while not client.server_is_ready():
+            if self._aborted(cancel_requested):
+                return None, True, f'{label} canceled'
+            if time.monotonic() >= deadline:
+                return None, False, f'{label} server is unavailable'
+            time.sleep(0.02)
+
+        response_future = client.send_goal_async(goal)
+        response, canceled = self._wait_future(
+            response_future,
+            self._downstream_server_timeout,
+            cancel_requested,
+        )
+        if response is None:
+            if canceled:
+                response_future.add_done_callback(self._cancel_late_goal)
+            return None, canceled, f'{label} goal response timed out or canceled'
+        if not response.accepted:
+            return None, False, f'{label} goal was rejected'
+
+        result_future = response.get_result_async()
+        wrapped, canceled = self._wait_future(
+            result_future,
+            result_timeout,
+            cancel_requested,
+            cancel_handle=response,
+        )
+        if wrapped is None:
+            return None, canceled, f'{label} result timed out or canceled'
+        return wrapped, False, ''
+
+    def _wait_future(
+            self, future, timeout, cancel_requested, cancel_handle=None):
+        deadline = time.monotonic() + timeout
+        while not future.done():
+            if self._aborted(cancel_requested):
+                if cancel_handle is not None:
+                    self._cancel_downstream_and_wait(cancel_handle, future)
+                return None, True
+            if time.monotonic() >= deadline:
+                if cancel_handle is not None:
+                    self._cancel_downstream_and_wait(cancel_handle, future)
+                return None, False
+            time.sleep(0.02)
+        try:
+            return future.result(), False
+        except Exception:
+            return None, False
+
+    def _cancel_downstream_and_wait(self, goal_handle, result_future):
+        """Bound cancellation so a parent result does not leave an active child."""
+        deadline = time.monotonic() + self._downstream_server_timeout
+        try:
+            cancel_future = goal_handle.cancel_goal_async()
+        except Exception:
+            return False
+        while not cancel_future.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        while not result_future.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return result_future.done()
+
+    @staticmethod
+    def _cancel_late_goal(future):
+        try:
+            handle = future.result()
+        except Exception:
+            return
+        if handle is not None and handle.accepted:
+            handle.cancel_goal_async()
 
     def _move(self, positions):
         return not self._abort.is_set() and self.arm.move_joints(positions)
@@ -194,7 +384,8 @@ class SprayTask(Node):
         try:
             code, message = self._run_sequence(
                 side, duration, cancel_requested=lambda: False,
-                feedback=lambda *_args: None)
+                feedback=lambda *_args: None,
+                mission_id='legacy', tree_id='legacy')
             log = (
                 self.get_logger().info
                 if code == ExecuteSpray.Result.OK

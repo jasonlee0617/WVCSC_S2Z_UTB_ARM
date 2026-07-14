@@ -7,3 +7,10 @@ wvcsc_spray_task:
     legacy_spray_duration: 2.0
     min_spray_duration: 0.2
     max_spray_duration: 10.0
+    use_vision_alignment: false
+    vision_action_name: /vision/align_target
+    vision_timeout_sec: 5.0
+    use_spray_action: false
+    spray_action_name: /spray/execute
+    downstream_server_timeout_sec: 2.0
+    downstream_result_margin_sec: 2.0

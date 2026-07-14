@@ -10,7 +10,13 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 from wvcsc_interfaces.action import ExecuteSpray
-from wvcsc_interfaces.msg import DiseaseTreeArray, MissionStatus
+from wvcsc_interfaces.msg import (
+    DiseaseTreeArray,
+    MissionPlan,
+    MissionStatus,
+    MissionTargetPlan,
+    MissionTargetStatus,
+)
 
 from .core import MissionCore, MissionState, StopDetector, Target, docking_pose
 
@@ -27,6 +33,15 @@ class MissionManager(Node):
         self._standoff = float(self.get_parameter('standoff_distance').value)
         self._nav_timeout = float(self.get_parameter('nav_goal_timeout_sec').value)
         self._spray_timeout = float(self.get_parameter('spray_goal_timeout_sec').value)
+        self._return_home_after_finish = bool(
+            self.get_parameter('return_home_after_finish').value)
+        self._home_pose = (
+            float(self.get_parameter('home_x').value),
+            float(self.get_parameter('home_y').value),
+            float(self.get_parameter('home_yaw').value),
+        )
+        if not all(math.isfinite(value) for value in self._home_pose):
+            raise ValueError('home pose must contain finite values')
         self._stop_detector = StopDetector(
             self.get_parameter('linear_stop_threshold').value,
             self.get_parameter('angular_stop_threshold').value,
@@ -42,6 +57,8 @@ class MissionManager(Node):
         )
         self._status_pub = self.create_publisher(
             MissionStatus, '/mission/status', latched)
+        self._plan_pub = self.create_publisher(
+            MissionPlan, '/mission/plan', latched)
         self.create_subscription(
             DiseaseTreeArray, '/uav/disease_trees', self._on_mission, latched)
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
@@ -55,15 +72,21 @@ class MissionManager(Node):
         self._nav_pending = False
         self._spray_pending = False
         self._phase_started = None
+        self._manual_return_home = False
 
         self.create_service(Trigger, '/mission/start', self._start)
         self.create_service(Trigger, '/mission/pause', self._pause)
         self.create_service(Trigger, '/mission/resume', self._resume)
+        self.create_service(
+            Trigger, '/mission/skip_current', self._skip_current)
+        self.create_service(
+            Trigger, '/mission/return_home', self._return_home)
         self.create_service(Trigger, '/mission/cancel', self._cancel)
         self.create_service(Trigger, '/mission/reset', self._reset)
         self.create_timer(0.1, self._tick)
         self.create_timer(0.5, self._publish_status)
         self._publish_status()
+        self._publish_plan()
 
     def _declare_parameters(self):
         parameters = {
@@ -76,6 +99,10 @@ class MissionManager(Node):
             'standoff_distance': 1.5,
             'nav_goal_timeout_sec': 120.0,
             'spray_goal_timeout_sec': 60.0,
+            'return_home_after_finish': False,
+            'home_x': 0.0,
+            'home_y': 0.0,
+            'home_yaw': 0.0,
             'linear_stop_threshold': 0.03,
             'angular_stop_threshold': 0.03,
             'stop_stable_duration_sec': 1.0,
@@ -101,9 +128,11 @@ class MissionManager(Node):
             self.get_logger().error(f'[MISSION] rejected task list: {error}')
             return
         if outcome == 'accepted':
+            self._manual_return_home = False
             self.get_logger().info(
                 f'[MISSION] accepted mission={self.core.mission_id} '
                 f'targets={len(self.core.targets)}')
+            self._publish_plan()
             self._publish_status()
         elif outcome == 'duplicate':
             self.get_logger().info(
@@ -115,6 +144,8 @@ class MissionManager(Node):
     def _validate_message(self, message):
         if message.header.frame_id != self._map_frame:
             raise ValueError(f'frame must be {self._map_frame}')
+        if message.source_mode not in ('mock', 'replay', 'live'):
+            raise ValueError('source_mode must be mock, replay or live')
         if not message.mission_id.strip() or not message.trees:
             raise ValueError('mission_id and targets are required')
         max_targets = int(self.get_parameter('max_targets').value)
@@ -187,12 +218,52 @@ class MissionManager(Node):
         self._publish_status()
         return self._reply(response, True, 'mission canceled')
 
+    def _skip_current(self, _request, response):
+        if self.core.state == MissionState.PAUSED and (
+                self._nav_handle is not None or self._nav_pending):
+            return self._reply(
+                response, False, 'wait for paused navigation goal to settle')
+        target = self.core.current_target
+        if target is None or not self.core.skip_current(
+                self._return_home_after_finish):
+            return self._reply(
+                response, False,
+                'skip is allowed only while READY, PAUSED, or verifying stop')
+        self._stop_detector.stop()
+        self.get_logger().info(f'[MISSION] skipped tree={target.tree_id}')
+        if self.core.state in (
+                MissionState.NAVIGATING, MissionState.RETURNING_HOME):
+            if not self._nav_client.server_is_ready():
+                self._fail('Nav2 Action server is not ready after skip')
+                return self._reply(response, False, self.core.last_error)
+            self._send_nav_goal()
+        else:
+            self._publish_status()
+        return self._reply(response, True, f'skipped {target.tree_id}')
+
+    def _return_home(self, _request, response):
+        if (self._nav_handle is not None or self._spray_handle is not None or
+                self._nav_pending or self._spray_pending):
+            return self._reply(response, False, 'active goal has not settled')
+        if not self._nav_client.server_is_ready():
+            return self._reply(response, False, 'Nav2 Action server is not ready')
+        if not self.core.return_home():
+            return self._reply(
+                response, False,
+                'return home is allowed only while READY, PAUSED, or verifying stop')
+        self._manual_return_home = True
+        self._stop_detector.stop()
+        self._send_nav_goal()
+        return self._reply(response, True, 'return home started')
+
     def _reset(self, _request, response):
         if (self._nav_handle is not None or self._spray_handle is not None or
                 self._nav_pending or self._spray_pending):
             return self._reply(response, False, 'active goal has not settled')
         if not self.core.reset():
             return self._reply(response, False, 'reset requires a terminal state')
+        self._manual_return_home = False
+        self._publish_plan()
         self._publish_status()
         return self._reply(response, True, 'mission reset')
 
@@ -206,41 +277,47 @@ class MissionManager(Node):
         return self._nav_client.server_is_ready() and self._spray_client.server_is_ready()
 
     def _send_nav_goal(self):
-        target = self.core.current_target
-        if target is None:
-            self._fail('no current navigation target')
-            return
-        x, y, yaw = docking_pose(
-            target, self._road_center_y, self._road_yaw, self._standoff)
+        if self.core.state == MissionState.RETURNING_HOME:
+            x, y, yaw = self._home_pose
+            target_label = 'HOME'
+        else:
+            target = self.core.current_target
+            if target is None:
+                self._fail('no current navigation target')
+                return
+            x, y, yaw = docking_pose(
+                target, self._road_center_y, self._road_yaw, self._standoff)
+            target_label = target.tree_id
         goal = NavigateToPose.Goal()
         goal.pose.header.stamp = self.get_clock().now().to_msg()
         goal.pose.header.frame_id = self._map_frame
-        goal.pose.pose.position.x = x
-        goal.pose.pose.position.y = y
-        goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
-        goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        self._set_pose(goal.pose.pose, x, y, yaw)
         self._nav_pending = True
         self._phase_started = self._now()
         future = self._nav_client.send_goal_async(goal)
         future.add_done_callback(self._nav_goal_response)
         self.get_logger().info(
-            f'[NAV] sent tree={target.tree_id} pose=({x:.2f},{y:.2f},{yaw:.2f})')
+            f'[NAV] sent target={target_label} pose=({x:.2f},{y:.2f},{yaw:.2f})')
         self._publish_status()
+
+    def _navigation_active(self):
+        return self.core.state in (
+            MissionState.NAVIGATING, MissionState.RETURNING_HOME)
 
     def _nav_goal_response(self, future):
         self._nav_pending = False
         try:
             handle = future.result()
         except Exception as error:
-            if self.core.state == MissionState.NAVIGATING:
+            if self._navigation_active():
                 self._fail(f'Nav2 goal send failed: {error}')
             return
         if handle is None or not handle.accepted:
-            if self.core.state == MissionState.NAVIGATING:
+            if self._navigation_active():
                 self._fail('Nav2 rejected the goal')
             return
         self._nav_handle = handle
-        if self.core.state != MissionState.NAVIGATING:
+        if not self._navigation_active():
             self._cancel_nav_goal()
         result_future = handle.get_result_async()
         result_future.add_done_callback(self._nav_result)
@@ -250,14 +327,20 @@ class MissionManager(Node):
         try:
             wrapped = future.result()
         except Exception as error:
-            if self.core.state == MissionState.NAVIGATING:
+            if self._navigation_active():
                 self._fail(f'Nav2 result failed: {error}')
             return
-        if self.core.state != MissionState.NAVIGATING:
+        if not self._navigation_active():
             self._publish_status()
             return
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
             self._fail(f'Nav2 failed with status {wrapped.status}')
+            return
+        if self.core.state == MissionState.RETURNING_HOME:
+            self.core.home_succeeded(canceled=self._manual_return_home)
+            self.get_logger().info(
+                f'[NAV] HOME reached; state={self.core.state.name}')
+            self._publish_status()
             return
         self.core.nav_succeeded()
         self._phase_started = self._now()
@@ -326,11 +409,14 @@ class MissionManager(Node):
                 f'{result.message}')
             return
         finished = self.core.current_target.tree_id
-        self.core.arm_succeeded()
+        self._manual_return_home = False
+        self.core.arm_succeeded(self._return_home_after_finish)
         self.get_logger().info(
             f'[MISSION] completed tree={finished} '
             f'count={self.core.completed_targets}/{len(self.core.targets)}')
         if self.core.state == MissionState.NAVIGATING:
+            self._send_nav_goal()
+        elif self.core.state == MissionState.RETURNING_HOME:
             self._send_nav_goal()
         else:
             self._publish_status()
@@ -341,7 +427,7 @@ class MissionManager(Node):
             self._send_nav_goal()
             return
         now = self._now()
-        if self.core.state == MissionState.NAVIGATING and self._phase_started is not None:
+        if self._navigation_active() and self._phase_started is not None:
             if now - self._phase_started >= self._nav_timeout:
                 self._fail('Nav2 goal timed out')
         elif self.core.state == MissionState.VERIFYING_STOP:
@@ -386,10 +472,63 @@ class MissionManager(Node):
         message.current_index = self.core.current_index
         message.total_targets = len(self.core.targets)
         message.completed_targets = self.core.completed_targets
+        message.skipped_targets = self.core.skipped_targets
+        for index, target_item in enumerate(self.core.targets):
+            target_status = MissionTargetStatus()
+            target_status.tree_id = target_item.tree_id
+            outcome = self.core.target_outcomes[index]
+            if outcome == MissionCore.COMPLETED:
+                target_status.state = MissionTargetStatus.COMPLETED
+            elif outcome == MissionCore.SKIPPED:
+                target_status.state = MissionTargetStatus.SKIPPED
+            elif outcome == MissionCore.FAILED:
+                target_status.state = MissionTargetStatus.FAILED
+                target_status.message = self.core.last_error
+            elif index == self.core.current_index:
+                target_status.state = MissionTargetStatus.CURRENT
+            else:
+                target_status.state = MissionTargetStatus.PENDING
+            target_status.state_text = (
+                'CURRENT' if target_status.state == MissionTargetStatus.CURRENT
+                else outcome)
+            message.target_statuses.append(target_status)
         message.last_error = self.core.last_error
         message.nav_goal_active = self._nav_pending or self._nav_handle is not None
         message.arm_goal_active = self._spray_pending or self._spray_handle is not None
         self._status_pub.publish(message)
+
+    @staticmethod
+    def _set_pose(pose, x, y, yaw):
+        pose.position.x = x
+        pose.position.y = y
+        pose.orientation.z = math.sin(yaw / 2.0)
+        pose.orientation.w = math.cos(yaw / 2.0)
+
+    def _publish_plan(self):
+        message = MissionPlan()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = self._map_frame
+        message.mission_id = self.core.mission_id
+        message.return_home_after_finish = self._return_home_after_finish
+        self._set_pose(message.home_pose, *self._home_pose)
+        for target in self.core.targets:
+            item = MissionTargetPlan()
+            item.target.tree_id = target.tree_id
+            item.target.confidence = target.confidence
+            item.target.position.x = target.x
+            item.target.position.y = target.y
+            item.target.position.z = target.z
+            item.target.spray_side = target.spray_side
+            item.target.spray_duration = target.spray_duration
+            item.target.evidence_uri = target.evidence_uri
+            self._set_pose(
+                item.docking_pose,
+                *docking_pose(
+                    target, self._road_center_y, self._road_yaw,
+                    self._standoff),
+            )
+            message.targets.append(item)
+        self._plan_pub.publish(message)
 
 
 def main():

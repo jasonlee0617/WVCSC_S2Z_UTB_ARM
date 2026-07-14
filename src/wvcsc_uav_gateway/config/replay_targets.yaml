@@ -1,0 +1,23 @@
+replay:
+  playback_rate: 1.0
+  loop: false
+  loop_delay_sec: 1.0
+  events:
+    - at_sec: 0.5
+      mission:
+        mission_id: replay_demo_001
+        frame_id: map
+        source_mode: replay
+        trees:
+          - tree_id: tree_01
+            confidence: 0.96
+            position: {x: 3.0, y: 2.0, z: 0.0}
+            spray_side: left
+            spray_duration: 2.0
+            evidence_uri: file:///data/replay/tree_01.jpg
+          - tree_id: tree_02
+            confidence: 0.94
+            position: {x: 5.0, y: -2.0, z: 0.0}
+            spray_side: right
+            spray_duration: 2.0
+            evidence_uri: file:///data/replay/tree_02.jpg

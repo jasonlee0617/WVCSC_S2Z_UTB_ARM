@@ -9,6 +9,10 @@ mission_manager:
     standoff_distance: 1.5
     nav_goal_timeout_sec: 120.0
     spray_goal_timeout_sec: 60.0
+    return_home_after_finish: false
+    home_x: 0.0
+    home_y: 0.0
+    home_yaw: 0.0
     linear_stop_threshold: 0.03
     angular_stop_threshold: 0.03
     stop_stable_duration_sec: 1.0

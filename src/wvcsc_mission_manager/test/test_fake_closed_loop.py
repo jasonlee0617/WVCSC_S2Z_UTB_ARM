@@ -2,6 +2,9 @@ import math
 import os
 import time
 
+os.environ['ROS_DOMAIN_ID'] = '82'
+os.environ.setdefault('ROS_LOG_DIR', '/tmp/wvcsc_mission_test_logs')
+
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 import rclpy
@@ -14,12 +17,14 @@ from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 from wvcsc_interfaces.action import ExecuteSpray
-from wvcsc_interfaces.msg import DiseaseTree, DiseaseTreeArray, MissionStatus
+from wvcsc_interfaces.msg import (
+    DiseaseTree,
+    DiseaseTreeArray,
+    MissionPlan,
+    MissionStatus,
+)
 
 from wvcsc_mission_manager.mission_manager import MissionManager
-
-
-os.environ.setdefault('ROS_LOG_DIR', '/tmp/wvcsc_mission_test_logs')
 
 
 class _FakeServers(Node):
@@ -73,12 +78,18 @@ class _Harness(Node):
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
         self.reset_client = self.create_client(Trigger, '/mission/reset')
         self.status = None
+        self.plan = None
         self.create_subscription(
             MissionStatus, '/mission/status', self._on_status, qos)
+        self.create_subscription(
+            MissionPlan, '/mission/plan', self._on_plan, qos)
         self.create_timer(0.05, self._publish_odom)
 
     def _on_status(self, message):
         self.status = message
+
+    def _on_plan(self, message):
+        self.plan = message
 
     def _publish_odom(self):
         message = Odometry()
@@ -166,6 +177,14 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
             ('tree_01', 'left'),
             ('tree_02', 'right'),
         ] * 3
+        assert harness.plan.mission_id == 'fake_closed_loop_2'
+        assert [item.target.tree_id for item in harness.plan.targets] == [
+            'tree_01', 'tree_02']
+        assert math.isclose(
+            harness.plan.targets[0].docking_pose.position.y,
+            0.5,
+            abs_tol=1e-6,
+        )
     finally:
         for _ in range(5):
             executor.spin_once(timeout_sec=0.02)
@@ -177,6 +196,59 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
         for node in (harness, manager, servers):
             executor.remove_node(node)
         for node in (harness, manager, servers):
+            node.destroy_node()
+        executor.shutdown(timeout_sec=1.0)
+        context.try_shutdown()
+
+
+def test_optional_return_home_adds_final_nav_goal():
+    context = Context()
+    rclpy.init(context=context)
+    servers = _FakeServers(context)
+    manager = MissionManager(
+        context=context,
+        parameter_overrides=[
+            Parameter('auto_start', value=True),
+            Parameter('return_home_after_finish', value=True),
+            Parameter('home_x', value=0.25),
+            Parameter('home_y', value=-0.1),
+            Parameter('home_yaw', value=0.0),
+            Parameter('stop_stable_duration_sec', value=0.1),
+            Parameter('odom_stale_timeout_sec', value=0.5),
+            Parameter('stop_verify_timeout_sec', value=2.0),
+            Parameter('nav_goal_timeout_sec', value=3.0),
+            Parameter('spray_goal_timeout_sec', value=3.0),
+        ],
+    )
+    harness = _Harness(context)
+    executor = SingleThreadedExecutor(context=context)
+    for node in (servers, manager, harness):
+        executor.add_node(node)
+
+    try:
+        assert _spin_until(executor, manager._servers_ready)
+        harness.publish_mission('return_home_loop')
+        assert _spin_until(
+            executor,
+            lambda: (
+                harness.status is not None
+                and harness.status.mission_id == 'return_home_loop'
+                and harness.status.state == MissionStatus.MISSION_COMPLETED
+            ),
+        )
+        assert servers.nav_goals == [
+            (3.0, 0.5), (5.0, -0.5), (0.25, -0.1)]
+        assert servers.spray_goals == [
+            ('tree_01', 'left'), ('tree_02', 'right')]
+    finally:
+        for _ in range(5):
+            executor.spin_once(timeout_sec=0.02)
+        manager._nav_client.destroy()
+        manager._spray_client.destroy()
+        servers.nav_server.destroy()
+        servers.spray_server.destroy()
+        for node in (harness, manager, servers):
+            executor.remove_node(node)
             node.destroy_node()
         executor.shutdown(timeout_sec=1.0)
         context.try_shutdown()

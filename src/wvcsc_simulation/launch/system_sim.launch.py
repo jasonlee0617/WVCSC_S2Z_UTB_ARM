@@ -31,14 +31,27 @@ def generate_launch_description():
     enable_arm_control = LaunchConfiguration('enable_arm_control')
     enable_ackermann = LaunchConfiguration('enable_ackermann')
     use_mock_uav = LaunchConfiguration('use_mock_uav')
+    use_replay_uav = LaunchConfiguration('use_replay_uav')
     use_mission_manager = LaunchConfiguration('use_mission_manager')
+    use_web_ui = LaunchConfiguration('use_web_ui')
+    use_spray_simulator = LaunchConfiguration('use_spray_simulator')
+    use_mock_vision = LaunchConfiguration('use_mock_vision')
+    use_vision_alignment = LaunchConfiguration('use_vision_alignment')
+    use_spray_action = LaunchConfiguration('use_spray_action')
     auto_start_mission = LaunchConfiguration('auto_start_mission')
+    return_home_after_finish = LaunchConfiguration('return_home_after_finish')
     mock_target_config = LaunchConfiguration('mock_target_config')
+    replay_target_config = LaunchConfiguration('replay_target_config')
+    web_host = LaunchConfiguration('web_host')
+    web_port = LaunchConfiguration('web_port')
     description_share = get_package_share_directory('wvcsc_description')
     simulation_share = get_package_share_directory('wvcsc_simulation')
     arm_task_share = get_package_share_directory('wvcsc_arm_task')
     mission_share = get_package_share_directory('wvcsc_mission_manager')
     uav_share = get_package_share_directory('wvcsc_uav_gateway')
+    web_share = get_package_share_directory('wvcsc_web_ui')
+    vision_share = get_package_share_directory('wvcsc_rgb_vision')
+    spray_share = get_package_share_directory('wvcsc_spray_controller')
     moveit_share = get_package_share_directory('alicia_m_moveit_config')
     gazebo_share = get_package_share_directory('gazebo_ros')
     nav2_share = get_package_share_directory('nav2_bringup')
@@ -177,6 +190,10 @@ def generate_launch_description():
         'gripper_closed_position': -0.05,
         'gripper_max_effort': 5.0,
         'use_sim_time': True,
+        'use_vision_alignment': ParameterValue(
+            use_vision_alignment, value_type=bool),
+        'use_spray_action': ParameterValue(
+            use_spray_action, value_type=bool),
     }
     motion_control = Node(
         package='wvcsc_arm_task', executable='motion_control',
@@ -253,6 +270,8 @@ def generate_launch_description():
             os.path.join(mission_share, 'config', 'mission_manager.yaml'),
             {
                 'auto_start': ParameterValue(auto_start_mission, value_type=bool),
+                'return_home_after_finish': ParameterValue(
+                    return_home_after_finish, value_type=bool),
                 'use_sim_time': True,
             },
         ],
@@ -265,6 +284,50 @@ def generate_launch_description():
             'use_sim_time': True,
         }],
         condition=IfCondition(use_mock_uav), output='screen',
+    )
+    replay_uav = Node(
+        package='wvcsc_uav_gateway', executable='replay_uav_gateway',
+        parameters=[{
+            'config_file': replay_target_config,
+            'use_sim_time': True,
+        }],
+        condition=IfCondition(use_replay_uav), output='screen',
+    )
+    web_ui = Node(
+        package='wvcsc_web_ui', executable='web_server',
+        parameters=[
+            os.path.join(web_share, 'config', 'web_ui.yaml'),
+            {
+                'host': web_host,
+                'port': ParameterValue(web_port, value_type=int),
+                'use_sim_time': True,
+            },
+        ],
+        condition=IfCondition(use_web_ui), output='screen',
+    )
+    spray_simulator = Node(
+        package='wvcsc_spray_controller', executable='spray_simulator',
+        parameters=[
+            os.path.join(spray_share, 'config', 'spray_sim.yaml'),
+            {'use_sim_time': True},
+        ],
+        condition=IfCondition(use_spray_simulator), output='screen',
+    )
+    alignment_gate = Node(
+        package='wvcsc_rgb_vision', executable='alignment_gate',
+        parameters=[
+            os.path.join(vision_share, 'config', 'vision_sim.yaml'),
+            {'use_sim_time': True},
+        ],
+        condition=IfCondition(use_vision_alignment), output='screen',
+    )
+    mock_vision = Node(
+        package='wvcsc_rgb_vision', executable='mock_vision',
+        parameters=[
+            os.path.join(vision_share, 'config', 'vision_sim.yaml'),
+            {'use_sim_time': True},
+        ],
+        condition=IfCondition(use_mock_vision), output='screen',
     )
     rviz = Node(
         package='rviz2', executable='rviz2',
@@ -285,11 +348,23 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_arm_control', default_value='true'),
         DeclareLaunchArgument('enable_ackermann', default_value='true'),
         DeclareLaunchArgument('use_mock_uav', default_value='true'),
+        DeclareLaunchArgument('use_replay_uav', default_value='false'),
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
+        DeclareLaunchArgument('use_web_ui', default_value='false'),
+        DeclareLaunchArgument('use_spray_simulator', default_value='false'),
+        DeclareLaunchArgument('use_mock_vision', default_value='false'),
+        DeclareLaunchArgument('use_vision_alignment', default_value='false'),
+        DeclareLaunchArgument('use_spray_action', default_value='false'),
         DeclareLaunchArgument('auto_start_mission', default_value='false'),
+        DeclareLaunchArgument('return_home_after_finish', default_value='false'),
         DeclareLaunchArgument(
             'mock_target_config',
             default_value=os.path.join(uav_share, 'config', 'mock_targets.yaml')),
+        DeclareLaunchArgument(
+            'replay_target_config',
+            default_value=os.path.join(uav_share, 'config', 'replay_targets.yaml')),
+        DeclareLaunchArgument('web_host', default_value='127.0.0.1'),
+        DeclareLaunchArgument('web_port', default_value='8080'),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_MODEL_PATH', gazebo_model_path),
         gazebo,
@@ -307,5 +382,10 @@ def generate_launch_description():
         spray_task,
         mission_manager,
         mock_uav,
+        replay_uav,
+        web_ui,
+        spray_simulator,
+        alignment_gate,
+        mock_vision,
         rviz,
     ])

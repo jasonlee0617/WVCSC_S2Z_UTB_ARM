@@ -20,9 +20,10 @@ setup(
     zip_safe=True,
     maintainer='robot',
     maintainer_email='robot@example.com',
-    description='Mock UAV disease-tree mission publisher.',
+    description='Mock and replay UAV disease-tree mission gateway.',
     license='Apache-2.0',
     entry_points={'console_scripts': [
         'mock_uav_gateway = wvcsc_uav_gateway.mock_uav_gateway:main',
+        'replay_uav_gateway = wvcsc_uav_gateway.replay_uav_gateway:main',
     ]},
 )

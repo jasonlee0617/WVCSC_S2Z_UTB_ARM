@@ -13,6 +13,8 @@ uint16 OBSERVE_FAILED=4
 uint16 CANCELED=5
 uint16 HOME_FAILED=6
 uint16 INTERNAL_ERROR=7
+uint16 VISION_FAILED=8
+uint16 SPRAY_FAILED=9
 bool success
 uint16 error_code
 string message
@@ -23,6 +25,7 @@ uint8 MOVING_TO_OBSERVE=1
 uint8 SPRAYING=2
 uint8 RETURNING_HOME=3
 uint8 COMPLETED=4
+uint8 ALIGNING=5
 uint8 phase
 float32 progress
 string phase_text
