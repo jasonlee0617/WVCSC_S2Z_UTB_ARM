@@ -13,9 +13,6 @@ def generate_launch_description():
     )
     return LaunchDescription([
         Node(
-            package='wvcsc_rgb_vision', executable='alignment_gate',
-            parameters=[config], output='screen'),
-        Node(
-            package='wvcsc_rgb_vision', executable='mock_vision',
+            package='wvcsc_rgb_vision', executable='color_segmentation',
             parameters=[config], output='screen'),
     ])

@@ -1,0 +1,43 @@
+wvcsc_visual_servo:
+  ros__parameters:
+    action_name: /vision/align_target
+    target_topic: /vision/target
+    camera_info_topic: /camera/camera/color/camera_info
+    twist_topic: /servo_node/delta_twist_cmds
+    servo_status_topic: /servo_node/status
+    start_servo_service: /servo_node/start_servo
+    stop_servo_service: /servo_node/stop_servo
+    command_frame: camera_color_optical_frame
+    control_rate_hz: 50.0
+    default_timeout_sec: 8.0
+    min_goal_timeout_sec: 0.5
+    max_goal_timeout_sec: 30.0
+    target_stale_timeout_sec: 0.2
+    min_confidence: 0.70
+    coarse_tolerance_px: 20.0
+    fine_tolerance_px: 8.0
+    stable_frames: 10
+    desired_offset_u_px: 0.0
+    # Camera is about 55 mm from the nozzle axis: fy * 0.055 / 1.0 m.
+    desired_offset_v_px: 28.0
+    fallback_fx: 507.872735
+    fallback_fy: 507.872735
+    require_camera_info: true
+    pid_kp_xy: 0.25
+    pid_ki_xy: 0.0
+    pid_kd_xy: 0.01
+    pid_d_ema_alpha: 0.65
+    derivative_clip_xy: 2.0
+    integral_limit_xy: 0.10
+    max_linear_speed: 0.04
+    max_linear_acceleration: 0.25
+    near_target_speed_scale: 0.35
+    warning_speed_scale: 0.35
+    command_sign_x: 1.0
+    command_sign_y: 1.0
+    predict_lead_sec: 0.02
+    max_predict_horizon_sec: 0.05
+    zero_command_count: 5
+    service_timeout_sec: 2.0
+    servo_status_decel_codes: [1, 3, 6]
+    servo_status_halt_codes: [2, 4, 5]

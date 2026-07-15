@@ -1,0 +1,6 @@
+newmtl lesion_red_brown
+Ka 0.60 0.32 0.01
+Kd 0.90 0.48 0.02
+Ks 0.02 0.02 0.02
+d 1.0
+illum 2

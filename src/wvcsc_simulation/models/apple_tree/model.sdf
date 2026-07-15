@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="apple_tree">
+    <static>true</static>
+    <link name="tree">
+      <collision name="trunk_collision">
+        <pose>0 0 0.75 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.25</radius>
+            <length>1.5</length>
+          </cylinder>
+        </geometry>
+      </collision>
+      <visual name="tree_visual">
+        <geometry>
+          <mesh>
+            <uri>model://apple_tree/meshes/apple_tree.obj</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <visual name="apples_visual">
+        <geometry>
+          <mesh>
+            <uri>model://apple_tree/meshes/apple_tree_apples.obj</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>

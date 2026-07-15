@@ -403,6 +403,20 @@ class MissionManager(Node):
             self._publish_status()
             return
         result = wrapped.result
+        if (not result.success
+                and result.error_code == ExecuteSpray.Result.VISION_FAILED):
+            skipped = self.core.current_target.tree_id
+            self._manual_return_home = False
+            self.core.skip_current(self._return_home_after_finish)
+            self.get_logger().info(
+                f'[MISSION] skipped tree={skipped}: {result.message}')
+            if self.core.state in {
+                    MissionState.NAVIGATING,
+                    MissionState.RETURNING_HOME}:
+                self._send_nav_goal()
+            else:
+                self._publish_status()
+            return
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED or not result.success:
             self._fail(
                 f'spray failed status={wrapped.status} code={result.error_code}: '

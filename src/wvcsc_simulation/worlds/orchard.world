@@ -1,14 +1,118 @@
 <?xml version="1.0"?>
 <sdf version="1.6">
   <world name="orchard">
+    <!-- 仿真状态插件 -->
     <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
       <update_rate>50.0</update_rate>
     </plugin>
-    <light name="sun" type="directional"><cast_shadows>true</cast_shadows><pose>0 0 10 0 0 0</pose><diffuse>0.8 0.8 0.8 1</diffuse><specular>0.2 0.2 0.2 1</specular><direction>-0.5 0.1 -0.9</direction></light>
-    <model name="ground_plane"><static>true</static><link name="link"><collision name="collision"><geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry></collision><visual name="visual"><geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry><material><ambient>0.35 0.45 0.30 1</ambient><diffuse>0.35 0.45 0.30 1</diffuse></material></visual></link></model>
-    <physics type="ode"><real_time_update_rate>1000</real_time_update_rate><max_step_size>0.001</max_step_size></physics>
-    <model name="left_tree"><static>true</static><pose>3 2 0.75 0 0 0</pose><link name="trunk"><collision name="collision"><geometry><cylinder><radius>0.25</radius><length>1.5</length></cylinder></geometry></collision><visual name="visual"><geometry><cylinder><radius>0.25</radius><length>1.5</length></cylinder></geometry><material><ambient>0.35 0.18 0.05 1</ambient></material></visual></link></model>
-    <model name="right_tree"><static>true</static><pose>5 -2 0.75 0 0 0</pose><link name="trunk"><collision name="collision"><geometry><cylinder><radius>0.25</radius><length>1.5</length></cylinder></geometry></collision><visual name="visual"><geometry><cylinder><radius>0.25</radius><length>1.5</length></cylinder></geometry><material><ambient>0.35 0.18 0.05 1</ambient></material></visual></link></model>
-    <model name="end_barrier"><static>true</static><pose>7 0 0.5 0 0 0</pose><link name="wall"><collision name="collision"><geometry><box><size>0.3 4 1</size></box></geometry></collision><visual name="visual"><geometry><box><size>0.3 4 1</size></box></geometry><material><ambient>0.5 0.5 0.5 1</ambient></material></visual></link></model>
+
+    <!-- 全局光照 -->
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- 地面平面 -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.35 0.45 0.30 1</ambient>
+            <diffuse>0.35 0.45 0.30 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 物理引擎配置 -->
+    <physics type="ode">
+      <real_time_update_rate>1000</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+    </physics>
+
+    <!-- 左侧果树列：沿道路 X 轴布置，株距 4 m；包含模拟目标 (3, 2)。 -->
+    <include>
+      <uri>model://apple_tree</uri>
+      <name>left_tree_01</name>
+      <pose>3 2 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://apple_tree</uri>
+      <name>left_tree_02</name>
+      <pose>7 2 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://apple_tree</uri>
+      <name>left_tree_03</name>
+      <pose>11 2 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://apple_tree</uri>
+      <name>left_tree_04</name>
+      <pose>15 2 0 0 0 0</pose>
+    </include>
+
+    <!-- 右侧果树列：沿道路 X 轴布置，株距 4 m；包含模拟目标 (5, -2)。 -->
+    <include>
+      <uri>model://apple_tree</uri>
+      <name>right_tree_01</name>
+      <pose>1 -2 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://apple_tree</uri>
+      <name>right_tree_02</name>
+      <pose>5 -2 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://apple_tree</uri>
+      <name>right_tree_03</name>
+      <pose>9 -2 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://apple_tree</uri>
+      <name>right_tree_04</name>
+      <pose>13 -2 0 0 0 0</pose>
+    </include>
+
+    <!-- Four UAV-reported diseased trees. Patches face the road and lie about
+         1.0 m from their docking positions; the remaining trees stay healthy. -->
+    <include>
+      <uri>model://disease_patch</uri>
+      <name>tree_01_disease_patch</name>
+      <pose>3.40 0.90 1.85 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://disease_patch</uri>
+      <name>tree_02_disease_patch</name>
+      <pose>5.40 -0.90 1.87 0 0 3.14159265359</pose>
+    </include>
+    <include>
+      <uri>model://disease_patch</uri>
+      <name>tree_03_disease_patch</name>
+      <pose>11.40 0.90 1.83 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://disease_patch</uri>
+      <name>tree_04_disease_patch</name>
+      <pose>13.40 -0.90 1.86 0 0 3.14159265359</pose>
+    </include>
   </world>
 </sdf>

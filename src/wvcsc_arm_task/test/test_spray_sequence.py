@@ -16,6 +16,9 @@ class _Arm:
         self.calls.append(positions)
         return next(self.outcomes)
 
+    def cancel(self):
+        self.calls.append('cancel')
+
 
 class _Sequence:
     _run_sequence = SprayTask._run_sequence
@@ -120,6 +123,19 @@ def test_optional_vision_and_spray_failures_return_home():
     (code, _message), _feedback = _run(spray)
     assert code == ExecuteSpray.Result.SPRAY_FAILED
     assert spray.arm.calls == [['left'], ['home']]
+
+
+def test_servo_safety_failure_locks_motion_and_does_not_become_skip():
+    sequence = _Sequence([True])
+    sequence._use_vision_alignment = True
+    sequence._align_target = lambda *_args: (
+        False, False, '[SAFETY] collision halt')
+
+    (code, _message), _feedback = _run(sequence)
+
+    assert code == ExecuteSpray.Result.INTERNAL_ERROR
+    assert sequence.state.locked
+    assert sequence.arm.calls == [['left'], 'cancel']
 
 
 def test_optional_vision_and_spray_success_preserve_home_requirement():

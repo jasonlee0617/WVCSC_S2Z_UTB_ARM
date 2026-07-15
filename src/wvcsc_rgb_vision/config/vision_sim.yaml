@@ -18,3 +18,20 @@ wvcsc_mock_vision:
     error_v: 0.0
     confidence: 0.95
     publish_rate_hz: 10.0
+
+wvcsc_color_segmentation:
+  ros__parameters:
+    image_topic: /camera/camera/color/image_rect_raw
+    detections_topic: /vision/pest_detections
+    target_topic: /vision/target
+    debug_image_topic: /vision/debug_image
+    publish_debug_image: true
+    min_area_px: 400
+    nominal_area_px: 2500
+    red_hue_low_1: 14
+    red_hue_high_1: 25
+    red_hue_low_2: 14
+    red_hue_high_2: 25
+    saturation_min: 120
+    value_min: 35
+    morphology_kernel: 5

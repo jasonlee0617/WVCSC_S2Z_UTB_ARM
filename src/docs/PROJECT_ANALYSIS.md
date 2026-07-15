@@ -4,123 +4,67 @@
 
 本项目是一个基于 **ROS2 Humble** 的无人车+机械臂复合机器人系统，目标平台为 **ARM aarch64**（兼容 x86_64），部署在一台 **阿克曼转向底盘**（猛犸IV / 极速IB系列）上，并搭载 **Alicia-M 六轴机械臂**（Synria Robotics 制造）。软件栈覆盖从底层硬件驱动、传感器融合、SLAM 建图、自主导航、机械臂运动规划与控制的完整功能链路，并提供 Gazebo 仿真环境。
 
-本工作区 **共含 15+ 个 ROS2 包**，分为三大类：
+本工作区 **共含 25 个 ROS2 包**，分为三大类：
 - **无人车底层**：串口/CAN驱动、IMU/GPS驱动、激光雷达驱动、底盘驱动、SLAM、导航
 - **机械臂**：URDF模型、硬件驱动(ros2_control)、MoveIt2运动规划、手眼标定、抓取模块
 - **仿真与集成**：Gazebo仿真、复合机器人模型、喷雾任务、Nav2导航仿真
 
 ---
 
-## 当前阶段状态与未来 48 小时目标（2026-07-14）
+## 当前阶段状态（2026-07-15）
 
-本节是当前开发基线，优先级高于后文中尚未随代码更新的历史描述。评估依据是本工作区源代码、启动文件、单元测试和已经完成的 Gazebo/MoveIt 仿真检查；百分比是工程进度估算，不是性能指标。
+本节是当前开发基线，优先级高于后文的历史说明。完整启动命令、监控命令和验收表见 [仿真任务闭环实施方案](WVCSC_S2Z_UTB_ARM_Codex_仿真任务闭环实施方案.md)。
 
-技术依据为项目文档《智能农林病虫害空地协同自主防治系统技术方案_V2.0_完整详细版》（2026 年 7 月），重点采用其中“无人机粗引导→小车 Nav2→机械臂近场执行、Mock/Replay/Live 统一入口、仿真先行”的路线。
-
-### 本次目标
-
-在 Gazebo 的统一小车+Alicia-M 模型中完成以下最小闭环：
+当前已经从“Mock 坐标 + 基础导航”推进到“C10 RGB + MoveIt Servo 视觉喷洒”阶段：
 
 ```text
-Mock 无人机回传病树目标坐标
-        ↓
-任务编排器校验坐标/TF并生成小车停靠位姿
-        ↓
-Nav2 NavigateToPose 自动导航并确认小车停稳
-        ↓
-MoveIt2 规划 Alicia-M 观察/喷洒/收回动作
-        ↓
-记录成功或失败，失败时停止后续目标
+Mock UAV 四目标
+  → Nav2 停靠并确认停稳
+  → Alicia-M 左/右观察姿态
+  → C10 RGB 病斑检测
+  → MoveIt Servo 图像平面对准
+  → 模拟喷洒
+  → 全零 HOME
 ```
 
-这里按技术方案 V2.0 的“Mock 无人机”路线执行：48 小时内模拟的是无人机完成巡检后回传的病树任务坐标，不实现真实飞控、相机识别或农业遥感算法。坐标默认固化到 `map`；如果“无人机回传坐标系信息”实际指无人机机体位姿而不是病树目标坐标，应在下一轮对话中确认，接口会相应增加 `uav_base_link` TF。
-
-### 已完成和已验证的能力
+### 已完成能力
 
 | 子系统 | 当前状态 | 证据/边界 |
 |---|---|---|
-| 统一机器人模型 | 已完成基础合并 | `wvcsc_description/urdf/wvcsc_utb_alicia.urdf.xacro` 组合 `wtb_car.xacro` 与 Alicia-M 模型，机械臂根为 `alicia_base_link`。 |
-| Gazebo 启动编排 | 已完成可运行基线 | `wvcsc_simulation/launch/system_sim.launch.py` 可编排 Gazebo、robot_state_publisher、控制器、MoveIt、重定时服务、运动控制和喷洒节点；当前 `use_nav2`、`use_rviz` 默认值为 `true`。 |
-| 小车运动仿真 | 已完成基础能力 | `AckermannSim` 订阅 `/cmd_vel`，发布 `/odom`、`/ekf_odom` 和 `odom→base_footprint`，并带指令超时停车。 |
-| Alicia-M MoveIt 仿真 | 已完成基础闭环 | 已验证关节、位姿和非奇异姿态下笛卡尔规划执行；控制器为 `joint_state_broadcaster`、`arm_controller`、`gripper_controller`。 |
-| 轨迹安全链路 | 已完成 | 官方 `pymoveit2` 4.2.0 保持未修改；笛卡尔轨迹执行为 `plan → /retime_trajectory → 校验 → execute`，重定时失败或轨迹非法时禁止执行。 |
-| stop/reset/resume | 已完成仿真验证 | `reset` 目标为 `HOME=[0.0,0.0,0.0,0.0,0.0,0.0]`，先停止、再张开夹爪、再回 HOME；失败保持锁定。 |
-| 喷洒动作 | 已完成“模拟动作” | `/arm/execute_spray` 已能执行观察姿态→等待喷洒时长→HOME；目前仍是 `Trigger` 服务并异步返回，尚不适合作为多目标任务编排的最终完成信号。 |
-| 测试与构建 | 已完成源代码级验证 | `wvcsc_arm_task` 15 个 Python 测试通过，`trajectory_retime_server` 2 个 C++ 测试通过；曾完成 9 包隔离构建。正式工作区仍需按下方命令重新构建并验证安装空间。 |
+| 统一复合模型 | 已完成 | 同一 Xacro 组合小车、Alicia-M、C10、喷嘴和 ros2_control；Xacro 与 `check_urdf` 通过。 |
+| Gazebo 果园 | 已完成 | 无 wall；两列各四棵果树、株距约 4 m；四个病斑模型对应四个 Mock 目标。 |
+| 小车与 Nav2 | 已建立四目标能力 | 地图范围已覆盖四个目标，Ackermann 仿真发布 `/odom` 和 TF，GoalChecker 为平衡停靠精度。 |
+| Mock UAV 与任务管理 | 已完成 | `wvcsc_uav_gateway` 发布四目标，`wvcsc_mission_manager` 通过 Action 串联导航、停稳和机械臂，并区分跳过与安全失败。 |
+| MoveIt 接口 | 已完成 | 官方 `pymoveit2` 4.2.0 未修改；笛卡尔轨迹经 `/retime_trajectory`；普通 OMPL 不重复重定时。 |
+| 喷洒 Action | 已完成 | `/arm/execute_spray` 为可等待的 `ExecuteSpray.action`，覆盖观察、视觉对准、喷洒、HOME、取消和失败码。 |
+| C10 仿真/实机入口 | 已完成第一版 | Gazebo 和 `usb_cam` 统一发布图像与 CameraInfo；实机包支持 by-id、respawn 和诊断。 |
+| RGB 感知 | 仿真占位已完成 | HSV 病斑分割发布 `Detection2DArray` 与 `Target2D`；最终模型仍需换成 YOLO Seg。 |
+| 视觉伺服 | 第一版已完成 | MoveIt Servo 只修正光学 X/Y，不虚构单目深度；奇异、碰撞和未知 Servo 状态会锁定任务。 |
+| 构建与测试 | 已通过 | 相关依赖共 16 包完成干净构建；C10、视觉、任务和机械臂共 71 项单元测试通过。 |
 
 ### 当前完成度估算
 
-| 能力域 | 完成度 | 尚缺的关键内容 |
+| 能力域 | 完成度 | 主要剩余工作 |
 |---|---:|---|
-| 小车实车底层（CAN/IMU/LiDAR/里程计） | 70% | 统一任务接口、整车新 footprint 和比赛场地回归。 |
-| Alicia-M 模型、MoveIt 与仿真控制 | 75% | `tool0` 碰撞几何、动作完成事件、真实关节加速度上限。 |
-| 统一 Gazebo 复合模型 | 70% | 与 orchard 地图坐标、导航代价地图和停靠位姿的联合标定。 |
-| Nav2 在统一仿真中的自动导航 | 40% | 目标点 Action 端到端成功、停稳互锁、多目标和异常恢复。 |
-| 无人机 Mock 坐标回传 | 0% | `wvcsc_uav_gateway`、Mock 数据文件、坐标校验和任务列表接口。 |
-| 任务管理与空地协同 | 10% | `wvcsc_mission_manager` 状态机，串联 Nav2 与机械臂。 |
-| 视觉、真实喷洒和 Web | 0%～10% | C10 RGB、手眼/单目对准、喷洒 IO、网页后端尚未接入。 |
-| 实机 Alicia 接入 | 25% | 机械臂到货、串口/控制器连续运行、低速和安全验收。 |
+| 统一 Gazebo 与四目标导航 | 90% | 连续三轮稳定性和最终停车误差记录。 |
+| Alicia-M MoveIt 与任务 Action | 90% | 新观察姿态的 Gazebo 规划/碰撞实测；厂家实机限速。 |
+| C10 仿真、话题和诊断 | 85% | 实物 by-id、曝光、断线恢复和真实内参验收。 |
+| RGB 病虫害识别 | 40% | 数据集定义、YOLO Seg 训练、类别与置信度标定。 |
+| RGB 视觉伺服 | 70% | 四目标闭环实测、手眼标定、实机增益整定。 |
+| 真实喷洒硬件 | 20% | 泵阀、液位、急停和实际喷幅/喷距标定。 |
+| 整体比赛闭环 | 约 70% | 视觉与喷洒实机化、异常恢复和连续运行验证。 |
 
-按“比赛可完整运行闭环”衡量，当前约 **40%～45%**；按底层软件储备衡量高于该数值。未来 48 小时的验收目标不是完成全部项目，而是把“无人机 Mock → Nav2 单/多目标 → Alicia-M 模拟喷洒”的仿真闭环提升到可重复运行。
+### 当前唯一阻断项
 
-### 仍待完成的核心工作
+旧观察姿态会触发 MoveIt Servo 奇异点硬停止。已替换为离线数值雅可比条件数约 `12.33/12.20` 的左右姿态，低于减速阈值 `17`；仍必须在 Gazebo 完成四目标实际规划、碰撞、视觉对准和 HOME 验收。安全阈值不得为了通过测试而放宽。
 
-1. 冻结 `map`、`odom`、`base_footprint`、`base_link`、`alicia_base_link`、`tool0` 的 TF 责任，确保无人机目标在检测时转换并固化为 `map` 坐标。
-2. 新增 Mock 无人机入口（建议 `wvcsc_uav_gateway`），从 YAML/JSON 读取目标列表，发布文档定义的 `/uav/disease_trees`；Mock、Replay、Live 后续都走同一接口。
-3. 新增任务编排入口（建议 `wvcsc_mission_manager`），逐目标调用 `nav2_msgs/action/NavigateToPose`，导航成功且底盘速度稳定后才能触发机械臂。
-4. 为 `/arm/execute_spray` 增加可等待的完成语义（优先迁移为 `ExecuteSpray.action`；48 小时内也可先增加明确的状态/结果话题），避免任务管理器把“请求已接受”误判为“喷洒完成”。
-5. 完成导航失败、机械臂失败、`stop/reset` 和急停后的状态迁移；任何失败都不得自动发送下一目标。
-6. 修正 `tool0` 无碰撞几何和 Alicia-M 关节加速度参数。实机启动前必须取得厂家限制，仿真与硬件继续使用同一 URDF/MoveIt 语义配置。
+### 下一步顺序
 
-### 今天（Day 1）工作安排：先打通无人机 Mock → 小车导航
-
-| 顺序 | 实现内容 | 验收输出 |
-|---:|---|---|
-| 1 | 冻结接口和坐标约定：目标消息含 `mission_id`、`tree_id`、时间戳、`frame_id`、`confidence`、`map_position` 和停靠位姿。 | 一页接口说明；明确所有目标最终使用 `map`。 |
-| 2 | 创建 `wvcsc_uav_gateway` 的 Mock 节点和 `config/mock_targets.yaml`；发布 2 个固定 orchard 目标，支持重复发布/幂等任务号。 | `ros2 topic echo /uav/disease_trees` 能看到完整目标列表。 |
-| 3 | 创建任务编排器最小骨架，只实现“接收一个目标→生成/读取停靠位姿→调用 `NavigateToPose`”。 | 命令行或测试节点可发送目标，不把坐标写死在 Nav2 节点中。 |
-| 4 | 用 `system_sim.launch.py use_nav2:=true` 运行 Gazebo+Nav2，检查 `map→odom→base_footprint→base_link` TF、`/cmd_vel` 和 `/odom`。 | 小车到达单个目标，Nav2 Action 返回 `SUCCEEDED`，到点后速度回到零。 |
-| 5 | 保存启动日志和验收命令，记录地图原点、目标点、到点误差和失败原因。 | 一次可复现的 Day 1 运行记录。 |
-
-### 明天（Day 2）工作安排：导航成功 → 机械臂喷洒 → 多目标
-
-| 顺序 | 实现内容 | 验收输出 |
-|---:|---|---|
-| 1 | 在任务编排器中加入 `NAVIGATING → ARRIVED → ARM_SPRAYING → COMPLETED` 状态；只有导航成功、停稳持续约 1～2 秒才允许喷洒。 | 状态转换日志完整且顺序不可跳跃。 |
-| 2 | 接入 `wvcsc_arm_task`：观察姿态、模拟喷洒等待、HOME；补充可等待的喷洒完成/失败结果。 | 一个目标完成后，机械臂回 HOME，编排器收到明确结果。 |
-| 3 | 实现两个目标的顺序执行、最大重试/跳过策略和返回待命点；任何 `stop/reset` 后锁定期间不得接收新目标。 | 连续完成 2 个目标；导航或机械臂失败时不误触发下一个目标。 |
-| 4 | 在 RViz/Gazebo 中显示目标、路径、车体和机械臂 TF；保留 headless 启动方式用于回归。 | 图形和终端均能追踪当前目标及状态。 |
-| 5 | 运行完整验收：Mock → Nav2 → 喷洒 → HOME，重复至少 3 次并记录结果。 | 形成“已通过/失败原因/下一步”表格，作为后续网页端对话基线。 |
-
-### 48 小时验收标准与明确不纳入范围
-
-- 统一仿真启动后无 TF 断树；无人机目标的 `frame_id`、时间戳和坐标范围校验有效。
-- Nav2 至少完成一个固定目标的 `NavigateToPose`，小车到达后停稳；随后才允许机械臂动作。
-- 机械臂动作只经 MoveIt2/ros2_control；重定时失败不执行原始轨迹；`stop/reset/resume` 仍满足锁定语义。
-- 喷洒成功必须有可观察的完成结果；导航失败或喷洒失败不得自动执行下一目标。
-- 本轮不承诺真实无人机飞控/视觉识别、C10 视觉对准、真实水泵/阀门、网页 UI、实机 Alicia 加速度标定或多无人机调度。
-
-### 需要在网页端继续确认的 4 个决策
-
-1. “无人机回传坐标系信息”是否按 V2.0 解释为病树目标坐标列表；默认使用 `map`，而不是只发布无人机自身位姿。
-2. 今明两天先做 2 个固定目标顺序执行，还是只验收 1 个目标后再扩展多目标；默认先单目标、再双目标。
-3. 喷洒接口是否接受从当前 `Trigger` 过渡到 `ExecuteSpray.action`；默认采用可等待 Action/结果话题。
-4. 验收是否以 Gazebo GUI+RViz 为主、headless 为回归；默认两者都保留，自动化检查使用 headless。
-
-### 当前基线构建命令
-
-```bash
-cd /home/robot/WVCSC_S2Z_UTB_ARM
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install --base-paths src src/Alicia-M-ROS2 \
-  --packages-select pymoveit2 trajectory_retime_server wvcsc_arm_task \
-  alicia_m_descriptions alicia_m_driver alicia_m_moveit_config \
-  alicia_m_bringup wvcsc_description wvcsc_simulation
-source install/setup.bash
-ros2 launch wvcsc_simulation system_sim.launch.py
-```
-
-回归时可先使用 `use_nav2:=false use_rviz:=false gui:=false` 验证机械臂和 Gazebo 基线，再打开 Nav2 验收空地闭环。当前仍需在正式工作区重新生成 `install/` 后确认完整构建，不把临时隔离构建目录当成项目安装空间。
+1. 按仿真实施方案执行四目标手动验收，确认左右观察姿态均不触发 Servo 状态 `2`。
+2. 保存每个目标的像素误差、稳定帧数、喷洒结果和 HOME 结果，连续运行三轮。
+3. 在仿真画面上生成临时 YOLO Seg 数据并训练首版权重，替换颜色阈值分割。
+4. C10 到位后完成真实内参、手眼外参、设备路径和断线恢复测试。
+5. Alicia-M 到位后确认厂家速度/加速度限制，再启用实机控制器。
 
 ---
 
@@ -138,7 +82,7 @@ ros2 launch wvcsc_simulation system_sim.launch.py
 | **机械臂规划** | MoveIt2 + OMPL + Pilz Industrial Motion Planner |
 | **机械臂控制** | ros2_control (JointTrajectoryController, GripperActionController) |
 | **仿真** | Gazebo Classic (SDF 1.6) |
-| **传感器驱动** | FDILink AHRS/IMU/GPS，镭神 LiDAR，轮式编码器，Intel RealSense D405 |
+| **传感器驱动** | FDILink AHRS/IMU/GPS，镭神 LiDAR，轮式编码器，Synria C10 RGB；上游仍保留 D405 标定/抓取参考代码 |
 | **硬件通信** | CAN 总线 (libcontrolcan)，串口 (serial 库)，MQTT (mosquittopp)，UART (Synria 协议) |
 | **可视化** | RViz2，PyQt5 自定义 GUI |
 | **机器人模型** | URDF/Xacro |
@@ -486,7 +430,7 @@ Alicia-M 是 **Synria Robotics** 制造的 **6-DOF 串联关节式机械臂 + �
 - **框架**：Python (rclpy) + OpenCV
 - **依赖**：rclpy, sensor_msgs, geometry_msgs, tf2_ros, cv_bridge, image_transport, control_msgs, moveit_msgs, python3-opencv, python3-scipy, python3-yaml
 
-使用 ArUco 码 + Intel RealSense D405 进行 eye-in-hand 标定，计算 `tool0 → camera_link` 变换。
+该上游包原本使用 ArUco 码 + Intel RealSense D405 进行 eye-in-hand 标定，计算 `tool0 → camera_link` 变换。当前项目目标相机已改为 C10；下述 D405 结果只用于临时安装外参参考，不能直接作为 C10 实机标定结果。
 
 **工作流程**：
 1. 控制机械臂依次移动到 20 个预设标定位姿
@@ -584,6 +528,7 @@ Alicia-M 是 **Synria Robotics** 制造的 **6-DOF 串联关节式机械臂 + �
 | 传感器/插件 | 详情 |
 |------------|------|
 | **激光雷达** | `libgazebo_ros_ray_sensor.so`，720 采样，范围 0.15~20m，10Hz，发布 `/scan`，帧 `laser` |
+| **C10 RGB** | `libgazebo_ros_camera.so`，1280×720、30Hz，发布统一 Image/CameraInfo 话题 |
 | **车辆关节状态** | `libgazebo_ros_joint_state_publisher.so`，50Hz，6 个阿克曼关节 |
 | **ros2_control** | `libgazebo_ros2_control.so`，机械臂控制（条件启用） |
 
@@ -605,20 +550,23 @@ Alicia-M 是 **Synria Robotics** 制造的 **6-DOF 串联关节式机械臂 + �
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `use_nav2` | `true` | 启用 Nav2 导航；机械臂基线回归可显式设为 `false` |
-| `use_rviz` | `true` | 启动 RViz2；无图形环境可显式设为 `false` |
+| `use_rviz` | `false` | 启动 RViz2；需要观察时显式设为 `true` |
 | `enable_arm_control` | `true` | 启用机械臂 ros2_control |
+| `use_color_vision` | `true` | 启动 Gazebo RGB 病斑分割；与 Mock 视觉互斥 |
+| `use_vision_alignment` | `false` | 启用 MoveIt Servo 视觉对准 |
+| `spray_standoff_distance` | `2.4` | 仿真停车距离，用于保持约 0.8–1.5m 喷距 |
 
 启动序列：
 1. 设置 `GAZEBO_MODEL_PATH`
 2. 启动 **Gazebo** 加载 `orchard.world`
 3. 启动 **robot_state_publisher**（处理 XACRO → robot_description）
-4. 发布静态 TF `world → odom`
+4. 发布静态 TF `world → map → odom`
 5. 加载 **Move Group**（MoveIt2，含 OMPL 规划管道），SRDF 运行时 patch（基准改为 `alicia_base_link`，移除虚拟关节）
-6. 在 t+3s, t+4s, t+5s 分别生成 joint_state_broadcaster, arm_controller, gripper_controller
-7. 启动 `trajectory_retime_server`、`wvcsc_motion_control` 和 `wvcsc_spray_task`
-8. 实体生成完成后：等 5s → 取消 Gazebo 暂停 → 启动 AckermannSim
-9. 条件启动 Nav2（含 orchard 地图，WTB 参数）
-10. 条件启动 RViz2
+6. 实体生成后顺序启动 joint_state_broadcaster、arm_controller、gripper_controller 和喷洒任务
+7. 启动 `trajectory_retime_server`、`wvcsc_motion_control`，可选 MoveIt Servo 与视觉伺服
+8. 取消 Gazebo 暂停并启动 AckermannSim、颜色/Mock 视觉
+9. 条件启动 Nav2、任务管理器以及 Mock/Replay UAV
+10. 条件启动 RViz2、Web 和独立喷洒模拟器
 
 ### AckermannSim 节点 (`ackermann_sim.py`)
 
@@ -643,14 +591,14 @@ Alicia-M 是 **Synria Robotics** 制造的 **6-DOF 串联关节式机械臂 + �
 
 SDF 1.6 格式：
 - 绿色地面 100m×100m
-- 两个树（圆柱体，半径 0.25m，高 1.5m），位于 (3,2) 和 (5,-2)
-- 终端障碍墙（0.3×4×1m）在 x=7m
+- 道路两侧各 4 棵果树，沿 X 轴约 4m 株距布置，不设置 wall
+- 4 个朝向道路的病斑模型，对应 `tree_01`～`tree_04`
 - 物理引擎：ODE，实时更新率 1000
 - `gazebo_ros_state` 插件 50Hz
 
 ### 地图
 
-`orchard.yaml` — 分辨率 0.5m/pixel，三值模式，地图原点 (-10,-10)。
+`orchard.yaml` — 60×40 像素、分辨率 0.5m/pixel、三值模式、原点 (-10,-10)，覆盖 `x∈[-10,20)`、`y∈[-10,10)`。
 
 - **主要文件**：[launch/system_sim.launch.py](src/wvcsc_simulation/launch/system_sim.launch.py), [scripts/ackermann_sim.py](src/wvcsc_simulation/scripts/ackermann_sim.py), [worlds/orchard.world](src/wvcsc_simulation/worlds/orchard.world)
 
@@ -666,7 +614,8 @@ SDF 1.6 格式：
 | ROS 接口 | 类型 | 详情 |
 |----------|------|------|
 | 节点 | — | `wvcsc_spray_task` |
-| `/arm/execute_spray` 服务 | `std_srvs/Trigger`（当前过渡接口） | 触发观察→模拟喷洒→HOME；多目标编排前需增加完成结果语义 |
+| `/arm/execute_spray` Action | `wvcsc_interfaces/ExecuteSpray` | 观察→视觉对准→喷洒→HOME，返回反馈、结果和错误码 |
+| `/arm/execute_spray_legacy` 服务 | `std_srvs/Trigger` | 仅保留兼容和隔离测试 |
 | `/motion_control/command` | `std_msgs/String` | `stop`、`reset`、`resume` |
 | `/trajectory_execution_event` | `std_msgs/String` | 向 MoveIt 执行链发布 `stop` |
 | `/retime_trajectory` | `trajectory_retime_server/srv/RetimeTrajectory` | 笛卡尔规划的唯一重定时入口 |
@@ -677,15 +626,16 @@ SDF 1.6 格式：
 | 姿态 | joint1 | joint2 | joint3 | joint4 | joint5 | joint6 |
 |------|--------|--------|--------|--------|--------|--------|
 | HOME | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
-| OBSERVE_LEFT | 0.65 | -1.35 | -1.05 | 0.0 | -0.75 | 0.65 |
-| OBSERVE_RIGHT | -0.65 | -1.35 | -1.05 | 0.0 | -0.75 | -0.65 |
+| OBSERVE_LEFT | 1.886845 | -1.463996 | -1.033531 | 0.597978 | 1.272105 | -2.261712 |
+| OBSERVE_RIGHT | -1.882066 | -1.471510 | -1.031065 | -0.585215 | 1.288457 | -0.891742 |
 
 **行为序列**：
 1. 移动到观察/喷雾姿态（根据 `spray_side` 参数选择左/右）
-2. 模拟喷雾（sleep `spray_duration` 秒，默认 2.0s）
-3. 通过 MoveIt 规划回到全零 HOME
-4. `stop`/`reset` 取消当前运动；`reset` 先停、开夹爪、回 HOME，失败保持锁定
-5. `busy` 标志防止并发；`resume` 只解除锁定，不恢复已取消轨迹
+2. 可选调用 `/vision/align_target`，成功后才允许喷洒
+3. 模拟喷雾或调用独立喷洒 Action
+4. 通过 MoveIt 规划回到全零 HOME
+5. `stop`/`reset` 取消当前运动；`reset` 先停、开夹爪、回 HOME，失败保持锁定
+6. `busy` 标志防止并发；`resume` 只解除锁定，不恢复已取消轨迹
 
 - **主要文件**：[wvcsc_arm_task/spray_task.py](src/wvcsc_arm_task/wvcsc_arm_task/spray_task.py)
 
@@ -693,8 +643,8 @@ SDF 1.6 格式：
 
 ## 18. wvcsc_vehicle_sim
 
-- **状态**：空占位目录（无 package.xml，无源代码）
-- 可能是计划中的高级车辆动力学仿真器（替代 `ackermann_sim.py`）
+- **状态**：已删除。原包只提供重复的占位车辆仿真能力。
+- 小车仿真唯一入口为 `wvcsc_simulation/scripts/ackermann_sim.py`，避免两套 `/odom` 和 `odom→base_footprint` 发布者。
 
 ---
 
@@ -753,29 +703,19 @@ SDF 1.6 格式：
 
 ```
 system_sim.launch.py
-├── Gazebo (orchard.world, 暂停启动)
-├── robot_state_publisher (XACRO复合模型 → /robot_description)
-├── static TF: world → odom
-├── spawn_entity (从 /robot_description 生成机器人)
-├── Move Group (MoveIt2, OMPL + Pilz, SRDF运行时patch)
-├── [t+3s] joint_state_broadcaster
-├── [t+4s] arm_controller (JointTrajectoryController)
-├── [t+5s] gripper_controller (GripperActionController)
-├── trajectory_retime_server (笛卡尔轨迹重定时与校验)
-├── wvcsc_motion_control (stop/reset/resume 锁定控制)
-├── wvcsc_spray_task (MoveIt 模拟喷洒任务)
-├── [post-spawn+5s] AckermannSim (车辆运动学仿真, 20Hz)
-│   ├── 订阅 /cmd_vel
-│   ├── 发布 /odom, /ekf_odom
-│   ├── 发布 TF odom→base_footprint
-│   └── 调用 /set_entity_state (Gazebo模型移动)
-├── [条件] Nav2 (orchard地图, wtb参数, autostart)
-│   ├── localization (AMCL)
-│   └── navigation (全局+局部规划器, 控制器)
-└── [条件] RViz2 (MoveIt配置)
+├── Gazebo (orchard.world) + 复合机器人 + C10 RGB
+├── robot_state_publisher + world→map→odom 静态链
+├── Move Group + trajectory_retime_server + motion_control
+├── MoveIt Servo + wvcsc_visual_servo（条件启动）
+├── 顺序启动 joint_state_broadcaster → arm_controller
+│   → gripper_controller → wvcsc_spray_task
+├── AckermannSim：/cmd_vel → /odom + odom→base_footprint
+├── Nav2 + map_server（条件启动）
+├── wvcsc_rgb_vision：颜色分割或 Mock 视觉（二选一）
+├── wvcsc_mission_manager
+├── wvcsc_uav_gateway：Mock 或 Replay（二选一）
+└── 可选 RViz、Web 和独立喷洒模拟器
 ```
-
-48 小时内将在上述流程前增加 `wvcsc_uav_gateway`（Mock 目标发布）和 `wvcsc_mission_manager`（Nav2→机械臂任务编排）；这两个节点当前尚未进入工作区，不能把规划中的接口描述误认为已实现。
 
 ## 真实硬件启动流程
 
@@ -897,7 +837,7 @@ map ──(Cartographer)──▶ odom ──(EKF)──▶ base_footprint ─�
 ### 机械臂
 9. **ros2_control 硬件接口**：Synria 自定义二进制串口协议，PV/MIT 双控制模式
 10. **MoveIt2 运动规划**：OMPL + Pilz Industrial Motion Planner，KDL 运动学
-11. **手眼标定**：ArUco + RealSense D405 + OpenCV HandEye（Daniilidis 法）
+11. **手眼标定**：上游 D405 标定代码可参考；当前 C10 必须重新执行 ArUco + OpenCV HandEye 标定
 12. **6D 抓取**（开发中）：FoundationStereo + GraspGen + SAM2
 
 ### 仿真

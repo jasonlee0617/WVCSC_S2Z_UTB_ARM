@@ -14,7 +14,12 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, FindExecutable, LaunchConfiguration
+from launch.substitutions import (
+    Command,
+    FindExecutable,
+    LaunchConfiguration,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -36,9 +41,11 @@ def generate_launch_description():
     use_web_ui = LaunchConfiguration('use_web_ui')
     use_spray_simulator = LaunchConfiguration('use_spray_simulator')
     use_mock_vision = LaunchConfiguration('use_mock_vision')
+    use_color_vision = LaunchConfiguration('use_color_vision')
     use_vision_alignment = LaunchConfiguration('use_vision_alignment')
     use_spray_action = LaunchConfiguration('use_spray_action')
     auto_start_mission = LaunchConfiguration('auto_start_mission')
+    spray_standoff_distance = LaunchConfiguration('spray_standoff_distance')
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
     mock_target_config = LaunchConfiguration('mock_target_config')
     replay_target_config = LaunchConfiguration('replay_target_config')
@@ -51,12 +58,14 @@ def generate_launch_description():
     uav_share = get_package_share_directory('wvcsc_uav_gateway')
     web_share = get_package_share_directory('wvcsc_web_ui')
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
+    visual_servo_share = get_package_share_directory('wvcsc_visual_servo')
     spray_share = get_package_share_directory('wvcsc_spray_controller')
     moveit_share = get_package_share_directory('alicia_m_moveit_config')
     gazebo_share = get_package_share_directory('gazebo_ros')
     nav2_share = get_package_share_directory('nav2_bringup')
     alicia_model_root = os.path.dirname(get_package_share_directory('alicia_m_descriptions'))
     gazebo_model_path = os.pathsep.join(filter(None, [
+        os.path.join(simulation_share, 'models'),
         alicia_model_root,
         os.environ.get('GAZEBO_MODEL_PATH'),
     ]))
@@ -70,6 +79,8 @@ def generate_launch_description():
                      ' enable_arm_control:=', enable_arm_control,
                      ' enable_ackermann:=', enable_ackermann,
                      ' enable_gazebo_ros2_control:=', enable_arm_control,
+                     ' enable_c10_camera:=true',
+                     ' enable_c10_gazebo:=true',
                      ' gazebo_controllers_file:=',
                      os.path.join(description_share, 'config', 'ros2_controllers.yaml'),
                      ' ros2_control_plugin:=gazebo_ros2_control/GazeboSystem']),
@@ -86,6 +97,17 @@ def generate_launch_description():
     semantic = semantic.replace(
         '<virtual_joint name="virtual_joint" type="fixed" '
         'parent_frame="world" child_link="base_link"/>', '')
+    c10_disabled_collisions = '''
+    <disable_collisions link1="tool0" link2="camera_link" reason="Adjacent"/>
+    <disable_collisions link1="link6" link2="camera_link" reason="Mount"/>
+    <disable_collisions link1="link7" link2="camera_link" reason="Mount"/>
+    <disable_collisions link1="link8" link2="camera_link" reason="Mount"/>
+    <disable_collisions link1="tool0" link2="spray_nozzle_link" reason="Adjacent"/>
+    <disable_collisions link1="link7" link2="spray_nozzle_link" reason="Tool"/>
+    <disable_collisions link1="link8" link2="spray_nozzle_link" reason="Tool"/>
+'''
+    semantic = semantic.replace(
+        '</robot>', f'{c10_disabled_collisions}</robot>')
     robot_description_semantic = {'robot_description_semantic': semantic}
 
     kinematics = load_yaml('alicia_m_moveit_config', 'config/kinematics.yaml')
@@ -128,6 +150,8 @@ def generate_launch_description():
             'publish_transforms_updates': True,
         },
     ]
+    servo_parameters = load_yaml(
+        'wvcsc_visual_servo', 'config/moveit_servo.yaml')
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(gazebo_share, 'launch', 'gazebo.launch.py')),
@@ -200,29 +224,60 @@ def generate_launch_description():
         parameters=[arm_task_parameters],
         condition=IfCondition(enable_arm_control), output='screen',
     )
-    joint_state_controller = TimerAction(period=3.0, actions=[
-        Node(package='controller_manager', executable='spawner',
-             arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
-             condition=IfCondition(enable_arm_control), output='screen'),
-    ])
-    arm_controller = TimerAction(period=4.0, actions=[
-        Node(package='controller_manager', executable='spawner',
-             arguments=['arm_controller', '--controller-manager', '/controller_manager'],
-             condition=IfCondition(enable_arm_control), output='screen'),
-    ])
-    gripper_controller = TimerAction(period=5.0, actions=[
-        Node(package='controller_manager', executable='spawner',
-             arguments=['gripper_controller', '--controller-manager', '/controller_manager'],
-             condition=IfCondition(enable_arm_control), output='screen'),
-    ])
-    spray_task = TimerAction(period=7.0, actions=[
-        Node(package='wvcsc_arm_task', executable='spray_task',
-             parameters=[
-                 os.path.join(arm_task_share, 'config', 'arm_task.yaml'),
-                 arm_task_parameters,
-             ],
-             condition=IfCondition(enable_arm_control), output='screen'),
-    ])
+    spawner_arguments = [
+        '--controller-manager', '/controller_manager',
+        '--controller-manager-timeout', '30.0',
+        '--switch-timeout', '30.0',
+    ]
+    joint_state_controller = Node(
+        package='controller_manager', executable='spawner',
+        arguments=['joint_state_broadcaster', *spawner_arguments],
+        condition=IfCondition(enable_arm_control), output='screen',
+    )
+    arm_controller = Node(
+        package='controller_manager', executable='spawner',
+        arguments=['arm_controller', *spawner_arguments],
+        condition=IfCondition(enable_arm_control), output='screen',
+    )
+    gripper_controller = Node(
+        package='controller_manager', executable='spawner',
+        arguments=['gripper_controller', *spawner_arguments],
+        condition=IfCondition(enable_arm_control), output='screen',
+    )
+    spray_task = Node(
+        package='wvcsc_arm_task', executable='spray_task',
+        parameters=[
+            os.path.join(arm_task_share, 'config', 'arm_task.yaml'),
+            arm_task_parameters,
+        ],
+        condition=IfCondition(enable_arm_control), output='screen',
+    )
+    moveit_servo = Node(
+        package='moveit_servo', executable='servo_node_main',
+        name='servo_node',
+        parameters=[*common_moveit, {'moveit_servo': servo_parameters}],
+        condition=IfCondition(use_vision_alignment), output='screen',
+    )
+    visual_servo = Node(
+        package='wvcsc_visual_servo', executable='visual_servo',
+        parameters=[
+            os.path.join(visual_servo_share, 'config', 'visual_servo.yaml'),
+            {'use_sim_time': True},
+        ],
+        condition=IfCondition(use_vision_alignment), output='screen',
+    )
+    start_arm_controller = RegisterEventHandler(OnProcessExit(
+        target_action=joint_state_controller,
+        on_exit=[arm_controller],
+    ))
+    start_gripper_controller = RegisterEventHandler(OnProcessExit(
+        target_action=arm_controller,
+        on_exit=[gripper_controller],
+    ))
+    start_spray_task = RegisterEventHandler(OnProcessExit(
+        target_action=gripper_controller,
+        on_exit=[spray_task],
+    ))
     world_map = Node(
         package='tf2_ros', executable='static_transform_publisher',
         arguments=['--x', '0', '--y', '0', '--z', '0', '--roll', '0', '--pitch', '0', '--yaw', '0',
@@ -270,6 +325,8 @@ def generate_launch_description():
             os.path.join(mission_share, 'config', 'mission_manager.yaml'),
             {
                 'auto_start': ParameterValue(auto_start_mission, value_type=bool),
+                'standoff_distance': ParameterValue(
+                    spray_standoff_distance, value_type=float),
                 'return_home_after_finish': ParameterValue(
                     return_home_after_finish, value_type=bool),
                 'use_sim_time': True,
@@ -313,13 +370,16 @@ def generate_launch_description():
         ],
         condition=IfCondition(use_spray_simulator), output='screen',
     )
-    alignment_gate = Node(
-        package='wvcsc_rgb_vision', executable='alignment_gate',
+    color_vision = Node(
+        package='wvcsc_rgb_vision', executable='color_segmentation',
         parameters=[
             os.path.join(vision_share, 'config', 'vision_sim.yaml'),
             {'use_sim_time': True},
         ],
-        condition=IfCondition(use_vision_alignment), output='screen',
+        condition=IfCondition(PythonExpression([
+            "'", use_color_vision, "' == 'true' and '",
+            use_mock_vision, "' == 'false'",
+        ])), output='screen',
     )
     mock_vision = Node(
         package='wvcsc_rgb_vision', executable='mock_vision',
@@ -331,20 +391,28 @@ def generate_launch_description():
     )
     rviz = Node(
         package='rviz2', executable='rviz2',
-        arguments=['-d', os.path.join(moveit_share, 'config', 'moveit.rviz')],
-        parameters=common_moveit, condition=IfCondition(use_rviz), output='log',
+        arguments=['-d', os.path.join(simulation_share, 'rviz', 'wvcsc.rviz')],
+        parameters=[{'use_sim_time': True}], condition=IfCondition(use_rviz), output='log',
     )
     post_spawn = RegisterEventHandler(OnProcessExit(
         target_action=spawn,
         on_exit=[
-            TimerAction(period=5.0, actions=[unpause, vehicle_sim]),
-            TimerAction(period=6.0, actions=[map_server, map_lifecycle, nav2]),
+            unpause,
+            TimerAction(period=0.5, actions=[vehicle_sim]),
+            TimerAction(period=0.75, actions=[color_vision, mock_vision]),
+            TimerAction(period=1.0, actions=[joint_state_controller]),
+            TimerAction(period=2.0, actions=[map_server, map_lifecycle]),
+            TimerAction(period=3.0, actions=[nav2]),
+            TimerAction(
+                period=6.0,
+                actions=[mission_manager, mock_uav, replay_uav],
+            ),
         ],
     ))
 
     return LaunchDescription([
         DeclareLaunchArgument('use_nav2', default_value='true'),
-        DeclareLaunchArgument('use_rviz', default_value='true'),
+        DeclareLaunchArgument('use_rviz', default_value='false'),
         DeclareLaunchArgument('enable_arm_control', default_value='true'),
         DeclareLaunchArgument('enable_ackermann', default_value='true'),
         DeclareLaunchArgument('use_mock_uav', default_value='true'),
@@ -353,9 +421,11 @@ def generate_launch_description():
         DeclareLaunchArgument('use_web_ui', default_value='false'),
         DeclareLaunchArgument('use_spray_simulator', default_value='false'),
         DeclareLaunchArgument('use_mock_vision', default_value='false'),
+        DeclareLaunchArgument('use_color_vision', default_value='true'),
         DeclareLaunchArgument('use_vision_alignment', default_value='false'),
         DeclareLaunchArgument('use_spray_action', default_value='false'),
         DeclareLaunchArgument('auto_start_mission', default_value='false'),
+        DeclareLaunchArgument('spray_standoff_distance', default_value='2.4'),
         DeclareLaunchArgument('return_home_after_finish', default_value='false'),
         DeclareLaunchArgument(
             'mock_target_config',
@@ -374,18 +444,14 @@ def generate_launch_description():
         spawn,
         post_spawn,
         move_group,
+        moveit_servo,
         retime_server,
         motion_control,
-        joint_state_controller,
-        arm_controller,
-        gripper_controller,
-        spray_task,
-        mission_manager,
-        mock_uav,
-        replay_uav,
+        start_arm_controller,
+        start_gripper_controller,
+        start_spray_task,
         web_ui,
         spray_simulator,
-        alignment_gate,
-        mock_vision,
+        visual_servo,
         rviz,
     ])

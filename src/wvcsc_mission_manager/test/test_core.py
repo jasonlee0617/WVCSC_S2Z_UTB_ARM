@@ -63,14 +63,16 @@ def test_safe_skip_and_manual_return_home_semantics():
     assert core.state == MissionState.CANCELED
 
 
-def test_skip_is_rejected_while_arm_is_active():
+def test_vision_failure_can_safely_skip_after_arm_returns_home():
     core = MissionCore()
     core.load('demo', _targets())
     core.start()
     core.nav_succeeded()
     core.stop_verified()
-    assert not core.skip_current()
-    assert core.current_index == 0
+    assert core.skip_current()
+    assert core.current_index == 1
+    assert core.state == MissionState.NAVIGATING
+    assert core.target_outcomes == [core.SKIPPED, core.PENDING]
 
 
 def test_failure_marks_only_the_active_target():

@@ -3,6 +3,6 @@ project(wvcsc_description)
 
 find_package(ament_cmake REQUIRED)
 
-install(DIRECTORY config urdf DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config licenses meshes urdf DESTINATION share/${PROJECT_NAME})
 
 ament_package()

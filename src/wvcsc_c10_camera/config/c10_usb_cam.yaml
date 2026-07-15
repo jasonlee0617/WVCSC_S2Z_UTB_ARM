@@ -1,0 +1,25 @@
+/**:
+  ros__parameters:
+    # Replace only this value with the actual by-id path reported by:
+    #   ls -l /dev/v4l/by-id/
+    video_device: /dev/v4l/by-id/usb-Synria_C10-video-index0
+    framerate: 30.0
+    io_method: mmap
+    frame_id: camera_color_optical_frame
+    pixel_format: mjpeg2rgb
+    av_device_format: YUV422P
+    image_width: 1280
+    image_height: 720
+    camera_name: c10_color
+    camera_info_url: package://wvcsc_c10_camera/config/c10_reference_calibration.yaml
+    brightness: -1
+    contrast: -1
+    saturation: -1
+    sharpness: -1
+    gain: -1
+    auto_white_balance: true
+    white_balance: 4000
+    autoexposure: true
+    exposure: 100
+    autofocus: false
+    focus: -1

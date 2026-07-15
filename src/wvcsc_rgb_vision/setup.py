@@ -21,10 +21,11 @@ setup(
     zip_safe=True,
     maintainer='robot',
     maintainer_email='robot@example.com',
-    description='RGB-only target alignment gate for WVCSC.',
+    description='RGB disease perception for WVCSC.',
     license='Apache-2.0',
     entry_points={'console_scripts': [
         'alignment_gate = wvcsc_rgb_vision.alignment_gate:main',
+        'color_segmentation = wvcsc_rgb_vision.color_segmentation:main',
         'mock_vision = wvcsc_rgb_vision.mock_vision:main',
     ]},
 )

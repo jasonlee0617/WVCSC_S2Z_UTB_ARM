@@ -5,6 +5,7 @@
   <description>Unified Gazebo, MoveIt and Nav2 simulation for WVCSC UTB and Alicia-M.</description>
   <maintainer email="robot@example.com">robot</maintainer>
   <license>Apache-2.0</license>
+  <license>CC-BY-NC-4.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>alicia_m_descriptions</exec_depend>
@@ -18,9 +19,11 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>moveit_ros_move_group</exec_depend>
+  <exec_depend>moveit_servo</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_mppi_controller</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
@@ -30,8 +33,10 @@
   <exec_depend>trajectory_retime_server</exec_depend>
   <exec_depend>wvcsc_description</exec_depend>
   <exec_depend>wvcsc_arm_task</exec_depend>
+  <exec_depend>wvcsc_c10_camera</exec_depend>
   <exec_depend>wvcsc_mission_manager</exec_depend>
   <exec_depend>wvcsc_rgb_vision</exec_depend>
+  <exec_depend>wvcsc_visual_servo</exec_depend>
   <exec_depend>wvcsc_spray_controller</exec_depend>
   <exec_depend>wvcsc_uav_gateway</exec_depend>
   <exec_depend>wvcsc_web_ui</exec_depend>

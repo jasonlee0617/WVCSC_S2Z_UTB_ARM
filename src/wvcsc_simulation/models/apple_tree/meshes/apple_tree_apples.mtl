@@ -1,0 +1,9 @@
+# Derived from o3de/ROSConDemo under CC BY-NC 4.0.
+newmtl AppleMAT
+Ka 0.20 0.20 0.20
+Kd 1.00 1.00 1.00
+Ks 0.25 0.25 0.25
+Ns 24.0
+illum 2
+map_Kd textures/apples.png
+map_Bump -bm 0.1 textures/apples_normal.png

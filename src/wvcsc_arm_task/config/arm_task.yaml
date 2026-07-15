@@ -1,15 +1,17 @@
 wvcsc_spray_task:
   ros__parameters:
     home_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    observe_left_pose: [0.65, -1.35, -1.05, 0.0, -0.75, 0.65]
-    observe_right_pose: [-0.65, -1.35, -1.05, 0.0, -0.75, -0.65]
+    # Offline Jacobian condition numbers are about 12 (< Servo warning 17).
+    # Keep the safety thresholds unchanged and validate both poses in Gazebo.
+    observe_left_pose: [1.886845, -1.463996, -1.033531, 0.597978, 1.272105, -2.261712]
+    observe_right_pose: [-1.882066, -1.471510, -1.031065, -0.585215, 1.288457, -0.891742]
     legacy_spray_side: left
     legacy_spray_duration: 2.0
     min_spray_duration: 0.2
     max_spray_duration: 10.0
     use_vision_alignment: false
     vision_action_name: /vision/align_target
-    vision_timeout_sec: 5.0
+    vision_timeout_sec: 8.0
     use_spray_action: false
     spray_action_name: /spray/execute
     downstream_server_timeout_sec: 2.0

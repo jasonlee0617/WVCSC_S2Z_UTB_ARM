@@ -110,7 +110,8 @@ class MissionCore:
         if self.state not in {
                 MissionState.READY,
                 MissionState.PAUSED,
-                MissionState.VERIFYING_STOP}:
+                MissionState.VERIFYING_STOP,
+                MissionState.ARM_SPRAYING}:
             return False
         previous_state = self.state
         self.target_outcomes[self.current_index] = self.SKIPPED
@@ -121,7 +122,9 @@ class MissionCore:
                 MissionState.RETURNING_HOME
                 if return_home else MissionState.MISSION_COMPLETED
             )
-        elif previous_state == MissionState.VERIFYING_STOP:
+        elif previous_state in {
+                MissionState.VERIFYING_STOP,
+                MissionState.ARM_SPRAYING}:
             self.state = MissionState.NAVIGATING
         else:
             self.state = previous_state

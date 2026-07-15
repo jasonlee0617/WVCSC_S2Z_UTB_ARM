@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from action_msgs.msg import GoalStatus
+from wvcsc_interfaces.action import ExecuteSpray
 
 from wvcsc_mission_manager.core import (
     MissionCore,
@@ -175,6 +176,26 @@ def test_spray_rejection_and_failed_result_do_not_advance_target():
     )
     assert failed.core.state == MissionState.FAILED
     assert failed.core.current_index == 0
+
+
+def test_ordinary_vision_failure_skips_target_after_home():
+    harness = _Harness(MissionState.ARM_SPRAYING)
+    result = SimpleNamespace(
+        success=False,
+        error_code=ExecuteSpray.Result.VISION_FAILED,
+        message='target unavailable/stale',
+    )
+
+    MissionManager._spray_result(
+        harness,
+        _Future(SimpleNamespace(
+            status=GoalStatus.STATUS_ABORTED, result=result)),
+    )
+
+    assert harness.core.state == MissionState.MISSION_COMPLETED
+    assert harness.core.skipped_targets == 1
+    assert harness.core.target_outcomes == [MissionCore.SKIPPED]
+    assert harness.failures == []
 
 
 def test_nav_spray_and_stop_timeouts_fail_the_active_target():

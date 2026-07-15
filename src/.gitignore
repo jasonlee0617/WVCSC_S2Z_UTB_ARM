@@ -1,7 +1,12 @@
-# ROS2 / colcon build output
-build/
-install/
-log/
+# ROS2 / colcon build output (in any package or workspace level)
+**/build/
+**/install/
+**/log/
+**/.colcon/
+**/compile_commands.json
+**/colcon_command_prefix_setup_py.sh
+**/colcon_command_prefix_build.sh
+**/colcon.pkg
 
 # Python virtual environments
 venv/
@@ -17,7 +22,8 @@ ENV/
 */site-packages/
 
 # Python cache
-__pycache__/
+**/__pycache__/
+**/.pytest_cache/
 *.pyc
 *.pyo
 *.pyd
@@ -28,13 +34,18 @@ __pycache__/
 dist/
 
 # CMake / C++ temporary files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
 *.o
 *.a
 *.out
+
+# Editor temporary files
+*.swp
+*.swo
+*.swn
 
 # AI / model files
 *.pt
@@ -80,3 +91,8 @@ checkpoints/
 # System files
 .DS_Store
 Thumbs.db
+
+# The CAN vendor shared objects below are source inputs, not build output.
+# Keep them versioned so a clone can compile can_bridge and wtb_car_driver.
+# There is intentionally no broad *.so rule, so these architecture-specific files
+# remain visible to Git and can be committed with the source tree.

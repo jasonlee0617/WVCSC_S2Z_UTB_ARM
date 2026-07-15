@@ -40,6 +40,7 @@ class AckermannSim(Node):
         self.client = self.create_client(SetEntityState, '/set_entity_state')
         self.create_subscription(Twist, '/cmd_vel', self.command, 10)
         self.create_timer(self.UPDATE_PERIOD, self.update)
+        self.publish_state(self.last_time, 0.0, 1.0)
 
     def command(self, message):
         self.speed = max(
