@@ -92,27 +92,5 @@
       <pose>13 -2 0 0 0 0</pose>
     </include>
 
-    <!-- Four UAV-reported diseased trees. Patches face the road and lie about
-         1.0 m from their docking positions; the remaining trees stay healthy. -->
-    <include>
-      <uri>model://disease_patch</uri>
-      <name>tree_01_disease_patch</name>
-      <pose>3.40 0.90 1.85 0 0 0</pose>
-    </include>
-    <include>
-      <uri>model://disease_patch</uri>
-      <name>tree_02_disease_patch</name>
-      <pose>5.40 -0.90 1.87 0 0 3.14159265359</pose>
-    </include>
-    <include>
-      <uri>model://disease_patch</uri>
-      <name>tree_03_disease_patch</name>
-      <pose>11.40 0.90 1.83 0 0 0</pose>
-    </include>
-    <include>
-      <uri>model://disease_patch</uri>
-      <name>tree_04_disease_patch</name>
-      <pose>13.40 -0.90 1.86 0 0 3.14159265359</pose>
-    </include>
   </world>
 </sdf>

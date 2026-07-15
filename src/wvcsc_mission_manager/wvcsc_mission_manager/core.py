@@ -182,21 +182,25 @@ class MissionCore:
         return True
 
 
-def docking_pose(target, road_center_y=0.0, road_yaw=0.0, standoff=1.5):
+def docking_pose(
+        target, road_center_y=0.0, road_yaw=0.0,
+        lateral_offset=0.5):
+    values = (target.x, target.y, road_center_y, road_yaw, lateral_offset)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError(f'{target.tree_id}: non-finite docking pose')
+    if lateral_offset < 0.0:
+        raise ValueError('lateral_offset must be non-negative')
     if target.spray_side == 'left':
         if target.y <= road_center_y:
             raise ValueError(f'{target.tree_id}: left target is not left of the road')
-        goal_y = target.y - standoff
+        goal_y = road_center_y + lateral_offset
     elif target.spray_side == 'right':
         if target.y >= road_center_y:
             raise ValueError(f'{target.tree_id}: right target is not right of the road')
-        goal_y = target.y + standoff
+        goal_y = road_center_y - lateral_offset
     else:
         raise ValueError(f'{target.tree_id}: invalid spray_side')
-    values = (target.x, goal_y, road_yaw)
-    if not all(math.isfinite(value) for value in values):
-        raise ValueError(f'{target.tree_id}: non-finite docking pose')
-    return values
+    return target.x, goal_y, road_yaw
 
 
 class StopDetector:

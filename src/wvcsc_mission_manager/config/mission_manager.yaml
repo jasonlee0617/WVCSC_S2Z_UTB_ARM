@@ -6,7 +6,7 @@ mission_manager:
     spray_action_name: /arm/execute_spray
     road_center_y: 0.0
     road_yaw: 0.0
-    standoff_distance: 1.5
+    docking_lateral_offset: 0.5
     nav_goal_timeout_sec: 120.0
     spray_goal_timeout_sec: 60.0
     return_home_after_finish: false

@@ -30,7 +30,8 @@ class MissionManager(Node):
         self._map_frame = str(self.get_parameter('map_frame').value)
         self._road_center_y = float(self.get_parameter('road_center_y').value)
         self._road_yaw = float(self.get_parameter('road_yaw').value)
-        self._standoff = float(self.get_parameter('standoff_distance').value)
+        self._docking_lateral_offset = float(
+            self.get_parameter('docking_lateral_offset').value)
         self._nav_timeout = float(self.get_parameter('nav_goal_timeout_sec').value)
         self._spray_timeout = float(self.get_parameter('spray_goal_timeout_sec').value)
         self._return_home_after_finish = bool(
@@ -96,7 +97,7 @@ class MissionManager(Node):
             'spray_action_name': '/arm/execute_spray',
             'road_center_y': 0.0,
             'road_yaw': 0.0,
-            'standoff_distance': 1.5,
+            'docking_lateral_offset': 0.5,
             'nav_goal_timeout_sec': 120.0,
             'spray_goal_timeout_sec': 60.0,
             'return_home_after_finish': False,
@@ -178,7 +179,8 @@ class MissionManager(Node):
                 tree.confidence, tree.spray_side, tree.spray_duration,
                 tree.evidence_uri)
             docking_pose(
-                target, self._road_center_y, self._road_yaw, self._standoff)
+                target, self._road_center_y, self._road_yaw,
+                self._docking_lateral_offset)
             targets.append(target)
         return targets
 
@@ -286,7 +288,8 @@ class MissionManager(Node):
                 self._fail('no current navigation target')
                 return
             x, y, yaw = docking_pose(
-                target, self._road_center_y, self._road_yaw, self._standoff)
+                target, self._road_center_y, self._road_yaw,
+                self._docking_lateral_offset)
             target_label = target.tree_id
         goal = NavigateToPose.Goal()
         goal.pose.header.stamp = self.get_clock().now().to_msg()
@@ -539,7 +542,7 @@ class MissionManager(Node):
                 item.docking_pose,
                 *docking_pose(
                     target, self._road_center_y, self._road_yaw,
-                    self._standoff),
+                    self._docking_lateral_offset),
             )
             message.targets.append(item)
         self._plan_pub.publish(message)

@@ -16,7 +16,7 @@ def _targets():
     ]
 
 
-def test_docking_pose_uses_tree_coordinate_and_side():
+def test_docking_pose_offsets_toward_target_side():
     assert docking_pose(_targets()[0]) == (3.0, 0.5, 0.0)
     assert docking_pose(_targets()[1]) == (5.0, -0.5, 0.0)
 
@@ -25,6 +25,11 @@ def test_rejects_side_that_disagrees_with_road_geometry():
     target = Target('bad', 1.0, -2.0, 0.0, 0.9, 'left', 2.0)
     with pytest.raises(ValueError):
         docking_pose(target)
+
+
+def test_rejects_negative_lateral_offset():
+    with pytest.raises(ValueError):
+        docking_pose(_targets()[0], lateral_offset=-0.1)
 
 
 def test_two_target_success_path():

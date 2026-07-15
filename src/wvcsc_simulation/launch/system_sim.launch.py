@@ -45,7 +45,6 @@ def generate_launch_description():
     use_vision_alignment = LaunchConfiguration('use_vision_alignment')
     use_spray_action = LaunchConfiguration('use_spray_action')
     auto_start_mission = LaunchConfiguration('auto_start_mission')
-    spray_standoff_distance = LaunchConfiguration('spray_standoff_distance')
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
     mock_target_config = LaunchConfiguration('mock_target_config')
     replay_target_config = LaunchConfiguration('replay_target_config')
@@ -66,6 +65,7 @@ def generate_launch_description():
     alicia_model_root = os.path.dirname(get_package_share_directory('alicia_m_descriptions'))
     gazebo_model_path = os.pathsep.join(filter(None, [
         os.path.join(simulation_share, 'models'),
+        os.path.dirname(description_share),
         alicia_model_root,
         os.environ.get('GAZEBO_MODEL_PATH'),
     ]))
@@ -325,8 +325,6 @@ def generate_launch_description():
             os.path.join(mission_share, 'config', 'mission_manager.yaml'),
             {
                 'auto_start': ParameterValue(auto_start_mission, value_type=bool),
-                'standoff_distance': ParameterValue(
-                    spray_standoff_distance, value_type=float),
                 'return_home_after_finish': ParameterValue(
                     return_home_after_finish, value_type=bool),
                 'use_sim_time': True,
@@ -421,11 +419,10 @@ def generate_launch_description():
         DeclareLaunchArgument('use_web_ui', default_value='false'),
         DeclareLaunchArgument('use_spray_simulator', default_value='false'),
         DeclareLaunchArgument('use_mock_vision', default_value='false'),
-        DeclareLaunchArgument('use_color_vision', default_value='true'),
+        DeclareLaunchArgument('use_color_vision', default_value='false'),
         DeclareLaunchArgument('use_vision_alignment', default_value='false'),
         DeclareLaunchArgument('use_spray_action', default_value='false'),
-        DeclareLaunchArgument('auto_start_mission', default_value='false'),
-        DeclareLaunchArgument('spray_standoff_distance', default_value='2.4'),
+        DeclareLaunchArgument('auto_start_mission', default_value='true'),
         DeclareLaunchArgument('return_home_after_finish', default_value='false'),
         DeclareLaunchArgument(
             'mock_target_config',

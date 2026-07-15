@@ -99,7 +99,7 @@
         <sensor name="c10_color" type="camera">
           <always_on>true</always_on>
           <update_rate>30.0</update_rate>
-          <visualize>true</visualize>
+          <visualize>false</visualize>
           <camera name="c10_color">
             <horizontal_fov>1.8</horizontal_fov>
             <image>

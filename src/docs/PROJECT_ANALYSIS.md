@@ -552,9 +552,10 @@ Alicia-M 是 **Synria Robotics** 制造的 **6-DOF 串联关节式机械臂 + �
 | `use_nav2` | `true` | 启用 Nav2 导航；机械臂基线回归可显式设为 `false` |
 | `use_rviz` | `false` | 启动 RViz2；需要观察时显式设为 `true` |
 | `enable_arm_control` | `true` | 启用机械臂 ros2_control |
-| `use_color_vision` | `true` | 启动 Gazebo RGB 病斑分割；与 Mock 视觉互斥 |
+| `use_color_vision` | `false` | 可选启动 Gazebo RGB 颜色分割；YOLO 接入前默认关闭 |
 | `use_vision_alignment` | `false` | 启用 MoveIt Servo 视觉对准 |
-| `spray_standoff_distance` | `2.4` | 仿真停车距离，用于保持约 0.8–1.5m 喷距 |
+
+任务管理器使用树的 X 坐标，并按 `spray_side` 在道路中心左右偏移 `0.5m` 生成作业位姿；该偏移是车道停靠参数，不作为喷洒距离。
 
 启动序列：
 1. 设置 `GAZEBO_MODEL_PATH`

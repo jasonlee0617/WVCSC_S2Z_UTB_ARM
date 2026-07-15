@@ -102,7 +102,7 @@ class _Validator:
         self._map_frame = 'map'
         self._road_center_y = 0.0
         self._road_yaw = 0.0
-        self._standoff = 1.5
+        self._docking_lateral_offset = 0.5
         self.parameters = {
             'confidence_threshold': 0.5,
             'max_targets': 2,
