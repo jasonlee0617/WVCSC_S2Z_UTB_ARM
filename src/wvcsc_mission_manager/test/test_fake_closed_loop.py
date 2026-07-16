@@ -2,6 +2,8 @@ import math
 import os
 import time
 
+import pytest
+
 os.environ['ROS_DOMAIN_ID'] = '82'
 os.environ.setdefault('ROS_LOG_DIR', '/tmp/wvcsc_mission_test_logs')
 
@@ -20,9 +22,11 @@ from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.msg import (
     DiseaseTree,
     DiseaseTreeArray,
+    ManualMissionTarget,
     MissionPlan,
     MissionStatus,
 )
+from wvcsc_interfaces.srv import LoadManualMission
 
 from wvcsc_mission_manager.mission_manager import MissionManager
 
@@ -32,7 +36,9 @@ class _FakeServers(Node):
         super().__init__('fake_mission_action_servers', context=context)
         group = ReentrantCallbackGroup()
         self.nav_goals = []
+        self.nav_yaws = []
         self.spray_goals = []
+        self.tree_hints = []
         self.nav_server = ActionServer(
             self,
             NavigateToPose,
@@ -51,12 +57,21 @@ class _FakeServers(Node):
     def _execute_nav(self, goal_handle):
         pose = goal_handle.request.pose.pose
         self.nav_goals.append((pose.position.x, pose.position.y))
+        self.nav_yaws.append(math.atan2(
+            2.0 * pose.orientation.w * pose.orientation.z,
+            1.0 - 2.0 * pose.orientation.z ** 2))
         goal_handle.succeed()
         return NavigateToPose.Result()
 
     def _execute_spray(self, goal_handle):
         request = goal_handle.request
         self.spray_goals.append((request.tree_id, request.spray_side))
+        self.tree_hints.append((
+            request.tree_hint.header.frame_id,
+            request.tree_hint.point.x,
+            request.tree_hint.point.y,
+            request.tree_hint.point.z,
+        ))
         result = ExecuteSpray.Result()
         result.success = True
         result.error_code = ExecuteSpray.Result.OK
@@ -77,6 +92,9 @@ class _Harness(Node):
             DiseaseTreeArray, '/uav/disease_trees', qos)
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
         self.reset_client = self.create_client(Trigger, '/mission/reset')
+        self.start_client = self.create_client(Trigger, '/mission/start')
+        self.manual_client = self.create_client(
+            LoadManualMission, '/mission/load_manual')
         self.status = None
         self.plan = None
         self.create_subscription(
@@ -116,6 +134,25 @@ class _Harness(Node):
             tree.spray_duration = 0.2
             message.trees.append(tree)
         self.mission_pub.publish(message)
+
+    def load_manual(self, mission_id, targets, return_home=False):
+        request = LoadManualMission.Request()
+        request.header.stamp = self.get_clock().now().to_msg()
+        request.header.frame_id = 'map'
+        request.mission_id = mission_id
+        request.home_pose.orientation.w = 1.0
+        request.return_home_after_finish = return_home
+        for target_id, x, y, yaw, side in targets:
+            target = ManualMissionTarget()
+            target.target_id = target_id
+            target.docking_pose.position.x = x
+            target.docking_pose.position.y = y
+            target.docking_pose.orientation.z = math.sin(yaw / 2.0)
+            target.docking_pose.orientation.w = math.cos(yaw / 2.0)
+            target.spray_side = side
+            target.spray_duration = 0.2
+            request.targets.append(target)
+        return self.manual_client.call_async(request)
 
 
 def _spin_until(executor, predicate, timeout=5.0):
@@ -176,6 +213,10 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
         assert servers.spray_goals == [
             ('tree_01', 'left'),
             ('tree_02', 'right'),
+        ] * 3
+        assert servers.tree_hints == [
+            ('map', 3.0, 2.0, 0.0),
+            ('map', 5.0, -2.0, 0.0),
         ] * 3
         assert harness.plan.mission_id == 'fake_closed_loop_2'
         assert [item.target.tree_id for item in harness.plan.targets] == [
@@ -247,6 +288,70 @@ def test_optional_return_home_adds_final_nav_goal():
         manager._spray_client.destroy()
         servers.nav_server.destroy()
         servers.spray_server.destroy()
+        for node in (harness, manager, servers):
+            executor.remove_node(node)
+            node.destroy_node()
+        executor.shutdown(timeout_sec=1.0)
+        context.try_shutdown()
+
+
+def test_manual_mission_preserves_rviz_pose_and_yaw():
+    context = Context()
+    rclpy.init(context=context)
+    servers = _FakeServers(context)
+    manager = MissionManager(
+        context=context,
+        parameter_overrides=[
+            Parameter('auto_start', value=False),
+            Parameter('stop_stable_duration_sec', value=0.1),
+            Parameter('odom_stale_timeout_sec', value=0.5),
+            Parameter('stop_verify_timeout_sec', value=2.0),
+            Parameter('nav_goal_timeout_sec', value=3.0),
+            Parameter('spray_goal_timeout_sec', value=3.0),
+        ],
+    )
+    harness = _Harness(context)
+    executor = SingleThreadedExecutor(context=context)
+    for node in (servers, manager, harness):
+        executor.add_node(node)
+
+    try:
+        assert _spin_until(executor, manager._servers_ready)
+        assert _spin_until(executor, harness.manual_client.service_is_ready)
+        assert _spin_until(executor, harness.start_client.service_is_ready)
+        load = harness.load_manual(
+            'manual_pose_loop',
+            [('single_01', 3.2, 0.7, 0.4, 'left')],
+        )
+        assert _spin_until(executor, load.done)
+        assert load.result().success
+        start = harness.start_client.call_async(Trigger.Request())
+        assert _spin_until(executor, start.done)
+        assert start.result().success
+        assert _spin_until(
+            executor,
+            lambda: (
+                harness.status is not None
+                and harness.status.mission_id == 'manual_pose_loop'
+                and harness.status.state == MissionStatus.MISSION_COMPLETED),
+        )
+        assert servers.nav_goals == [(3.2, 0.7)]
+        assert math.isclose(servers.nav_yaws[0], 0.4, abs_tol=1e-6)
+        assert servers.spray_goals == [('single_01', 'left')]
+        assert servers.tree_hints[0][0] == 'map'
+        assert servers.tree_hints[0][1:] == pytest.approx((2.615872, 2.081591, 0.0))
+        assert harness.plan.targets[0].docking_pose.position.x == 3.2
+        assert harness.plan.targets[0].docking_pose.position.y == 0.7
+    finally:
+        for _ in range(5):
+            executor.spin_once(timeout_sec=0.02)
+        manager._nav_client.destroy()
+        manager._spray_client.destroy()
+        servers.nav_server.destroy()
+        servers.spray_server.destroy()
+        for client in (
+                harness.reset_client, harness.start_client, harness.manual_client):
+            harness.destroy_client(client)
         for node in (harness, manager, servers):
             executor.remove_node(node)
             node.destroy_node()

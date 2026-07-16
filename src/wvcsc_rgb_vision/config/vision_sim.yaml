@@ -1,37 +1,15 @@
-wvcsc_alignment_gate:
-  ros__parameters:
-    target_topic: /vision/target
-    action_name: /vision/align_target
-    tolerance_u: 20.0
-    tolerance_v: 20.0
-    min_confidence: 0.7
-    stable_frames: 5
-    stale_timeout_sec: 0.5
-    min_goal_timeout_sec: 0.5
-    max_goal_timeout_sec: 30.0
-
-wvcsc_mock_vision:
-  ros__parameters:
-    image_width: 1280
-    image_height: 720
-    error_u: 0.0
-    error_v: 0.0
-    confidence: 0.95
-    publish_rate_hz: 10.0
-
-wvcsc_color_segmentation:
+wvcsc_two_stage_yolo:
   ros__parameters:
     image_topic: /camera/camera/color/image_rect_raw
-    detections_topic: /vision/pest_detections
+    selected_target_topic: /vision/selected_target_id
+    tree_detections_topic: /vision/tree_detections
+    fruit_detections_topic: /vision/fruit_detections
     target_topic: /vision/target
     debug_image_topic: /vision/debug_image
+    tree_model_path: wvcsc_tree_yolov8s.pt
+    fruit_model_path: wvcsc_fruit_yolov8s_seg.pt
+    tree_confidence: 0.50
+    fruit_confidence: 0.50
+    roi_padding: 0.10
+    track_iou_threshold: 0.30
     publish_debug_image: true
-    min_area_px: 400
-    nominal_area_px: 2500
-    red_hue_low_1: 14
-    red_hue_high_1: 25
-    red_hue_low_2: 14
-    red_hue_high_2: 25
-    saturation_min: 120
-    value_min: 35
-    morphology_kernel: 5

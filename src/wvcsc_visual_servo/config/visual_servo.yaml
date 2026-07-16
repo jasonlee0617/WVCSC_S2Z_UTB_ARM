@@ -18,7 +18,7 @@ wvcsc_visual_servo:
     fine_tolerance_px: 8.0
     stable_frames: 10
     desired_offset_u_px: 0.0
-    # Camera is about 55 mm from the nozzle axis: fy * 0.055 / 1.0 m.
+    # Camera is about 55 mm from the tool0 axis: fy * 0.055 / 1.0 m.
     desired_offset_v_px: 28.0
     fallback_fx: 507.872735
     fallback_fy: 507.872735

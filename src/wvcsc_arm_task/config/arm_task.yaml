@@ -1,18 +1,29 @@
 wvcsc_spray_task:
   ros__parameters:
     home_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    # Offline Jacobian condition numbers are about 12 (< Servo warning 17).
-    # Keep the safety thresholds unchanged and validate both poses in Gazebo.
-    observe_left_pose: [1.886845, -1.463996, -1.033531, 0.597978, 1.272105, -2.261712]
-    observe_right_pose: [-1.882066, -1.471510, -1.031065, -0.585215, 1.288457, -0.891742]
-    legacy_spray_side: left
-    legacy_spray_duration: 2.0
+    # tree_hint denotes the root; plan camera optical +Z toward its crown.
+    # Keep the camera high enough for MoveIt while pitching down at the crown.
+    tree_aim_height: 1.20
+    camera_observation_height: 1.90
+    observation_distance: 1.40
+    camera_frame: camera_color_optical_frame
     min_spray_duration: 0.2
     max_spray_duration: 10.0
-    use_vision_alignment: false
     vision_action_name: /vision/align_target
     vision_timeout_sec: 8.0
-    use_spray_action: false
     spray_action_name: /spray/execute
     downstream_server_timeout_sec: 2.0
     downstream_result_margin_sec: 2.0
+    tree_detection_topic: /vision/tree_detections
+    fruit_detection_topic: /vision/fruit_detections
+    selected_target_topic: /vision/selected_target_id
+    motion_locked_topic: /motion_control/locked
+    tree_confidence: 0.50
+    fruit_confidence: 0.50
+    confirmation_frames: 3
+    scan_timeout_sec: 3.0
+    detection_timeout_sec: 2.0
+    processed_iou_threshold: 0.30
+    processed_center_distance_px: 40.0
+    image_width: 1280
+    image_height: 720

@@ -1,567 +1,700 @@
 #!/usr/bin/env python3
-import sys
-import rclpy
-from rclpy.node import Node
-from rclpy.action import ActionClient
-from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateToPose
-from action_msgs.msg import GoalStatus
-from std_msgs.msg import Header
-import numpy as np
-from tf2_ros import TransformListener, Buffer, TransformException
-from tf2_geometry_msgs import do_transform_pose
+"""Manual single-point and multi-point mission editor for WVCSC."""
 
-# Qt 导入
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, 
-                             QPushButton, QMessageBox, QLabel)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPalette, QColor
-from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, 
-                            QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
-                            QMessageBox, QFileDialog)
-from rclpy.clock import Clock, ClockType
 import datetime
+import json
+import math
 import os
+import sys
+import uuid
+from dataclasses import dataclass
 
-# 定义保存点的默认文件路径
-DEFAULT_SAVE_PATH = os.path.expanduser("~/navigation_points.json")
+import rclpy
+from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (
+    QApplication,
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_srvs.srv import Trigger
+from tf2_ros import Buffer, TransformException, TransformListener
+from visualization_msgs.msg import Marker, MarkerArray
+from wvcsc_interfaces.msg import (
+    ManualMissionTarget,
+    MissionPlan,
+    MissionStatus,
+)
+from wvcsc_interfaces.srv import LoadManualMission
 
-# 导航客户端类
-class Nav2Client(Node):
+
+DEFAULT_SAVE_PATH = os.path.expanduser('~/navigation_points.json')
+
+
+def copy_pose(source):
+    pose = Pose()
+    pose.position.x = source.position.x
+    pose.position.y = source.position.y
+    pose.position.z = source.position.z
+    pose.orientation.x = source.orientation.x
+    pose.orientation.y = source.orientation.y
+    pose.orientation.z = source.orientation.z
+    pose.orientation.w = source.orientation.w
+    return pose
+
+
+def pose_yaw(pose):
+    return math.atan2(
+        2.0 * (pose.orientation.w * pose.orientation.z
+               + pose.orientation.x * pose.orientation.y),
+        1.0 - 2.0 * (pose.orientation.y ** 2 + pose.orientation.z ** 2),
+    )
+
+
+def pose_to_json(pose):
+    return {
+        'position': {
+            'x': pose.position.x,
+            'y': pose.position.y,
+            'z': pose.position.z,
+        },
+        'orientation': {
+            'x': pose.orientation.x,
+            'y': pose.orientation.y,
+            'z': pose.orientation.z,
+            'w': pose.orientation.w,
+        },
+    }
+
+
+def pose_from_json(data):
+    pose = Pose()
+    pose.position.x = float(data['position']['x'])
+    pose.position.y = float(data['position']['y'])
+    pose.position.z = float(data['position'].get('z', 0.0))
+    pose.orientation.x = float(data['orientation'].get('x', 0.0))
+    pose.orientation.y = float(data['orientation'].get('y', 0.0))
+    pose.orientation.z = float(data['orientation']['z'])
+    pose.orientation.w = float(data['orientation']['w'])
+    return pose
+
+
+def inferred_side(pose, road_center_y=0.0, road_yaw=0.0):
+    lateral = (-math.sin(road_yaw) * pose.position.x
+               + math.cos(road_yaw) * (pose.position.y - road_center_y))
+    return 'left' if lateral >= 0.0 else 'right'
+
+
+@dataclass
+class WorkPoint:
+    pose: Pose
+    spray_side: str
+
+
+class MissionEditor:
+    schema_version = 2
+
+    def __init__(self, road_center_y=0.0, road_yaw=0.0):
+        self.road_center_y = float(road_center_y)
+        self.road_yaw = float(road_yaw)
+        self.start_pose = None
+        self.points = []
+        self.spray_duration = 2.0
+        self.return_home_after_finish = False
+
+    def add_point(self, pose, spray_side=None):
+        side = spray_side or inferred_side(
+            pose, self.road_center_y, self.road_yaw)
+        self.points.append(WorkPoint(copy_pose(pose), side))
+
+    def save(self, path):
+        data = {
+            'schema_version': self.schema_version,
+            'start_pose': (
+                pose_to_json(self.start_pose) if self.start_pose else None),
+            'spray_duration': self.spray_duration,
+            'return_home_after_finish': self.return_home_after_finish,
+            'targets': [
+                {'pose': pose_to_json(point.pose),
+                 'spray_side': point.spray_side}
+                for point in self.points
+            ],
+        }
+        with open(path, 'w', encoding='utf-8') as stream:
+            json.dump(data, stream, indent=2, ensure_ascii=False)
+
+    def load(self, path):
+        with open(path, encoding='utf-8') as stream:
+            data = json.load(stream)
+        if data.get('schema_version') == self.schema_version:
+            self.start_pose = (
+                pose_from_json(data['start_pose'])
+                if data.get('start_pose') else None)
+            self.spray_duration = float(data.get('spray_duration', 2.0))
+            self.return_home_after_finish = bool(
+                data.get('return_home_after_finish', False))
+            self.points = [
+                WorkPoint(
+                    pose_from_json(item['pose']),
+                    item.get('spray_side') or inferred_side(
+                        pose_from_json(item['pose']), self.road_center_y,
+                        self.road_yaw),
+                )
+                for item in data.get('targets', [])
+            ]
+            return
+        self.start_pose = (
+            pose_from_json(data['point1']) if data.get('point1') else None)
+        self.points = []
+        if data.get('point2'):
+            self.add_point(pose_from_json(data['point2']))
+
+
+class Nav2QtNode(Node):
     def __init__(self):
-        super().__init__('nav2_qt_client')
-        
-        # 创建导航动作客户端
-        self.nav_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
-        self.get_logger().info("等待连接到Nav2服务器...")
-        while not self.nav_client.wait_for_server(timeout_sec=1.0):
-            self.get_logger().warn("Nav2服务器未连接，重试中...")
-        self.get_logger().info("Nav2服务器连接成功")
-        
-        # 初始化TF2，与PathRecorder.py保持一致
+        super().__init__('nav2_qt')
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.declare_parameter('initial_pose_topic', '/initialpose')
+        self.declare_parameter('goal_pose_topic', '/manual_goal_pose')
+        self.declare_parameter('marker_topic', '/waypoints')
+        self.declare_parameter('road_center_y', 0.0)
+        self.declare_parameter('road_yaw', 0.0)
+        self.map_frame = str(self.get_parameter('map_frame').value)
+        self.base_frame = str(self.get_parameter('base_frame').value)
+        self.road_center_y = float(self.get_parameter('road_center_y').value)
+        self.road_yaw = float(self.get_parameter('road_yaw').value)
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        
-     
-        # 起点和终点
-        self.start_pose = None
-        self.end_pose = None
+        self.latest_initial_pose = None
+        self.latest_goal_pose = None
+        self.goal_sequence = 0
+        self.status = None
+        self.plan = None
 
-        self.declare_parameter('frame_id', 'map')
-        self.declare_parameter('base_link', 'base_footprint')
+        latched = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(
+            PoseWithCovarianceStamped,
+            str(self.get_parameter('initial_pose_topic').value),
+            self._on_initial_pose, 10)
+        self.create_subscription(
+            PoseStamped,
+            str(self.get_parameter('goal_pose_topic').value),
+            self._on_goal_pose, 10)
+        self.create_subscription(MissionStatus, '/mission/status',
+                                 self._on_status, latched)
+        self.create_subscription(MissionPlan, '/mission/plan',
+                                 self._on_plan, latched)
+        self.marker_pub = self.create_publisher(
+            MarkerArray, str(self.get_parameter('marker_topic').value), 10)
+        self.service_clients = {
+            'load': self.create_client(LoadManualMission,
+                                       '/mission/load_manual'),
+            'start': self.create_client(Trigger, '/mission/start'),
+            'pause': self.create_client(Trigger, '/mission/pause'),
+            'resume': self.create_client(Trigger, '/mission/resume'),
+            'skip': self.create_client(Trigger, '/mission/skip_current'),
+            'cancel': self.create_client(Trigger, '/mission/cancel'),
+            'return_home': self.create_client(Trigger, '/mission/return_home'),
+            'reset': self.create_client(Trigger, '/mission/reset'),
+        }
 
-        self.frame_id = self.get_parameter('frame_id').value
-        self.base_link = self.get_parameter('base_link').value
+    def _on_initial_pose(self, message):
+        if message.header.frame_id == self.map_frame:
+            self.latest_initial_pose = copy_pose(message.pose.pose)
 
-        self.feedback_show = None
-        
-    '''
-    获取当前车辆位置
-    '''
-    def get_current_pose(self):
-        # 获取当前位置
+    def _on_goal_pose(self, message):
+        if message.header.frame_id != self.map_frame:
+            self.get_logger().warning(
+                f'ignored goal in frame {message.header.frame_id}; '
+                f'expected {self.map_frame}')
+            return
+        self.latest_goal_pose = copy_pose(message.pose)
+        self.goal_sequence += 1
+
+    def _on_status(self, message):
+        self.status = message
+
+    def _on_plan(self, message):
+        self.plan = message
+
+    def current_pose(self):
         try:
             transform = self.tf_buffer.lookup_transform(
-                self.frame_id,
-                self.base_link,
-                rclpy.time.Time()
-            )
-            
-            # 创建PoseStamped消息
-            pose_stamped = PoseStamped()
-            pose_stamped.header.frame_id = self.frame_id
-            pose_stamped.header.stamp = transform.header.stamp
-            pose_stamped.pose.position.x = transform.transform.translation.x
-            pose_stamped.pose.position.y = transform.transform.translation.y
-            pose_stamped.pose.position.z = transform.transform.translation.z
-            pose_stamped.pose.orientation = transform.transform.rotation
-            
-            self.get_logger().info(f"通过TF获取位置 (map->base_footprint)：x={pose_stamped.pose.position.x:.2f}, y={pose_stamped.pose.position.y:.2f}")
-            return pose_stamped
-        except TransformException as e:
-            self.get_logger().warn(f"TF变换获取失败 (map->base_footprint): {e}")
-            
-           
-    """记录当前位置为起点"""
-    def record_start(self):
-        
-        current_pose = self.get_current_pose()
-        if current_pose is None:
-            return False, "未获取到当前位置"
-        
-        self.start_pose = current_pose
-        self.get_logger().info(f"起点已记录：x={self.start_pose.pose.position.x:.2f}, y={self.start_pose.pose.position.y:.2f}")
-        return True, "起点已记录"
-    
-    def record_end(self):
-        """记录当前位置为终点"""
-        current_pose = self.get_current_pose()
-        if current_pose is None:
-            return False, "未获取到当前位置"
-        
-        self.end_pose = current_pose
-        self.get_logger().info(f"终点已记录：x={self.end_pose.pose.position.x:.2f}, y={self.end_pose.pose.position.y:.2f}")
-        return True, "终点已记录"
-    
-    def navigate_to_pose(self, pose):
-        """导航到指定位置"""
-        if pose is None:
-            return False, "目标位置未设置"
-        
-        goal_msg = NavigateToPose.Goal()
-        goal_msg.pose = pose
-        
-        self.get_logger().info(f"发起导航到：x={pose.pose.position.x:.2f}, y={pose.pose.position.y:.2f}")
-        
-        # 发送导航目标
-        send_goal_future = self.nav_client.send_goal_async(
-            goal_msg, 
-            feedback_callback=self.feedback_callback
-        )
-        
-        return True, "导航已发起"
-    
-    def navigate_to_start(self):
-        """导航到起点"""
-        return self.navigate_to_pose(self.start_pose)
-    
-    def navigate_to_end(self):
-        """导航到终点"""
-        return self.navigate_to_pose(self.end_pose)
-    
-    def feedback_callback(self, feedback_msg):
-        """处理导航反馈"""
-        distance = feedback_msg.feedback.distance_remaining
-        # self.get_logger().info(f"导航剩余距离：{distance:.2f}米")
+                self.map_frame, self.base_frame, rclpy.time.Time())
+        except TransformException as error:
+            self.get_logger().warning(f'cannot read vehicle pose: {error}')
+            return None
+        pose = Pose()
+        pose.position.x = transform.transform.translation.x
+        pose.position.y = transform.transform.translation.y
+        pose.position.z = transform.transform.translation.z
+        pose.orientation = transform.transform.rotation
+        return pose
 
-        
-        if self.feedback_show is not None:
-            self.feedback_show(f"导航剩余距离：{distance:.2f}米")
-        
-        
-    
+    def build_manual_request(self, start_pose, points, spray_duration,
+                             return_home_after_finish, prefix):
+        request = LoadManualMission.Request()
+        request.header.stamp = self.get_clock().now().to_msg()
+        request.header.frame_id = self.map_frame
+        request.mission_id = f'manual_{prefix}_{uuid.uuid4().hex[:8]}'
+        request.home_pose = copy_pose(start_pose)
+        request.return_home_after_finish = return_home_after_finish
+        for index, point in enumerate(points, start=1):
+            target = ManualMissionTarget()
+            target.target_id = f'{prefix}_{index:02d}'
+            target.docking_pose = copy_pose(point.pose)
+            target.spray_side = point.spray_side
+            target.spray_duration = float(spray_duration)
+            request.targets.append(target)
+        return request
 
-# Qt主界面类
-class Nav2GUI(QWidget):
-    def __init__(self, nav_client):
+    def publish_markers(self, editor, candidate):
+        markers = MarkerArray()
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        markers.markers.append(clear)
+        if editor.start_pose is not None:
+            markers.markers.append(self._marker(
+                editor.start_pose, 'manual_start', 0, 0.2, 0.9, 0.2))
+        for index, point in enumerate(editor.points, start=1):
+            markers.markers.append(self._marker(
+                point.pose, 'manual_target', index, 0.1, 0.6, 1.0))
+            markers.markers.append(self._label(point.pose, index))
+        if candidate is not None:
+            markers.markers.append(self._marker(
+                candidate, 'manual_candidate', 1000, 1.0, 0.8, 0.0))
+        self.marker_pub.publish(markers)
+
+    def _marker(self, pose, namespace, marker_id, red, green, blue):
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = namespace
+        marker.id = marker_id
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+        marker.pose = copy_pose(pose)
+        marker.scale.x = 0.55
+        marker.scale.y = 0.14
+        marker.scale.z = 0.14
+        marker.color.r = red
+        marker.color.g = green
+        marker.color.b = blue
+        marker.color.a = 0.9
+        return marker
+
+    def _label(self, pose, index):
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'manual_target_label'
+        marker.id = index
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.pose = copy_pose(pose)
+        marker.pose.position.z += 0.35
+        marker.scale.z = 0.25
+        marker.color.r = marker.color.g = marker.color.b = marker.color.a = 1.0
+        marker.text = str(index)
+        return marker
+
+
+class Nav2Gui(QWidget):
+    TERMINAL = {
+        MissionStatus.MISSION_COMPLETED,
+        MissionStatus.CANCELED,
+        MissionStatus.FAILED,
+    }
+    ACTIVE = {
+        MissionStatus.READY,
+        MissionStatus.NAVIGATING,
+        MissionStatus.VERIFYING_STOP,
+        MissionStatus.ARM_SPRAYING,
+        MissionStatus.PAUSED,
+        MissionStatus.RETURNING_HOME,
+    }
+
+    def __init__(self, node):
         super().__init__()
-
-        self.clock = Clock(clock_type=ClockType.ROS_TIME)
-
+        self.node = node
+        self.editor = MissionEditor(node.road_center_y, node.road_yaw)
         self.save_path = DEFAULT_SAVE_PATH
-        self.point1 = None
-        self.point2 = None
-        self.load_points()
+        self.candidate = None
+        self.candidate_sequence = 0
+        self.consumed_goal_sequence = 0
+        self.single_mission_id = None
+        self.pending = False
+        self._build_ui()
+        self.ros_timer = QTimer(self)
+        self.ros_timer.timeout.connect(self._spin_ros)
+        self.ros_timer.start(25)
+        self._refresh()
 
-        self.nav_client = nav_client
-        self.nav_client.feedback_show = self.add_log
-        # self.init_ui()
-        self.init_ui2()
-
-        
-    def init_ui(self):
-        """初始化UI界面"""
-        # 设置窗口属性
-        self.setWindowTitle('Nav2 导航控制器')
-        # self.setGeometry(100, 100, 400, 300)
-        self.setGeometry(300, 300, 600, 450)
-        
-        # 创建垂直布局
+    def _build_ui(self):
+        self.setWindowTitle('WVCSC 导航喷洒控制器')
+        self.setGeometry(300, 220, 880, 620)
         layout = QVBoxLayout()
-        
-        # 设置样式
-        self.setStyleSheet(""
-            "QWidget {"
-            "    background-color: #2c3e50;"
-            "    color: #ecf0f1;"
-            "    font-size: 14px;"
-            "}"
-            "QPushButton {"
-            "    background-color: #3498db;"
-            "    color: white;"
-            "    border: none;"
-            "    padding: 12px 20px;"
-            "    margin: 8px;"
-            "    border-radius: 4px;"
-            "    font-size: 14px;"
-            "}"
-            "QPushButton:hover {"
-            "    background-color: #2980b9;"
-            "}"
-            "QPushButton:pressed {"
-            "    background-color: #1f618d;"
-            "}"
-            "QLabel {"
-            "    color: #ecf0f1;"
-            "    margin: 8px;"
-            "    font-size: 14px;"
-            "}"
-        )
-        
-        # 添加状态标签
-        self.status_label = QLabel("就绪")
+
+        task_layout = QGridLayout()
+        self.record_start_button = QPushButton('记录起点')
+        self.add_point_button = QPushButton('添加终点到列表')
+        self.single_button = QPushButton('单点导航+喷洒')
+        self.multi_button = QPushButton('多点导航+喷洒')
+        task_layout.addWidget(self.record_start_button, 0, 0)
+        task_layout.addWidget(self.add_point_button, 0, 1)
+        task_layout.addWidget(self.single_button, 0, 2)
+        task_layout.addWidget(self.multi_button, 0, 3)
+        task_layout.addWidget(QLabel('喷洒时长 (s):'), 1, 0)
+        self.duration_spin = QDoubleSpinBox()
+        self.duration_spin.setRange(0.2, 10.0)
+        self.duration_spin.setSingleStep(0.1)
+        self.duration_spin.setValue(self.editor.spray_duration)
+        task_layout.addWidget(self.duration_spin, 1, 1)
+        layout.addLayout(task_layout)
+
+        self.candidate_label = QLabel('最新RViz终点: 未收到 /manual_goal_pose')
+        self.start_label = QLabel('起点: 未记录')
+        self.return_home_checkbox = QCheckBox('完成后返回起点')
+        layout.addWidget(self.candidate_label)
+        layout.addWidget(self.start_label)
+        layout.addWidget(self.return_home_checkbox)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ['序号', 'x (m)', 'y (m)', 'yaw (rad)', '喷洒侧别'])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        edit_layout = QHBoxLayout()
+        self.delete_button = QPushButton('删除选中点')
+        self.up_button = QPushButton('上移')
+        self.down_button = QPushButton('下移')
+        self.clear_button = QPushButton('清空多点列表')
+        for button in (self.delete_button, self.up_button,
+                       self.down_button, self.clear_button):
+            edit_layout.addWidget(button)
+        layout.addLayout(edit_layout)
+
+        control_layout = QHBoxLayout()
+        self.pause_button = QPushButton('暂停')
+        self.resume_button = QPushButton('继续')
+        self.skip_button = QPushButton('跳过当前')
+        self.cancel_button = QPushButton('取消任务')
+        self.home_button = QPushButton('返回起点')
+        self.reset_button = QPushButton('重置任务')
+        for button in (self.pause_button, self.resume_button, self.skip_button,
+                       self.cancel_button, self.home_button, self.reset_button):
+            control_layout.addWidget(button)
+        layout.addLayout(control_layout)
+
+        file_layout = QHBoxLayout()
+        self.save_button = QPushButton('保存多点任务')
+        self.load_button = QPushButton('加载多点任务')
+        file_layout.addWidget(self.save_button)
+        file_layout.addWidget(self.load_button)
+        layout.addLayout(file_layout)
+
+        self.status_label = QLabel('状态: 等待任务管理器')
         self.status_label.setAlignment(Qt.AlignCenter)
+        self.log_area = QTextEdit()
+        self.log_area.setReadOnly(True)
         layout.addWidget(self.status_label)
-        
-        # 创建按钮
-        self.record_start_btn = QPushButton('记录起点')
-        self.record_end_btn = QPushButton('记录终点')
-        self.go_start_btn = QPushButton('回到起点')
-        self.go_end_btn = QPushButton('去到终点')
-        
-        # 连接按钮信号
-        self.record_start_btn.clicked.connect(self.on_record_start)
-        self.record_end_btn.clicked.connect(self.on_record_end)
-        self.go_start_btn.clicked.connect(self.on_go_start)
-        self.go_end_btn.clicked.connect(self.on_go_end)
-        
-        # 添加按钮到布局
-        layout.addWidget(self.record_start_btn)
-        layout.addWidget(self.record_end_btn)
-        layout.addWidget(self.go_start_btn)
-        layout.addWidget(self.go_end_btn)
-        
-        # 设置布局
+        layout.addWidget(self.log_area)
         self.setLayout(layout)
-    
-    def init_ui2(self):
+
+        self.record_start_button.clicked.connect(self._record_start)
+        self.add_point_button.clicked.connect(self._add_point)
+        self.single_button.clicked.connect(self._start_single)
+        self.multi_button.clicked.connect(self._start_multi)
+        self.delete_button.clicked.connect(self._delete_point)
+        self.up_button.clicked.connect(lambda: self._move_point(-1))
+        self.down_button.clicked.connect(lambda: self._move_point(1))
+        self.clear_button.clicked.connect(self._clear_points)
+        self.pause_button.clicked.connect(lambda: self._trigger('pause'))
+        self.resume_button.clicked.connect(lambda: self._trigger('resume'))
+        self.skip_button.clicked.connect(lambda: self._trigger('skip'))
+        self.cancel_button.clicked.connect(lambda: self._trigger('cancel'))
+        self.home_button.clicked.connect(lambda: self._trigger('return_home'))
+        self.reset_button.clicked.connect(lambda: self._trigger('reset'))
+        self.save_button.clicked.connect(self._save_dialog)
+        self.load_button.clicked.connect(self._load_dialog)
+
+    def _spin_ros(self):
         try:
-            # 设置窗口标题和大小
-            self.setWindowTitle('ROS导航控制器')
-            self.setGeometry(300, 300, 600, 450)
-            
-            # 创建按钮
-            self.btn_record1 = QPushButton('记录起点')
-            self.btn_record2 = QPushButton('记录终点')
-            self.btn_navigate1 = QPushButton('开始导航1')
-            self.btn_navigate2 = QPushButton('开始导航2')
-            self.btn_save = QPushButton('保存点到文件')
-            self.btn_load = QPushButton('从文件加载点')
-
-            self.btn_cancel = QPushButton('取消导航')  # 新增取消按钮
-            
-            # 设置按钮大小
-            self.btn_record1.setMinimumHeight(50)
-            self.btn_record2.setMinimumHeight(50)
-            self.btn_navigate1.setMinimumHeight(50)
-            self.btn_navigate2.setMinimumHeight(50)
-            self.btn_save.setMinimumHeight(30)
-            self.btn_load.setMinimumHeight(30)
-
-            self.btn_cancel.setMinimumHeight(50)  # 取消按钮大小
-
-
-            
-            # # 连接按钮信号
-            self.btn_record1.clicked.connect(self.on_record_start) #记录起点
-            self.btn_record2.clicked.connect(self.on_record_end) #记录终点
-            self.btn_navigate1.clicked.connect(self.on_go_start)  #导航到起点
-            self.btn_navigate2.clicked.connect(self.on_go_end) #导航到终点d
-            self.btn_save.clicked.connect(self.save_points_dialog)
-            self.btn_load.clicked.connect(self.load_points_dialog)
-            # self.btn_cancel.clicked.connect(self.cancel_navigation)  # 绑定取消导航函数
-            
-            # 创建状态显示区域
-            self.status_label = QLabel('状态: 等待初始化...')
-            self.status_label.setAlignment(Qt.AlignCenter)
-            self.status_label.setStyleSheet("font-size: 14px; color: blue;")
-            
-            self.log_area = QTextEdit()
-            self.log_area.setReadOnly(True)
-            self.log_area.setStyleSheet("font-family: monospace;")
-            
-            # 布局管理
-            btn_layout = QHBoxLayout()
-            btn_layout.addWidget(self.btn_record1)
-            btn_layout.addWidget(self.btn_record2)
-            btn_layout.addWidget(self.btn_navigate1)
-            btn_layout.addWidget(self.btn_navigate2)
-
-            btn_layout.addWidget(self.btn_cancel)  # 添加取消按钮
-            
-            file_btn_layout = QHBoxLayout()
-            file_btn_layout.addWidget(self.btn_save)
-            file_btn_layout.addWidget(self.btn_load)
-            
-            main_layout = QVBoxLayout()
-            main_layout.addLayout(btn_layout)
-            main_layout.addLayout(file_btn_layout)
-            main_layout.addWidget(self.status_label)
-            main_layout.addWidget(self.log_area)
-            
-            self.setLayout(main_layout)
-            
-            # 显示初始信息
-            self.update_status("就绪，请记录目标点")
-            self.add_log("程序已启动，等待接收车辆位置...")
-            
-            # 显示已加载的点信息
-            if self.point1 is not None:
-                pos = self.point1.position
-                self.add_log(f"已加载起点 - x: {pos.x:.2f}, y: {pos.y:.2f}, z: {pos.z:.2f}")
-            if self.point2 is not None:
-                pos = self.point2.position
-                self.add_log(f"已加载终点 - x: {pos.x:.2f}, y: {pos.y:.2f}, z: {pos.z:.2f}")
-        except Exception as e:
-            print('ui_init error:',e)
-
-    """记录起点按钮点击事件"""
-    def on_record_start(self):
-        success, message = self.nav_client.record_start()
-        self.update_status(message)
-
-    """记录终点按钮点击事件"""
-    def on_record_end(self):
-        success, message = self.nav_client.record_end()
-        self.update_status(message)
-    
-    def on_go_start(self):
-        """回到起点按钮点击事件"""
-        success, message = self.nav_client.navigate_to_start()
-        self.update_status(message)
-    
-    def on_go_end(self):
-        """去到终点按钮点击事件"""
-        success, message = self.nav_client.navigate_to_end()
-        self.update_status(message)
-    
-    def update_status(self, status):
-        """更新状态标签"""
-        self.status_label.setText(f"状态：{status}")
-
-    def add_log(self, text):
-        # """添加日志信息"""
-        # timestamp = rclpy.time.Time().now().nanoseconds / 1e9
-        # self.log_area.append(f"[{timestamp:.2f}] {text}")
-        # # 自动滚动到底部
-        # # self.log_area.moveCursor(self.log_area.textCursor().End)
-
-        # # 1. 获取当前时间
-        # current_time = self.clock.now()
-        # # 2. 转换为秒
-        # timestamp = current_time.to_sec()
-        # # 3. 追加日志
-        # self.log_area.append(f"[{timestamp:.2f}] {text}")
-
-         
-        # 1. 获取当前本地时间
-        current_time = datetime.datetime.now()
-        # 2. 格式化时间（年-月-日 时:分:秒.毫秒）
-        timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # 保留3位毫秒
-        # 3. 追加日志
-        self.log_area.append(f"[{timestamp}] {text}")
-
-
-    '''
-    * Author: zcj
-    * Alter: zcj
-    * Function:  save_points
-    * Description: 保存点到文件
-    * Input: 
-    *       path：文件路径
-    * Output:无 
-    * Return:无 
-    '''    
-    def save_points(self, path=None):
-        """保存点到文件"""
-        if path is None:
-            path = self.save_path
-            
-        try:
-            data = {}
-            if self.point1 is not None:
-                data['point1'] = {
-                    'position': {
-                        'x': self.point1.position.x,
-                        'y': self.point1.position.y,
-                        'z': self.point1.position.z
-                    },
-                    'orientation': {
-                        'x': self.point1.orientation.x,
-                        'y': self.point1.orientation.y,
-                        'z': self.point1.orientation.z,
-                        'w': self.point1.orientation.w
-                    }
-                }
-                
-            if self.point2 is not None:
-                data['point2'] = {
-                    'position': {
-                        'x': self.point2.position.x,
-                        'y': self.point2.position.y,
-                        'z': self.point2.position.z
-                    },
-                    'orientation': {
-                        'x': self.point2.orientation.x,
-                        'y': self.point2.orientation.y,
-                        'z': self.point2.orientation.z,
-                        'w': self.point2.orientation.w
-                    }
-                }
-                
-            with open(path, 'w') as f:
-                json.dump(data, f, indent=4)
-                
-            self.save_path = path
-            self.add_log(f"已保存点到文件: {path}")
-            return True
-            
-        except Exception as e:
-            self.add_log(f"保存点失败: {str(e)}")
-            QMessageBox.warning(self, "保存失败", f"无法保存点到文件: {str(e)}")
-            return False
-    
-    '''
-    * Author: zcj
-    * Alter: zcj
-    * Function:  save_points_dialog
-    * Description: 打开对话框选择保存路径
-    * Input:无
-    * Output:无 
-    * Return:无 
-    '''    
-    def save_points_dialog(self):
-        """打开对话框选择保存路径"""
-        if self.point1 is None and self.point2 is None:
-            QMessageBox.information(self, "无数据", "没有可保存的点，请先记录点")
+            rclpy.spin_once(self.node, timeout_sec=0.0)
+        except RuntimeError:
             return
-            
-        path, _ = QFileDialog.getSaveFileName(
-            self, "保存导航点", 
-            os.path.expanduser("~"), 
-            "JSON文件 (*.json)"
-        )
-        
-        if path:
-            self.save_points(path)
-    
-    '''
-    * Author: zcj
-    * Alter: zcj
-    * Function:  load_points
-    * Description: 从文件加载点
-    * Input: 
-    *       path：文件路径
-    * Output:无 
-    * Return:无 
-    '''    
-    def load_points(self, path=None):
-        """从文件加载点"""
-        if path is None:
-            path = self.save_path
-            # 检查默认文件是否存在
-            if not os.path.exists(path):
-                return False
-                
-        try:
-            with open(path, 'r') as f:
-                data = json.load(f)
-                
-            # 加载起点
-            if 'point1' in data:
-                from geometry_msgs.msg import Pose, Point, Quaternion
-                point_data = data['point1']
-                pose = Pose()
-                pose.position = Point(
-                    x=point_data['position']['x'],
-                    y=point_data['position']['y'],
-                    z=point_data['position']['z']
-                )
-                pose.orientation = Quaternion(
-                    x=point_data['orientation']['x'],
-                    y=point_data['orientation']['y'],
-                    z=point_data['orientation']['z'],
-                    w=point_data['orientation']['w']
-                )
-                self.point1 = pose
-                self.marker_ids[1] = uuid.uuid4().int % 100000
-                
-            # 加载终点
-            if 'point2' in data:
-                from geometry_msgs.msg import Pose, Point, Quaternion
-                point_data = data['point2']
-                pose = Pose()
-                pose.position = Point(
-                    x=point_data['position']['x'],
-                    y=point_data['position']['y'],
-                    z=point_data['position']['z']
-                )
-                pose.orientation = Quaternion(
-                    x=point_data['orientation']['x'],
-                    y=point_data['orientation']['y'],
-                    z=point_data['orientation']['z'],
-                    w=point_data['orientation']['w']
-                )
-                self.point2 = pose
-                self.marker_ids[2] = uuid.uuid4().int % 100000
-                
-            self.save_path = path
-            self.add_log(f"已从文件加载点: {path}")
-            return True
-            
-        except Exception as e:
-            self.add_log(f"加载点失败: {str(e)}")
-            return False
-    
-    '''
-    * Author: zcj
-    * Alter: zcj
-    * Function:  load_points_dialog
-    * Description: 打开对话框选择加载路径
-    * Input:无
-    * Output:无 
-    * Return:无 
-    '''    
-    def load_points_dialog(self):
-        """打开对话框选择加载路径"""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "加载导航点", 
-            os.path.expanduser("~"), 
-            "JSON文件 (*.json)"
-        )
-        
-        if path:
-            # 询问是否覆盖现有点
-            if (self.point1 is not None or self.point2 is not None):
-                reply = QMessageBox.question(self, '确认覆盖', 
-                                            '现有记录的点将被覆盖，是否继续?',
-                                            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if reply == QMessageBox.No:
-                    return
-                    
-            self.load_points(path)
-    
+        self._refresh()
 
-# 主函数
+    def _refresh(self):
+        self._consume_completed_single_target()
+        if self.node.goal_sequence != self.candidate_sequence:
+            self.candidate_sequence = self.node.goal_sequence
+            self.candidate = self.node.latest_goal_pose
+            if self.candidate is not None:
+                side = inferred_side(
+                    self.candidate, self.node.road_center_y, self.node.road_yaw)
+                self.candidate_label.setText(
+                    '最新RViz终点: '
+                    f'x={self.candidate.position.x:.2f}, '
+                    f'y={self.candidate.position.y:.2f}, '
+                    f'yaw={pose_yaw(self.candidate):.2f}, 自动侧别={side}')
+            self._publish_markers()
+        state = self.node.status.state if self.node.status else None
+        state_text = self.node.status.state_text if self.node.status else '等待任务管理器'
+        if self.node.status and self.node.status.last_error:
+            state_text += f' - {self.node.status.last_error}'
+        self.status_label.setText(f'状态: {state_text}')
+        busy = state in self.ACTIVE
+        editable = not self.pending and not busy
+        has_start = self.editor.start_pose is not None
+        point_count = len(self.editor.points)
+        self.record_start_button.setEnabled(editable)
+        self.add_point_button.setEnabled(
+            editable and self.candidate is not None
+            and self.node.goal_sequence > self.consumed_goal_sequence)
+        self.single_button.setEnabled(
+            editable and has_start and point_count == 1)
+        self.multi_button.setEnabled(
+            editable and has_start and point_count >= 2)
+        for button in (self.delete_button, self.up_button,
+                       self.down_button, self.clear_button, self.save_button,
+                       self.load_button):
+            button.setEnabled(editable)
+        self.pause_button.setEnabled(not self.pending and state == MissionStatus.NAVIGATING)
+        self.resume_button.setEnabled(not self.pending and state == MissionStatus.PAUSED)
+        self.skip_button.setEnabled(not self.pending and state in {
+            MissionStatus.READY, MissionStatus.PAUSED,
+            MissionStatus.VERIFYING_STOP, MissionStatus.ARM_SPRAYING})
+        self.cancel_button.setEnabled(not self.pending and state in self.ACTIVE)
+        self.home_button.setEnabled(not self.pending and state in {
+            MissionStatus.READY, MissionStatus.PAUSED,
+            MissionStatus.VERIFYING_STOP, MissionStatus.MISSION_COMPLETED})
+        self.reset_button.setEnabled(not self.pending and state in self.TERMINAL)
+
+    def _record_start(self):
+        pose = self.node.latest_initial_pose or self.node.current_pose()
+        if pose is None:
+            self._log('记录起点失败：请先在RViz点击 2D Estimate Pose，或确认TF可用')
+            return
+        self.editor.start_pose = copy_pose(pose)
+        self.start_label.setText(
+            f'起点: x={pose.position.x:.2f}, y={pose.position.y:.2f}, '
+            f'yaw={pose_yaw(pose):.2f}')
+        self._log('已记录起点')
+        self._publish_markers()
+
+    def _add_point(self):
+        if self.candidate is None:
+            return
+        self.editor.add_point(self.candidate)
+        self.consumed_goal_sequence = self.node.goal_sequence
+        self._update_table()
+        self._log(f'已添加终点 {len(self.editor.points)}')
+        self._publish_markers()
+
+    def _start_single(self):
+        if len(self.editor.points) != 1:
+            return
+        point = self.editor.points[0]
+        self._submit_manual(
+            [WorkPoint(copy_pose(point.pose), point.spray_side)], 'single')
+
+    def _start_multi(self):
+        points = [WorkPoint(copy_pose(point.pose), point.spray_side)
+                  for point in self.editor.points]
+        self._submit_manual(points, 'multi')
+
+    def _submit_manual(self, points, prefix):
+        if self.editor.start_pose is None or not points:
+            self._log('请先记录起点和作业目标')
+            return
+        self.editor.spray_duration = self.duration_spin.value()
+        self.editor.return_home_after_finish = self.return_home_checkbox.isChecked()
+        if self.node.status and self.node.status.state in self.TERMINAL:
+            self._trigger('reset', lambda _result: self._load_manual(points, prefix))
+            return
+        self._load_manual(points, prefix)
+
+    def _load_manual(self, points, prefix):
+        request = self.node.build_manual_request(
+            self.editor.start_pose, points, self.editor.spray_duration,
+            self.editor.return_home_after_finish, prefix)
+        self._request(
+            'load', request,
+            lambda result: self._start_loaded_mission(
+                result, request.mission_id if prefix == 'single' else None))
+
+    def _start_loaded_mission(self, result, single_mission_id=None):
+        if single_mission_id is not None:
+            self.single_mission_id = single_mission_id
+        self._log(result.message)
+        self._trigger('start')
+
+    def _consume_completed_single_target(self):
+        status = self.node.status
+        if (self.single_mission_id is None or status is None
+                or status.mission_id != self.single_mission_id
+                or status.completed_targets < 1):
+            return
+        self.single_mission_id = None
+        if self.editor.points:
+            self.editor.points.pop(0)
+            self._update_table()
+            self._publish_markers()
+            self._log('单点喷洒完成，已从列表删除')
+
+    def _trigger(self, name, callback=None):
+        self._request(name, Trigger.Request(), callback)
+
+    def _request(self, name, request, callback=None):
+        client = self.node.service_clients[name]
+        if not client.service_is_ready():
+            self._log(f'服务不可用: {client.srv_name}')
+            return
+        self.pending = True
+        future = client.call_async(request)
+
+        def finished(done):
+            self.pending = False
+            try:
+                result = done.result()
+            except Exception as error:
+                self._log(f'服务调用失败: {error}')
+                return
+            if not result.success:
+                self._log(result.message)
+                return
+            self._log(result.message)
+            if callback is not None:
+                callback(result)
+
+        future.add_done_callback(finished)
+
+    def _update_table(self):
+        self.table.setRowCount(len(self.editor.points))
+        for row, point in enumerate(self.editor.points):
+            self.table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+            self.table.setItem(row, 1, QTableWidgetItem(f'{point.pose.position.x:.3f}'))
+            self.table.setItem(row, 2, QTableWidgetItem(f'{point.pose.position.y:.3f}'))
+            self.table.setItem(row, 3, QTableWidgetItem(f'{pose_yaw(point.pose):.3f}'))
+            combo = QComboBox()
+            combo.addItems(['left', 'right'])
+            combo.setCurrentText(point.spray_side)
+            combo.currentTextChanged.connect(
+                lambda side, target=point: setattr(target, 'spray_side', side))
+            self.table.setCellWidget(row, 4, combo)
+
+    def _delete_point(self):
+        row = self.table.currentRow()
+        if 0 <= row < len(self.editor.points):
+            self.editor.points.pop(row)
+            self._update_table()
+            self._publish_markers()
+
+    def _move_point(self, offset):
+        row = self.table.currentRow()
+        target = row + offset
+        if not (0 <= row < len(self.editor.points)
+                and 0 <= target < len(self.editor.points)):
+            return
+        self.editor.points[row], self.editor.points[target] = (
+            self.editor.points[target], self.editor.points[row])
+        self._update_table()
+        self.table.selectRow(target)
+        self._publish_markers()
+
+    def _clear_points(self):
+        if not self.editor.points:
+            return
+        self.editor.points.clear()
+        self._update_table()
+        self._publish_markers()
+
+    def _save_dialog(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, '保存多点任务', self.save_path, 'JSON files (*.json)')
+        if not path:
+            return
+        try:
+            self.editor.spray_duration = self.duration_spin.value()
+            self.editor.return_home_after_finish = self.return_home_checkbox.isChecked()
+            self.editor.save(path)
+        except (OSError, ValueError, KeyError) as error:
+            QMessageBox.warning(self, '保存失败', str(error))
+            return
+        self.save_path = path
+        self._log(f'已保存任务: {path}')
+
+    def _load_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, '加载多点任务', self.save_path, 'JSON files (*.json)')
+        if not path:
+            return
+        try:
+            self.editor.load(path)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+            QMessageBox.warning(self, '加载失败', str(error))
+            return
+        self.save_path = path
+        self.duration_spin.setValue(self.editor.spray_duration)
+        self.return_home_checkbox.setChecked(self.editor.return_home_after_finish)
+        if self.editor.start_pose is not None:
+            self.start_label.setText(
+                f'起点: x={self.editor.start_pose.position.x:.2f}, '
+                f'y={self.editor.start_pose.position.y:.2f}, '
+                f'yaw={pose_yaw(self.editor.start_pose):.2f}')
+        self._update_table()
+        self._publish_markers()
+        self._log(f'已加载任务: {path}')
+
+    def _publish_markers(self):
+        self.node.publish_markers(self.editor, self.candidate)
+
+    def _log(self, message):
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        self.log_area.append(f'[{timestamp}] {message}')
+
+    def closeEvent(self, event):
+        self.ros_timer.stop()
+        super().closeEvent(event)
+
+
 def main(args=None):
-    # 初始化ROS 2
     rclpy.init(args=args)
-    
-    # 创建导航客户端
-    nav_client = Nav2Client()
-    
-    # 创建Qt应用
+    node = Nav2QtNode()
     app = QApplication(sys.argv)
-    
-    # 创建并显示GUI
-    gui = Nav2GUI(nav_client)
+    gui = Nav2Gui(node)
     gui.show()
-    
-    # 运行Qt事件循环和ROS 2节点
-    import threading
-    def run_ros():
-        rclpy.spin(nav_client)
-    
-    ros_thread = threading.Thread(target=run_ros, daemon=True)
-    ros_thread.start()
-    
-    # 运行Qt应用
     try:
         app.exec()
     finally:
-        # 清理资源
-        nav_client.destroy_node()
-        rclpy.shutdown()
+        node.destroy_node()
+        rclpy.try_shutdown()
+
 
 if __name__ == '__main__':
     main()

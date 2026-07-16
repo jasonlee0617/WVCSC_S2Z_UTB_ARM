@@ -31,7 +31,7 @@ Mock UAV 四目标
 
 | 子系统 | 当前状态 | 证据/边界 |
 |---|---|---|
-| 统一复合模型 | 已完成 | 同一 Xacro 组合小车、Alicia-M、C10、喷嘴和 ros2_control；Xacro 与 `check_urdf` 通过。 |
+| 统一复合模型 | 已完成 | 同一 Xacro 组合小车、Alicia-M、C10 和 ros2_control；当前由 `tool0` 作为逻辑喷洒点，Xacro 与 `check_urdf` 通过。 |
 | Gazebo 果园 | 已完成 | 无 wall；两列各四棵果树、株距约 4 m；四个病斑模型对应四个 Mock 目标。 |
 | 小车与 Nav2 | 已建立四目标能力 | 地图范围已覆盖四个目标，Ackermann 仿真发布 `/odom` 和 TF，GoalChecker 为平衡停靠精度。 |
 | Mock UAV 与任务管理 | 已完成 | `wvcsc_uav_gateway` 发布四目标，`wvcsc_mission_manager` 通过 Action 串联导航、停稳和机械臂，并区分跳过与安全失败。 |
@@ -552,8 +552,7 @@ Alicia-M 是 **Synria Robotics** 制造的 **6-DOF 串联关节式机械臂 + �
 | `use_nav2` | `true` | 启用 Nav2 导航；机械臂基线回归可显式设为 `false` |
 | `use_rviz` | `false` | 启动 RViz2；需要观察时显式设为 `true` |
 | `enable_arm_control` | `true` | 启用机械臂 ros2_control |
-| `use_color_vision` | `false` | 可选启动 Gazebo RGB 颜色分割；YOLO 接入前默认关闭 |
-| `use_vision_alignment` | `false` | 启用 MoveIt Servo 视觉对准 |
+| `perception_mode` | `mock` | `mock` 用于完整状态机回归；`yolo` 运行两级 YOLO 推理 |
 
 任务管理器使用树的 X 坐标，并按 `spray_side` 在道路中心左右偏移 `0.5m` 生成作业位姿；该偏移是车道停靠参数，不作为喷洒距离。
 
@@ -564,7 +563,7 @@ Alicia-M 是 **Synria Robotics** 制造的 **6-DOF 串联关节式机械臂 + �
 4. 发布静态 TF `world → map → odom`
 5. 加载 **Move Group**（MoveIt2，含 OMPL 规划管道），SRDF 运行时 patch（基准改为 `alicia_base_link`，移除虚拟关节）
 6. 实体生成后顺序启动 joint_state_broadcaster、arm_controller、gripper_controller 和喷洒任务
-7. 启动 `trajectory_retime_server`、`wvcsc_motion_control`，可选 MoveIt Servo 与视觉伺服
+7. 启动 `trajectory_retime_server`、独立 `wvcsc_motion_control`、MoveIt Servo 与视觉伺服
 8. 取消 Gazebo 暂停并启动 AckermannSim、颜色/Mock 视觉
 9. 条件启动 Nav2、任务管理器以及 Mock/Replay UAV
 10. 条件启动 RViz2、Web 和独立喷洒模拟器
@@ -608,7 +607,7 @@ SDF 1.6 格式：
 ## 17. wvcsc_arm_task — 机械臂 MoveIt 适配与喷雾任务
 
 - **框架**：Python (rclpy, ament_python)
-- **依赖**：`pymoveit2` 4.2.0、MoveIt2、control_msgs、rclpy、trajectory_retime_server、std_srvs
+- **依赖**：`pymoveit2` 4.2.0、MoveIt2、control_msgs、rclpy、trajectory_retime_server、vision_msgs
 
 **功能**：在项目代码中提供 Alicia-M 专用的轻量 MoveIt 适配层、运动锁定控制和模拟喷洒流程；不修改官方 `pymoveit2` 源码。
 
@@ -616,8 +615,8 @@ SDF 1.6 格式：
 |----------|------|------|
 | 节点 | — | `wvcsc_spray_task` |
 | `/arm/execute_spray` Action | `wvcsc_interfaces/ExecuteSpray` | 观察→视觉对准→喷洒→HOME，返回反馈、结果和错误码 |
-| `/arm/execute_spray_legacy` 服务 | `std_srvs/Trigger` | 仅保留兼容和隔离测试 |
 | `/motion_control/command` | `std_msgs/String` | `stop`、`reset`、`resume` |
+| `/motion_control/locked` | `std_msgs/Bool` | 独立 Motion Control 发布的锁存运动锁 |
 | `/trajectory_execution_event` | `std_msgs/String` | 向 MoveIt 执行链发布 `stop` |
 | `/retime_trajectory` | `trajectory_retime_server/srv/RetimeTrajectory` | 笛卡尔规划的唯一重定时入口 |
 | MoveIt 执行 | `pymoveit2` → `move_group` → `arm_controller` | 普通关节/位姿轨迹不重复重定时；笛卡尔轨迹失败则禁止执行 |
@@ -712,7 +711,7 @@ system_sim.launch.py
 │   → gripper_controller → wvcsc_spray_task
 ├── AckermannSim：/cmd_vel → /odom + odom→base_footprint
 ├── Nav2 + map_server（条件启动）
-├── wvcsc_rgb_vision：颜色分割或 Mock 视觉（二选一）
+├── wvcsc_rgb_vision：两级 YOLO（tree Detect + fruit Seg）或统一接口 Mock（二选一）
 ├── wvcsc_mission_manager
 ├── wvcsc_uav_gateway：Mock 或 Replay（二选一）
 └── 可选 RViz、Web 和独立喷洒模拟器

@@ -38,8 +38,7 @@
   <!--
     C10 eye-in-hand model. camera_link follows Gazebo's +X-forward camera
     convention; camera_color_optical_frame follows REP-103 (+Z forward,
-    +X right, +Y down).  The optical axis and spray_nozzle_link +Z axis are
-    parallel, so IBVS only corrects image-plane X/Y and preserves spray range.
+    +X right, +Y down). tool0 is the temporary logical spray point.
   -->
   <xacro:if value="$(arg enable_c10_camera)">
     <link name="camera_link">
@@ -70,28 +69,6 @@
       <parent link="camera_link"/>
       <child link="camera_color_optical_frame"/>
       <origin xyz="0 0 0" rpy="-1.57079632679 0 -1.57079632679"/>
-    </joint>
-
-    <link name="spray_nozzle_link">
-      <visual>
-        <origin xyz="0 0 0.025" rpy="0 0 0"/>
-        <geometry><cylinder radius="0.006" length="0.05"/></geometry>
-        <material name="nozzle_blue"><color rgba="0.05 0.15 0.8 1"/></material>
-      </visual>
-      <collision>
-        <origin xyz="0 0 0.025" rpy="0 0 0"/>
-        <geometry><cylinder radius="0.006" length="0.05"/></geometry>
-      </collision>
-      <inertial>
-        <mass value="0.03"/>
-        <inertia ixx="0.000006" ixy="0" ixz="0"
-                 iyy="0.000006" iyz="0" izz="0.000001"/>
-      </inertial>
-    </link>
-    <joint name="spray_nozzle_joint" type="fixed">
-      <parent link="tool0"/>
-      <child link="spray_nozzle_link"/>
-      <origin xyz="0 0 0.01" rpy="0 0 0"/>
     </joint>
 
     <xacro:if value="$(arg enable_c10_gazebo)">
@@ -152,7 +129,7 @@
 
   <gazebo reference="laser">
     <sensor name="laser" type="ray">
-      <always_on>true</always_on><update_rate>10</update_rate><visualize>true</visualize>
+      <always_on>true</always_on><update_rate>10</update_rate><visualize>false</visualize>
       <ray>
         <scan><horizontal><samples>720</samples><resolution>1</resolution><min_angle>-3.141592653589793</min_angle><max_angle>3.141592653589793</max_angle></horizontal></scan>
         <range><min>0.15</min><max>20</max><resolution>0.02</resolution></range>

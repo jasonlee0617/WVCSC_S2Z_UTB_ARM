@@ -1,0 +1,4 @@
+string target_id
+geometry_msgs/Pose docking_pose
+string spray_side
+float32 spray_duration

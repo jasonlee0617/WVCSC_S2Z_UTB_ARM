@@ -141,7 +141,7 @@ class AliciaMoveIt:
     def __init__(
             self, node, base_frame='alicia_base_link', group_name='arm',
             tool_link='tool0', velocity_scaling=0.1, acceleration_scaling=0.1,
-            retime_timeout=5.0, execution_timeout=60.0,
+            retime_timeout=5.0, execution_timeout=60.0, planning_time=2.0,
             gripper_action='/gripper_controller/gripper_cmd',
             gripper_open_position=0.0, gripper_closed_position=-0.05,
             gripper_max_effort=5.0, callback_group=None,
@@ -152,6 +152,8 @@ class AliciaMoveIt:
             raise ValueError('velocity_scaling must be in (0, 1]')
         if not 0.0 < float(acceleration_scaling) <= 1.0:
             raise ValueError('acceleration_scaling must be in (0, 1]')
+        if float(planning_time) <= 0.0:
+            raise ValueError('planning_time must be positive')
 
         self._node = node
         self._group_name = group_name
@@ -159,6 +161,7 @@ class AliciaMoveIt:
         self._acceleration_scaling = float(acceleration_scaling)
         self._retime_timeout = float(retime_timeout)
         self._execution_timeout = float(execution_timeout)
+        self._planning_time = float(planning_time)
         self._gripper_open_position = float(gripper_open_position)
         self._gripper_closed_position = float(gripper_closed_position)
         self._gripper_max_effort = float(gripper_max_effort)
@@ -177,6 +180,7 @@ class AliciaMoveIt:
         )
         self._moveit.max_velocity = self._velocity_scaling
         self._moveit.max_acceleration = self._acceleration_scaling
+        self._moveit.allowed_planning_time = self._planning_time
         self._trajectory_event_pub = node.create_publisher(
             String, '/trajectory_execution_event', 1)
 
@@ -258,7 +262,9 @@ class AliciaMoveIt:
         )
         return self._execute(trajectory, epoch, allow_locked)
 
-    def move_pose(self, position, quat_xyzw, frame_id=None, allow_locked=False):
+    def move_pose(
+            self, position, quat_xyzw, frame_id=None, allow_locked=False,
+            tolerance_position=0.001, tolerance_orientation=0.001):
         epoch = self._epoch()
         if not self._allowed(epoch, allow_locked):
             return False
@@ -267,6 +273,8 @@ class AliciaMoveIt:
             quat_xyzw=quat_xyzw,
             frame_id=frame_id,
             target_link=self._moveit.end_effector_name,
+            tolerance_position=float(tolerance_position),
+            tolerance_orientation=float(tolerance_orientation),
         )
         return self._execute(trajectory, epoch, allow_locked)
 

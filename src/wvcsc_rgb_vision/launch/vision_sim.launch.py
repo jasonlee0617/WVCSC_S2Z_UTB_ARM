@@ -13,6 +13,6 @@ def generate_launch_description():
     )
     return LaunchDescription([
         Node(
-            package='wvcsc_rgb_vision', executable='color_segmentation',
+            package='wvcsc_rgb_vision', executable='two_stage_yolo',
             parameters=[config], output='screen'),
     ])

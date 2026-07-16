@@ -1,4 +1,6 @@
 import os
+import socket
+from urllib.parse import urlparse
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -7,7 +9,9 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     IncludeLaunchDescription,
+    OpaqueFunction,
     RegisterEventHandler,
+    SetLaunchConfiguration,
     SetEnvironmentVariable,
     TimerAction,
 )
@@ -22,6 +26,7 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from wvcsc_simulation.orchard_assets import generate_orchard_assets
 
 
 def load_yaml(package, relative_path):
@@ -30,20 +35,61 @@ def load_yaml(package, relative_path):
         return yaml.safe_load(stream)
 
 
+def ensure_fresh_gazebo_master(_context):
+    """Refuse to attach a new simulation launch to a stale local Gazebo."""
+    master_uri = os.environ.get('GAZEBO_MASTER_URI', 'http://127.0.0.1:11345')
+    parsed = urlparse(master_uri)
+    host = parsed.hostname or '127.0.0.1'
+    port = parsed.port or 11345
+
+    if host not in {'127.0.0.1', '::1', 'localhost'}:
+        return []
+
+    for family, socktype, protocol, _, address in socket.getaddrinfo(
+            host, port, type=socket.SOCK_STREAM):
+        with socket.socket(family, socktype, protocol) as sock:
+            sock.settimeout(0.2)
+            if sock.connect_ex(address) == 0:
+                raise RuntimeError(
+                    f'Gazebo master {master_uri} is already in use. '
+                    'Close the previous Gazebo launch before starting '
+                    'wvcsc_simulation; this launch will not attach to an '
+                    'existing world.')
+    return []
+
+
+def prepare_orchard(context, simulation_share, base_model_path):
+    seed = LaunchConfiguration('orchard_seed').perform(context)
+    ratio = LaunchConfiguration('diseased_fruit_ratio').perform(context)
+    world = generate_orchard_assets(
+        os.path.join(simulation_share, 'worlds', 'orchard.world'),
+        os.path.join(simulation_share, 'models', 'apple_tree'),
+        seed=seed,
+        diseased_ratio=ratio,
+    )
+    model_path = os.pathsep.join(filter(None, [
+        str(world.parent / 'models'),
+        base_model_path,
+    ]))
+    return [
+        SetLaunchConfiguration('orchard_world', str(world)),
+        SetEnvironmentVariable('GAZEBO_MODEL_PATH', model_path),
+    ]
+
+
 def generate_launch_description():
     use_nav2 = LaunchConfiguration('use_nav2')
     use_rviz = LaunchConfiguration('use_rviz')
+    gazebo_gui = LaunchConfiguration('gazebo_gui')
+    orchard_world = LaunchConfiguration('orchard_world')
+    use_nav2_qt = LaunchConfiguration('use_nav2_qt')
     enable_arm_control = LaunchConfiguration('enable_arm_control')
     enable_ackermann = LaunchConfiguration('enable_ackermann')
     use_mock_uav = LaunchConfiguration('use_mock_uav')
     use_replay_uav = LaunchConfiguration('use_replay_uav')
     use_mission_manager = LaunchConfiguration('use_mission_manager')
     use_web_ui = LaunchConfiguration('use_web_ui')
-    use_spray_simulator = LaunchConfiguration('use_spray_simulator')
-    use_mock_vision = LaunchConfiguration('use_mock_vision')
-    use_color_vision = LaunchConfiguration('use_color_vision')
-    use_vision_alignment = LaunchConfiguration('use_vision_alignment')
-    use_spray_action = LaunchConfiguration('use_spray_action')
+    perception_mode = LaunchConfiguration('perception_mode')
     auto_start_mission = LaunchConfiguration('auto_start_mission')
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
     mock_target_config = LaunchConfiguration('mock_target_config')
@@ -62,7 +108,9 @@ def generate_launch_description():
     moveit_share = get_package_share_directory('alicia_m_moveit_config')
     gazebo_share = get_package_share_directory('gazebo_ros')
     nav2_share = get_package_share_directory('nav2_bringup')
-    alicia_model_root = os.path.dirname(get_package_share_directory('alicia_m_descriptions'))
+    navigation_share = get_package_share_directory('my_navigation2')
+    alicia_model_root = os.path.dirname(
+        get_package_share_directory('alicia_m_descriptions'))
     gazebo_model_path = os.pathsep.join(filter(None, [
         os.path.join(simulation_share, 'models'),
         os.path.dirname(description_share),
@@ -102,15 +150,13 @@ def generate_launch_description():
     <disable_collisions link1="link6" link2="camera_link" reason="Mount"/>
     <disable_collisions link1="link7" link2="camera_link" reason="Mount"/>
     <disable_collisions link1="link8" link2="camera_link" reason="Mount"/>
-    <disable_collisions link1="tool0" link2="spray_nozzle_link" reason="Adjacent"/>
-    <disable_collisions link1="link7" link2="spray_nozzle_link" reason="Tool"/>
-    <disable_collisions link1="link8" link2="spray_nozzle_link" reason="Tool"/>
 '''
     semantic = semantic.replace(
         '</robot>', f'{c10_disabled_collisions}</robot>')
     robot_description_semantic = {'robot_description_semantic': semantic}
 
     kinematics = load_yaml('alicia_m_moveit_config', 'config/kinematics.yaml')
+    kinematics['arm']['kinematics_solver_timeout'] = 0.05
     robot_description_kinematics = {
         'robot_description_kinematics': kinematics,
     }
@@ -156,9 +202,10 @@ def generate_launch_description():
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(gazebo_share, 'launch', 'gazebo.launch.py')),
         launch_arguments={
-            'world': os.path.join(simulation_share, 'worlds', 'orchard.world'),
+            'world': orchard_world,
             'verbose': 'false',
             'pause': 'true',
+            'gui': gazebo_gui,
         }.items(),
     )
     state_publisher = Node(
@@ -209,15 +256,12 @@ def generate_launch_description():
         'acceleration_scaling': 0.1,
         'retime_timeout': 5.0,
         'execution_timeout': 60.0,
+        'planning_time': 2.0,
         'gripper_action': '/gripper_controller/gripper_cmd',
         'gripper_open_position': 0.0,
         'gripper_closed_position': -0.05,
         'gripper_max_effort': 5.0,
         'use_sim_time': True,
-        'use_vision_alignment': ParameterValue(
-            use_vision_alignment, value_type=bool),
-        'use_spray_action': ParameterValue(
-            use_spray_action, value_type=bool),
     }
     motion_control = Node(
         package='wvcsc_arm_task', executable='motion_control',
@@ -256,7 +300,7 @@ def generate_launch_description():
         package='moveit_servo', executable='servo_node_main',
         name='servo_node',
         parameters=[*common_moveit, {'moveit_servo': servo_parameters}],
-        condition=IfCondition(use_vision_alignment), output='screen',
+        condition=IfCondition(enable_arm_control), output='screen',
     )
     visual_servo = Node(
         package='wvcsc_visual_servo', executable='visual_servo',
@@ -264,7 +308,7 @@ def generate_launch_description():
             os.path.join(visual_servo_share, 'config', 'visual_servo.yaml'),
             {'use_sim_time': True},
         ],
-        condition=IfCondition(use_vision_alignment), output='screen',
+        condition=IfCondition(enable_arm_control), output='screen',
     )
     start_arm_controller = RegisterEventHandler(OnProcessExit(
         target_action=joint_state_controller,
@@ -332,13 +376,29 @@ def generate_launch_description():
         ],
         condition=IfCondition(use_mission_manager), output='screen',
     )
+    nav2_qt = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(navigation_share, 'launch', 'nav2_qt.launch.py')),
+        launch_arguments={
+            'use_sim_time': 'True',
+            'map_frame': 'map',
+            'base_frame': 'base_footprint',
+            'goal_pose_topic': '/manual_goal_pose',
+            'road_center_y': '0.0',
+            'road_yaw': '0.0',
+        }.items(),
+        condition=IfCondition(use_nav2_qt),
+    )
     mock_uav = Node(
         package='wvcsc_uav_gateway', executable='mock_uav_gateway',
         parameters=[{
             'config_file': mock_target_config,
             'use_sim_time': True,
         }],
-        condition=IfCondition(use_mock_uav), output='screen',
+        condition=IfCondition(PythonExpression([
+            "'", use_mock_uav, "' == 'true' and '",
+            use_nav2_qt, "' != 'true'",
+        ])), output='screen',
     )
     replay_uav = Node(
         package='wvcsc_uav_gateway', executable='replay_uav_gateway',
@@ -346,7 +406,10 @@ def generate_launch_description():
             'config_file': replay_target_config,
             'use_sim_time': True,
         }],
-        condition=IfCondition(use_replay_uav), output='screen',
+        condition=IfCondition(PythonExpression([
+            "'", use_replay_uav, "' == 'true' and '",
+            use_nav2_qt, "' != 'true'",
+        ])), output='screen',
     )
     web_ui = Node(
         package='wvcsc_web_ui', executable='web_server',
@@ -366,44 +429,50 @@ def generate_launch_description():
             os.path.join(spray_share, 'config', 'spray_sim.yaml'),
             {'use_sim_time': True},
         ],
-        condition=IfCondition(use_spray_simulator), output='screen',
+        condition=IfCondition(enable_arm_control), output='screen',
     )
-    color_vision = Node(
-        package='wvcsc_rgb_vision', executable='color_segmentation',
+    yolo_vision = Node(
+        package='wvcsc_rgb_vision', executable='two_stage_yolo',
         parameters=[
             os.path.join(vision_share, 'config', 'vision_sim.yaml'),
             {'use_sim_time': True},
         ],
         condition=IfCondition(PythonExpression([
-            "'", use_color_vision, "' == 'true' and '",
-            use_mock_vision, "' == 'false'",
+            "'", perception_mode, "' == 'yolo'",
         ])), output='screen',
     )
     mock_vision = Node(
-        package='wvcsc_rgb_vision', executable='mock_vision',
-        parameters=[
-            os.path.join(vision_share, 'config', 'vision_sim.yaml'),
-            {'use_sim_time': True},
-        ],
-        condition=IfCondition(use_mock_vision), output='screen',
+        package='wvcsc_simulation', executable='mock_vision.py',
+        parameters=[{'use_sim_time': True}],
+        condition=IfCondition(PythonExpression([
+            "'", perception_mode, "' == 'mock'",
+        ])), output='screen',
     )
     rviz = Node(
         package='rviz2', executable='rviz2',
         arguments=['-d', os.path.join(simulation_share, 'rviz', 'wvcsc.rviz')],
-        parameters=[{'use_sim_time': True}], condition=IfCondition(use_rviz), output='log',
+        parameters=[
+            robot_description,
+            robot_description_semantic,
+            robot_description_kinematics,
+            planning_pipeline,
+            joint_limits,
+            {'use_sim_time': True},
+        ],
+        condition=IfCondition(use_rviz), output='log',
     )
     post_spawn = RegisterEventHandler(OnProcessExit(
         target_action=spawn,
         on_exit=[
             unpause,
             TimerAction(period=0.5, actions=[vehicle_sim]),
-            TimerAction(period=0.75, actions=[color_vision, mock_vision]),
+            TimerAction(period=0.75, actions=[yolo_vision, mock_vision]),
             TimerAction(period=1.0, actions=[joint_state_controller]),
             TimerAction(period=2.0, actions=[map_server, map_lifecycle]),
             TimerAction(period=3.0, actions=[nav2]),
             TimerAction(
                 period=6.0,
-                actions=[mission_manager, mock_uav, replay_uav],
+                actions=[mission_manager, mock_uav, replay_uav, nav2_qt],
             ),
         ],
     ))
@@ -411,17 +480,17 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('use_nav2', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='false'),
+        DeclareLaunchArgument('gazebo_gui', default_value='true'),
+        DeclareLaunchArgument('orchard_seed', default_value='42'),
+        DeclareLaunchArgument('diseased_fruit_ratio', default_value='0.20'),
+        DeclareLaunchArgument('use_nav2_qt', default_value='false'),
         DeclareLaunchArgument('enable_arm_control', default_value='true'),
         DeclareLaunchArgument('enable_ackermann', default_value='true'),
         DeclareLaunchArgument('use_mock_uav', default_value='true'),
         DeclareLaunchArgument('use_replay_uav', default_value='false'),
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
         DeclareLaunchArgument('use_web_ui', default_value='false'),
-        DeclareLaunchArgument('use_spray_simulator', default_value='false'),
-        DeclareLaunchArgument('use_mock_vision', default_value='false'),
-        DeclareLaunchArgument('use_color_vision', default_value='false'),
-        DeclareLaunchArgument('use_vision_alignment', default_value='false'),
-        DeclareLaunchArgument('use_spray_action', default_value='false'),
+        DeclareLaunchArgument('perception_mode', default_value='mock'),
         DeclareLaunchArgument('auto_start_mission', default_value='true'),
         DeclareLaunchArgument('return_home_after_finish', default_value='false'),
         DeclareLaunchArgument(
@@ -433,7 +502,11 @@ def generate_launch_description():
         DeclareLaunchArgument('web_host', default_value='127.0.0.1'),
         DeclareLaunchArgument('web_port', default_value='8080'),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
-        SetEnvironmentVariable('GAZEBO_MODEL_PATH', gazebo_model_path),
+        OpaqueFunction(function=ensure_fresh_gazebo_master),
+        OpaqueFunction(
+            function=prepare_orchard,
+            args=[simulation_share, gazebo_model_path],
+        ),
         gazebo,
         state_publisher,
         world_map,

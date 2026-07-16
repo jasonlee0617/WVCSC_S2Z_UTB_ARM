@@ -28,6 +28,7 @@ class Target:
     spray_side: str
     spray_duration: float
     evidence_uri: str = ''
+    docking_pose_override: tuple | None = None
 
 
 class MissionCore:
@@ -134,7 +135,8 @@ class MissionCore:
         if self.state not in {
                 MissionState.READY,
                 MissionState.PAUSED,
-                MissionState.VERIFYING_STOP}:
+                MissionState.VERIFYING_STOP,
+                MissionState.MISSION_COMPLETED}:
             return False
         self.state = MissionState.RETURNING_HOME
         return True
@@ -201,6 +203,34 @@ def docking_pose(
     else:
         raise ValueError(f'{target.tree_id}: invalid spray_side')
     return target.x, goal_y, road_yaw
+
+
+def navigation_pose(
+        target, road_center_y=0.0, road_yaw=0.0,
+        lateral_offset=0.5):
+    if target.docking_pose_override is not None:
+        return target.docking_pose_override
+    return docking_pose(target, road_center_y, road_yaw, lateral_offset)
+
+
+def manual_tree_hint(docking, spray_side, standoff, tree_base_z=0.0):
+    """Infer a tree-root point from an operator-selected docking pose."""
+    x, y, yaw = (float(value) for value in docking)
+    standoff = float(standoff)
+    tree_base_z = float(tree_base_z)
+    if not all(math.isfinite(value) for value in (x, y, yaw, standoff, tree_base_z)):
+        raise ValueError('manual tree hint values must be finite')
+    if standoff <= 0.0:
+        raise ValueError('manual_tree_standoff must be positive')
+    if spray_side not in ('left', 'right'):
+        raise ValueError(f'invalid spray_side: {spray_side}')
+    sign = 1.0 if spray_side == 'left' else -1.0
+    normal_x, normal_y = -math.sin(yaw), math.cos(yaw)
+    return (
+        x + sign * standoff * normal_x,
+        y + sign * standoff * normal_y,
+        tree_base_z,
+    )
 
 
 class StopDetector:

@@ -146,6 +146,16 @@ def test_joint_motion_does_not_call_retime_service():
     assert len(moveit.executed) == 1
 
 
+def test_pose_motion_passes_observation_tolerances_to_moveit():
+    adapter, moveit, _retime = _adapter(_trajectory())
+    assert adapter.move_pose(
+        [0.1, 0.2, 0.3], [0.0, 0.0, 0.0, 1.0],
+        tolerance_position=0.02, tolerance_orientation=0.05)
+    assert moveit.allowed_planning_time == pytest.approx(2.0)
+    assert moveit.plan_calls[-1]['tolerance_position'] == pytest.approx(0.02)
+    assert moveit.plan_calls[-1]['tolerance_orientation'] == pytest.approx(0.05)
+
+
 def test_cartesian_motion_retimes_exactly_once_before_execute():
     retimed = _trajectory((0, 200_000_000))
     adapter, moveit, retime = _adapter(retimed)

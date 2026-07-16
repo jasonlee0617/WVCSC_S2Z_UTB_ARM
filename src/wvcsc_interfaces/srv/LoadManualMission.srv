@@ -1,0 +1,8 @@
+std_msgs/Header header
+string mission_id
+geometry_msgs/Pose home_pose
+bool return_home_after_finish
+wvcsc_interfaces/ManualMissionTarget[] targets
+---
+bool success
+string message

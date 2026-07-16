@@ -4,11 +4,11 @@
     <static>true</static>
     <link name="tree">
       <collision name="trunk_collision">
-        <pose>0 0 0.75 0 0 0</pose>
+        <pose>0 0 0.591237 0 0 0</pose>
         <geometry>
           <cylinder>
-            <radius>0.25</radius>
-            <length>1.5</length>
+            <radius>0.197079</radius>
+            <length>1.182473</length>
           </cylinder>
         </geometry>
       </collision>
@@ -16,6 +16,7 @@
         <geometry>
           <mesh>
             <uri>model://apple_tree/meshes/apple_tree.obj</uri>
+            <scale>0.788316 0.788316 0.788316</scale>
           </mesh>
         </geometry>
       </visual>
@@ -23,6 +24,7 @@
         <geometry>
           <mesh>
             <uri>model://apple_tree/meshes/apple_tree_apples.obj</uri>
+            <scale>0.788316 0.788316 0.788316</scale>
           </mesh>
         </geometry>
       </visual>

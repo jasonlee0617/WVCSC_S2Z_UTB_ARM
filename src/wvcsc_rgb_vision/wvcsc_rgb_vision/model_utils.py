@@ -1,19 +1,18 @@
-"""Small model helpers retained for the future YOLO-Seg backend."""
+"""Model-path and independent class-map helpers for two-stage YOLO."""
 
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 
 
-CLASS_NAMES = {0: 'disease_spot', 1: 'pest_cluster'}
+TREE_CLASS_NAMES = {0: 'tree'}
+FRUIT_CLASS_NAMES = {0: 'healthy_fruit', 1: 'diseased_fruit'}
 
 
-def canonical_class_name(class_id, model_names=None):
+def canonical_class_name(class_id, model_names):
     class_id = int(class_id)
-    if class_id in CLASS_NAMES:
-        return CLASS_NAMES[class_id]
     if isinstance(model_names, dict):
-        return str(model_names.get(class_id, f'cls{class_id}'))
+        return str(model_names.get(class_id, model_names.get(str(class_id), f'cls{class_id}')))
     if isinstance(model_names, (list, tuple)) and 0 <= class_id < len(model_names):
         return str(model_names[class_id])
     return f'cls{class_id}'

@@ -3,6 +3,8 @@ string mission_id
 string tree_id
 string spray_side
 float32 spray_duration
+# Global tree-root hint in the map frame.
+geometry_msgs/PointStamped tree_hint
 ---
 # Result
 uint16 OK=0
@@ -15,6 +17,7 @@ uint16 HOME_FAILED=6
 uint16 INTERNAL_ERROR=7
 uint16 VISION_FAILED=8
 uint16 SPRAY_FAILED=9
+uint16 INSPECTED_NO_DISEASE=10
 bool success
 uint16 error_code
 string message
@@ -22,10 +25,14 @@ string message
 # Feedback
 uint8 ACCEPTED=0
 uint8 MOVING_TO_OBSERVE=1
-uint8 SPRAYING=2
-uint8 RETURNING_HOME=3
-uint8 COMPLETED=4
+uint8 SCANNING_TREE=2
+uint8 DETECTING_FRUITS=3
+uint8 QUEUING=4
 uint8 ALIGNING=5
+uint8 SPRAYING=6
+uint8 RETURNING_TO_OBSERVE=7
+uint8 RETURNING_HOME=8
+uint8 COMPLETED=9
 uint8 phase
 float32 progress
 string phase_text

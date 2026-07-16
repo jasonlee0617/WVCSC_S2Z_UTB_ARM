@@ -17,8 +17,17 @@ from wvcsc_interfaces.msg import (
     MissionTargetPlan,
     MissionTargetStatus,
 )
+from wvcsc_interfaces.srv import LoadManualMission
 
-from .core import MissionCore, MissionState, StopDetector, Target, docking_pose
+from .core import (
+    MissionCore,
+    MissionState,
+    StopDetector,
+    Target,
+    docking_pose,
+    manual_tree_hint,
+    navigation_pose,
+)
 
 
 class MissionManager(Node):
@@ -32,6 +41,10 @@ class MissionManager(Node):
         self._road_yaw = float(self.get_parameter('road_yaw').value)
         self._docking_lateral_offset = float(
             self.get_parameter('docking_lateral_offset').value)
+        self._manual_tree_standoff = float(
+            self.get_parameter('manual_tree_standoff').value)
+        self._manual_tree_base_z = float(
+            self.get_parameter('manual_tree_base_z').value)
         self._nav_timeout = float(self.get_parameter('nav_goal_timeout_sec').value)
         self._spray_timeout = float(self.get_parameter('spray_goal_timeout_sec').value)
         self._return_home_after_finish = bool(
@@ -43,6 +56,9 @@ class MissionManager(Node):
         )
         if not all(math.isfinite(value) for value in self._home_pose):
             raise ValueError('home pose must contain finite values')
+        self._configured_return_home_after_finish = (
+            self._return_home_after_finish)
+        self._configured_home_pose = self._home_pose
         self._stop_detector = StopDetector(
             self.get_parameter('linear_stop_threshold').value,
             self.get_parameter('angular_stop_threshold').value,
@@ -84,6 +100,8 @@ class MissionManager(Node):
             Trigger, '/mission/return_home', self._return_home)
         self.create_service(Trigger, '/mission/cancel', self._cancel)
         self.create_service(Trigger, '/mission/reset', self._reset)
+        self.create_service(
+            LoadManualMission, '/mission/load_manual', self._load_manual)
         self.create_timer(0.1, self._tick)
         self.create_timer(0.5, self._publish_status)
         self._publish_status()
@@ -98,6 +116,8 @@ class MissionManager(Node):
             'road_center_y': 0.0,
             'road_yaw': 0.0,
             'docking_lateral_offset': 0.5,
+            'manual_tree_standoff': 1.5,
+            'manual_tree_base_z': 0.0,
             'nav_goal_timeout_sec': 120.0,
             'spray_goal_timeout_sec': 60.0,
             'return_home_after_finish': False,
@@ -129,6 +149,7 @@ class MissionManager(Node):
             self.get_logger().error(f'[MISSION] rejected task list: {error}')
             return
         if outcome == 'accepted':
+            self._restore_configured_mission_options()
             self._manual_return_home = False
             self.get_logger().info(
                 f'[MISSION] accepted mission={self.core.mission_id} '
@@ -183,6 +204,83 @@ class MissionManager(Node):
                 self._docking_lateral_offset)
             targets.append(target)
         return targets
+
+    def _load_manual(self, request, response):
+        try:
+            targets, home_pose = self._validate_manual_request(request)
+            outcome = self.core.load(request.mission_id.strip(), targets)
+        except ValueError as error:
+            self.get_logger().error(f'[MISSION] rejected manual task list: {error}')
+            return self._reply(response, False, str(error))
+        if outcome != 'accepted':
+            message = (
+                'duplicate mission id' if outcome == 'duplicate'
+                else 'mission manager is busy')
+            return self._reply(response, False, message)
+        self._home_pose = home_pose
+        self._return_home_after_finish = bool(
+            request.return_home_after_finish)
+        self._manual_return_home = False
+        self.get_logger().info(
+            f'[MISSION] accepted manual mission={self.core.mission_id} '
+            f'targets={len(self.core.targets)}')
+        self._publish_plan()
+        self._publish_status()
+        return self._reply(response, True, 'manual mission loaded')
+
+    def _validate_manual_request(self, request):
+        if request.header.frame_id != self._map_frame:
+            raise ValueError(f'frame must be {self._map_frame}')
+        if not request.mission_id.strip() or not request.targets:
+            raise ValueError('mission_id and targets are required')
+        max_targets = int(self.get_parameter('max_targets').value)
+        if len(request.targets) > max_targets:
+            raise ValueError(f'target count exceeds limit {max_targets}')
+        home_pose = MissionManager._pose_to_xy_yaw(request.home_pose, 'home')
+        bound = float(self.get_parameter('max_abs_coordinate').value)
+        if abs(home_pose[0]) > bound or abs(home_pose[1]) > bound:
+            raise ValueError('home: position out of bounds')
+        min_duration = float(self.get_parameter('min_spray_duration').value)
+        max_duration = float(self.get_parameter('max_spray_duration').value)
+        seen = set()
+        targets = []
+        for item in request.targets:
+            if not item.target_id.strip() or item.target_id in seen:
+                raise ValueError('target_id must be non-empty and unique')
+            if item.spray_side not in ('left', 'right'):
+                raise ValueError(f'{item.target_id}: invalid spray_side')
+            if not min_duration <= item.spray_duration <= max_duration:
+                raise ValueError(f'{item.target_id}: spray_duration out of range')
+            x, y, yaw = MissionManager._pose_to_xy_yaw(
+                item.docking_pose, item.target_id)
+            if abs(x) > bound or abs(y) > bound:
+                raise ValueError(f'{item.target_id}: position out of bounds')
+            seen.add(item.target_id)
+            targets.append(Target(
+                item.target_id, x, y, item.docking_pose.position.z,
+                1.0, item.spray_side, item.spray_duration,
+                f'manual://rviz/{item.target_id}', (x, y, yaw)))
+        return targets, home_pose
+
+    @staticmethod
+    def _pose_to_xy_yaw(pose, label):
+        values = (
+            pose.position.x, pose.position.y, pose.position.z,
+            pose.orientation.x, pose.orientation.y,
+            pose.orientation.z, pose.orientation.w)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError(f'{label}: non-finite pose')
+        norm = math.sqrt(sum(value * value for value in values[3:]))
+        if norm < 1e-6:
+            raise ValueError(f'{label}: invalid orientation')
+        x, y, z, w = (value / norm for value in values[3:])
+        yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        return pose.position.x, pose.position.y, yaw
+
+    def _restore_configured_mission_options(self):
+        self._home_pose = self._configured_home_pose
+        self._return_home_after_finish = (
+            self._configured_return_home_after_finish)
 
     def _start(self, _request, response):
         if self.core.state != MissionState.READY:
@@ -249,11 +347,12 @@ class MissionManager(Node):
             return self._reply(response, False, 'active goal has not settled')
         if not self._nav_client.server_is_ready():
             return self._reply(response, False, 'Nav2 Action server is not ready')
+        completed = self.core.state == MissionState.MISSION_COMPLETED
         if not self.core.return_home():
             return self._reply(
                 response, False,
-                'return home is allowed only while READY, PAUSED, or verifying stop')
-        self._manual_return_home = True
+                'return home is allowed only while READY, PAUSED, verifying stop, or completed')
+        self._manual_return_home = not completed
         self._stop_detector.stop()
         self._send_nav_goal()
         return self._reply(response, True, 'return home started')
@@ -264,6 +363,7 @@ class MissionManager(Node):
             return self._reply(response, False, 'active goal has not settled')
         if not self.core.reset():
             return self._reply(response, False, 'reset requires a terminal state')
+        self._restore_configured_mission_options()
         self._manual_return_home = False
         self._publish_plan()
         self._publish_status()
@@ -287,7 +387,7 @@ class MissionManager(Node):
             if target is None:
                 self._fail('no current navigation target')
                 return
-            x, y, yaw = docking_pose(
+            x, y, yaw = navigation_pose(
                 target, self._road_center_y, self._road_yaw,
                 self._docking_lateral_offset)
             target_label = target.tree_id
@@ -364,12 +464,25 @@ class MissionManager(Node):
         goal.tree_id = target.tree_id
         goal.spray_side = target.spray_side
         goal.spray_duration = target.spray_duration
+        tree_x, tree_y, tree_z = self._tree_hint(target)
+        goal.tree_hint.header.stamp = self.get_clock().now().to_msg()
+        goal.tree_hint.header.frame_id = self._map_frame
+        goal.tree_hint.point.x = tree_x
+        goal.tree_hint.point.y = tree_y
+        goal.tree_hint.point.z = tree_z
         self._spray_pending = True
         self._phase_started = self._now()
         future = self._spray_client.send_goal_async(
             goal, feedback_callback=self._spray_feedback)
         future.add_done_callback(self._spray_goal_response)
         self._publish_status()
+
+    def _tree_hint(self, target):
+        if target.docking_pose_override is None:
+            return target.x, target.y, target.z
+        return manual_tree_hint(
+            target.docking_pose_override, target.spray_side,
+            self._manual_tree_standoff, self._manual_tree_base_z)
 
     def _spray_goal_response(self, future):
         self._spray_pending = False
@@ -428,8 +541,12 @@ class MissionManager(Node):
         finished = self.core.current_target.tree_id
         self._manual_return_home = False
         self.core.arm_succeeded(self._return_home_after_finish)
+        outcome = (
+            'inspected without disease'
+            if result.error_code == ExecuteSpray.Result.INSPECTED_NO_DISEASE
+            else 'sprayed')
         self.get_logger().info(
-            f'[MISSION] completed tree={finished} '
+            f'[MISSION] {outcome} tree={finished} '
             f'count={self.core.completed_targets}/{len(self.core.targets)}')
         if self.core.state == MissionState.NAVIGATING:
             self._send_nav_goal()
@@ -540,7 +657,7 @@ class MissionManager(Node):
             item.target.evidence_uri = target.evidence_uri
             self._set_pose(
                 item.docking_pose,
-                *docking_pose(
+                *navigation_pose(
                     target, self._road_center_y, self._road_yaw,
                     self._docking_lateral_offset),
             )

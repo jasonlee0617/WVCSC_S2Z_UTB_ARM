@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 from action_msgs.msg import GoalStatus
@@ -115,6 +116,31 @@ class _Validator:
         return SimpleNamespace(value=self.parameters[name])
 
 
+def _pose(x, y, yaw=0.0):
+    return SimpleNamespace(
+        position=SimpleNamespace(x=x, y=y, z=0.0),
+        orientation=SimpleNamespace(
+            x=0.0, y=0.0,
+            z=math.sin(yaw / 2.0), w=math.cos(yaw / 2.0)),
+    )
+
+
+def _manual_request(frame='map', x=3.0, count=1):
+    targets = [SimpleNamespace(
+        target_id=f'manual_{index}',
+        docking_pose=_pose(x + index, 0.5, yaw=0.2 + index),
+        spray_side='left',
+        spray_duration=2.0,
+    ) for index in range(count)]
+    return SimpleNamespace(
+        header=SimpleNamespace(frame_id=frame),
+        mission_id='manual_demo',
+        home_pose=_pose(0.0, 0.0),
+        return_home_after_finish=False,
+        targets=targets,
+    )
+
+
 def _message(frame='map', x=3.0, count=1):
     trees = [SimpleNamespace(
         tree_id=f'tree_{index}',
@@ -198,6 +224,25 @@ def test_ordinary_vision_failure_skips_target_after_home():
     assert harness.failures == []
 
 
+def test_inspected_without_disease_completes_the_tree():
+    harness = _Harness(MissionState.ARM_SPRAYING)
+    result = SimpleNamespace(
+        success=True,
+        error_code=ExecuteSpray.Result.INSPECTED_NO_DISEASE,
+        message='tree inspected; no diseased fruit detected',
+    )
+
+    MissionManager._spray_result(
+        harness,
+        _Future(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED, result=result)),
+    )
+
+    assert harness.core.state == MissionState.MISSION_COMPLETED
+    assert harness.core.completed_targets == 1
+    assert harness.core.skipped_targets == 0
+
+
 def test_nav_spray_and_stop_timeouts_fail_the_active_target():
     navigating = _Harness(MissionState.NAVIGATING)
     MissionManager._tick(navigating)
@@ -248,6 +293,25 @@ def test_invalid_frame_coordinate_and_target_count_are_rejected():
         pass
     else:
         raise AssertionError('invalid source_mode was accepted')
+
+
+def test_manual_targets_preserve_selected_pose_and_validate_input():
+    validator = _Validator()
+    request = _manual_request()
+    targets, home = MissionManager._validate_manual_request(validator, request)
+    assert targets[0].docking_pose_override[:2] == (3.0, 0.5)
+    assert math.isclose(targets[0].docking_pose_override[2], 0.2)
+    assert home == (0.0, 0.0, 0.0)
+
+    for invalid in (
+            _manual_request(frame='odom'),
+            _manual_request(x=51.0),
+            _manual_request(count=3)):
+        try:
+            MissionManager._validate_manual_request(validator, invalid)
+        except ValueError:
+            continue
+        raise AssertionError('invalid manual mission was accepted')
 
 
 def test_start_rejects_when_action_servers_are_absent():

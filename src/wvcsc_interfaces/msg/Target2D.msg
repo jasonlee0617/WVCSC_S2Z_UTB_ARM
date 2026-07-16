@@ -1,6 +1,7 @@
 std_msgs/Header header
 string mission_id
 string tree_id
+string target_id
 bool valid
 float32 confidence
 float32 center_u

@@ -23,6 +23,7 @@ def create_alicia_moveit(node, state):
             _parameter(node, 'acceleration_scaling', 0.1)),
         retime_timeout=float(_parameter(node, 'retime_timeout', 5.0)),
         execution_timeout=float(_parameter(node, 'execution_timeout', 60.0)),
+        planning_time=float(_parameter(node, 'planning_time', 2.0)),
         gripper_action=str(_parameter(
             node, 'gripper_action', '/gripper_controller/gripper_cmd')),
         gripper_open_position=float(_parameter(
@@ -34,4 +35,3 @@ def create_alicia_moveit(node, state):
         state=state,
     )
     return adapter, callback_group
-

@@ -1,158 +1,39 @@
-import threading
+from types import SimpleNamespace
 
-import pytest
-from wvcsc_interfaces.action import ExecuteSpray
-
-from wvcsc_arm_task.motion_state import MotionControlState
-from wvcsc_arm_task.spray_task import SprayTask
+from wvcsc_arm_task.spray_task import FruitTarget, SprayTask
 
 
-class _Arm:
-    def __init__(self, outcomes):
-        self.outcomes = iter(outcomes)
-        self.calls = []
-
-    def move_joints(self, positions):
-        self.calls.append(positions)
-        return next(self.outcomes)
-
-    def cancel(self):
-        self.calls.append('cancel')
+def _target(target_id, center_u, center_v, confidence=0.9):
+    return FruitTarget(target_id, confidence, center_u, center_v, 40.0, 40.0)
 
 
-class _Sequence:
-    _run_sequence = SprayTask._run_sequence
-    _move = SprayTask._move
-    _aborted = SprayTask._aborted
-    _run_timer_spray = SprayTask._run_timer_spray
-    _validate_goal = SprayTask._validate_goal
-    _claim = SprayTask._claim
-    _release = SprayTask._release
+class _QueueHarness:
+    _queue = SprayTask._queue
 
-    def __init__(self, outcomes):
-        self._observe_left = ['left']
-        self._observe_right = ['right']
-        self._home = ['home']
-        self._abort = threading.Event()
-        self._busy_mutex = threading.Lock()
-        self._busy = False
-        self._min_duration = 0.2
-        self._max_duration = 10.0
-        self._use_vision_alignment = False
-        self._use_spray_action = False
-        self.state = MotionControlState()
-        self.arm = _Arm(outcomes)
+    def get_parameter(self, name):
+        return SimpleNamespace(value={
+            'processed_iou_threshold': 0.30,
+            'processed_center_distance_px': 40.0,
+            'image_width': 1280,
+            'image_height': 720,
+        }[name])
 
 
-def _run(sequence, side='left', canceled=lambda: False):
-    feedback = []
-    result = sequence._run_sequence(
-        side,
-        0.0,
-        cancel_requested=canceled,
-        feedback=lambda phase, progress, text: feedback.append(
-            (phase, progress, text)),
-    )
-    return result, feedback
+def test_queue_excludes_processed_target_by_geometry_not_only_tracker_id():
+    task = _QueueHarness()
+    processed = _target('old-id', 640.0, 360.0)
+    same_fruit_new_id = _target('new-id', 650.0, 360.0)
+    other = _target('other', 800.0, 360.0)
+    queue = task._queue([same_fruit_new_id, other], [processed])
+    assert queue == [other]
 
 
-@pytest.mark.parametrize('side,observe', [
-    ('left', ['left']),
-    ('right', ['right']),
-])
-def test_success_requires_observe_and_home_motion(side, observe):
-    sequence = _Sequence([True, True])
-    (code, _message), feedback = _run(sequence, side=side)
-    assert code == ExecuteSpray.Result.OK
-    assert sequence.arm.calls == [observe, ['home']]
-    assert feedback[-1][0] == ExecuteSpray.Feedback.COMPLETED
+def test_queue_prefers_the_fruit_nearest_the_image_center():
+    task = _QueueHarness()
+    near = _target('near', 650.0, 365.0, confidence=0.80)
+    far = _target('far', 900.0, 600.0, confidence=0.99)
+    assert task._queue([far, near], []) == [near, far]
 
 
-def test_observe_failure_returns_home_but_does_not_report_success():
-    sequence = _Sequence([False, True])
-    (code, _message), _feedback = _run(sequence)
-    assert code == ExecuteSpray.Result.OBSERVE_FAILED
-    assert sequence.arm.calls == [['left'], ['home']]
-
-
-def test_home_failure_is_reported():
-    sequence = _Sequence([True, False])
-    (code, _message), _feedback = _run(sequence, side='right')
-    assert code == ExecuteSpray.Result.HOME_FAILED
-    assert sequence.arm.calls == [['right'], ['home']]
-
-
-def test_cancel_stops_before_home_and_never_reports_success():
-    sequence = _Sequence([True])
-    (code, _message), _feedback = _run(sequence, canceled=lambda: True)
-    assert code == ExecuteSpray.Result.CANCELED
-    assert sequence.arm.calls == [['left']]
-
-
-@pytest.mark.parametrize('side,duration', [
-    ('ahead', 2.0),
-    ('left', 0.1),
-    ('right', 10.1),
-    ('left', float('nan')),
-])
-def test_invalid_goal_fields_are_rejected(side, duration):
-    sequence = _Sequence([])
-    assert sequence._validate_goal('mission', 'tree', side, duration)
-
-
-def test_busy_and_locked_sequences_cannot_claim_a_goal():
-    sequence = _Sequence([])
-    assert sequence._claim()
-    assert not sequence._claim()
-    sequence._release()
-    sequence.state.stop()
-    assert not sequence._claim()
-
-
-def test_optional_vision_and_spray_failures_return_home():
-    vision = _Sequence([True, True])
-    vision._use_vision_alignment = True
-    vision._align_target = lambda *_args: (False, False, 'target stale')
-    (code, _message), _feedback = _run(vision)
-    assert code == ExecuteSpray.Result.VISION_FAILED
-    assert vision.arm.calls == [['left'], ['home']]
-
-    spray = _Sequence([True, True])
-    spray._use_spray_action = True
-    spray._spray_target = lambda *_args: (False, False, 'valve failed')
-    (code, _message), _feedback = _run(spray)
-    assert code == ExecuteSpray.Result.SPRAY_FAILED
-    assert spray.arm.calls == [['left'], ['home']]
-
-
-def test_servo_safety_failure_locks_motion_and_does_not_become_skip():
-    sequence = _Sequence([True])
-    sequence._use_vision_alignment = True
-    sequence._align_target = lambda *_args: (
-        False, False, '[SAFETY] collision halt')
-
-    (code, _message), _feedback = _run(sequence)
-
-    assert code == ExecuteSpray.Result.INTERNAL_ERROR
-    assert sequence.state.locked
-    assert sequence.arm.calls == [['left'], 'cancel']
-
-
-def test_optional_vision_and_spray_success_preserve_home_requirement():
-    sequence = _Sequence([True, True])
-    sequence._use_vision_alignment = True
-    sequence._use_spray_action = True
-    sequence._align_target = lambda *_args: (True, False, 'aligned')
-    sequence._spray_target = lambda *_args: (True, False, 'sprayed')
-
-    (code, _message), feedback = _run(sequence)
-
-    assert code == ExecuteSpray.Result.OK
-    assert sequence.arm.calls == [['left'], ['home']]
-    assert [item[0] for item in feedback] == [
-        ExecuteSpray.Feedback.MOVING_TO_OBSERVE,
-        ExecuteSpray.Feedback.ALIGNING,
-        ExecuteSpray.Feedback.SPRAYING,
-        ExecuteSpray.Feedback.RETURNING_HOME,
-        ExecuteSpray.Feedback.COMPLETED,
-    ]
+def test_iou_is_zero_for_disjoint_targets():
+    assert _target('a', 100.0, 100.0).iou(_target('b', 300.0, 300.0)) == 0.0

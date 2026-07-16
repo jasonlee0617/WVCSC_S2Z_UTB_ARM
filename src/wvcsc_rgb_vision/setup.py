@@ -24,8 +24,6 @@ setup(
     description='RGB disease perception for WVCSC.',
     license='Apache-2.0',
     entry_points={'console_scripts': [
-        'alignment_gate = wvcsc_rgb_vision.alignment_gate:main',
-        'color_segmentation = wvcsc_rgb_vision.color_segmentation:main',
-        'mock_vision = wvcsc_rgb_vision.mock_vision:main',
+        'two_stage_yolo = wvcsc_rgb_vision.two_stage_yolo:main',
     ]},
 )

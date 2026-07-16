@@ -47,6 +47,7 @@ class VisualServo(Node):
         self._busy = False
         self._active_mission = ''
         self._active_tree = ''
+        self._active_target = ''
         self._latest = None
         self._camera = None
         self._stable_frames = 0
@@ -137,6 +138,7 @@ class VisualServo(Node):
         valid = (
             str(request.mission_id).strip()
             and str(request.tree_id).strip()
+            and str(request.target_id).strip()
             and math.isfinite(timeout)
             and float(self.get_parameter('min_goal_timeout_sec').value)
             <= timeout
@@ -168,7 +170,8 @@ class VisualServo(Node):
                 return
             matches = (
                 message.mission_id == self._active_mission
-                and message.tree_id == self._active_tree)
+                and message.tree_id == self._active_tree
+                and message.target_id == self._active_target)
             valid = (
                 matches and message.valid
                 and math.isfinite(message.confidence)
@@ -228,6 +231,7 @@ class VisualServo(Node):
         with self._lock:
             self._active_mission = request.mission_id
             self._active_tree = request.tree_id
+            self._active_target = request.target_id
             self._latest = None
             self._stable_frames = 0
             self._last_command = (0.0, 0.0)
@@ -343,6 +347,7 @@ class VisualServo(Node):
                 self._busy = False
                 self._active_mission = ''
                 self._active_tree = ''
+                self._active_target = ''
                 self._latest = None
 
     def _publish_feedback(self, goal_handle, latest):

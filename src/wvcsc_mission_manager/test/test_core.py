@@ -6,6 +6,8 @@ from wvcsc_mission_manager.core import (
     StopDetector,
     Target,
     docking_pose,
+    manual_tree_hint,
+    navigation_pose,
 )
 
 
@@ -30,6 +32,18 @@ def test_rejects_side_that_disagrees_with_road_geometry():
 def test_rejects_negative_lateral_offset():
     with pytest.raises(ValueError):
         docking_pose(_targets()[0], lateral_offset=-0.1)
+
+
+def test_manual_docking_pose_overrides_orchard_offset():
+    target = Target(
+        'manual_1', 3.0, 2.0, 0.0, 1.0, 'left', 2.0,
+        docking_pose_override=(3.2, 0.7, 1.2))
+    assert navigation_pose(target) == (3.2, 0.7, 1.2)
+
+
+def test_manual_tree_hint_uses_docking_yaw_and_spray_side():
+    assert manual_tree_hint((3.0, 0.5, 0.0), 'left', 1.5) == (3.0, 2.0, 0.0)
+    assert manual_tree_hint((3.0, 0.5, 0.0), 'right', 1.5) == (3.0, -1.0, 0.0)
 
 
 def test_two_target_success_path():
@@ -66,6 +80,19 @@ def test_safe_skip_and_manual_return_home_semantics():
     assert core.return_home()
     assert core.home_succeeded(canceled=True)
     assert core.state == MissionState.CANCELED
+
+
+def test_completed_mission_can_return_home_without_losing_completion():
+    core = MissionCore()
+    core.load('demo', [_targets()[0]])
+    core.start()
+    core.nav_succeeded()
+    core.stop_verified()
+    core.arm_succeeded()
+    assert core.state == MissionState.MISSION_COMPLETED
+    assert core.return_home()
+    assert core.home_succeeded()
+    assert core.state == MissionState.MISSION_COMPLETED
 
 
 def test_vision_failure_can_safely_skip_after_arm_returns_home():

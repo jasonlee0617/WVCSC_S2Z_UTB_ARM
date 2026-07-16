@@ -12,8 +12,8 @@ mission:
       evidence_uri: mock://tree_01
     - tree_id: tree_02
       confidence: 0.94
-      position: {x: 5.0, y: -2.0, z: 0.0}
-      spray_side: right
+      position: {x: 7.0, y: 2.0, z: 0.0}
+      spray_side: left
       spray_duration: 2.0
       evidence_uri: mock://tree_02
     - tree_id: tree_03
@@ -24,7 +24,7 @@ mission:
       evidence_uri: mock://tree_03
     - tree_id: tree_04
       confidence: 0.94
-      position: {x: 13.0, y: -2.0, z: 0.0}
-      spray_side: right
+      position: {x: 15.0, y: 2.0, z: 0.0}
+      spray_side: left
       spray_duration: 2.0
       evidence_uri: mock://tree_04

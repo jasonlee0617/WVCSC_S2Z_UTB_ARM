@@ -7,6 +7,8 @@ mission_manager:
     road_center_y: 0.0
     road_yaw: 0.0
     docking_lateral_offset: 0.5
+    manual_tree_standoff: 1.5
+    manual_tree_base_z: 0.0
     nav_goal_timeout_sec: 120.0
     spray_goal_timeout_sec: 60.0
     return_home_after_finish: false
