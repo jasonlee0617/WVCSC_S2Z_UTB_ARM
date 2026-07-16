@@ -535,19 +535,6 @@
   </joint>
   <link
     name="tool0">
-    <visual>
-      <origin
-        xyz="0 0 0"
-        rpy="0 0 0" />
-      <geometry>
-        <sphere radius="0.005" />
-      </geometry>
-      <material
-        name="green_virtual_sphere_material">
-        <color
-          rgba="0 1 0 1" />
-      </material>
-    </visual>
   </link>
   <joint
     name="tool0_fixed_joint"

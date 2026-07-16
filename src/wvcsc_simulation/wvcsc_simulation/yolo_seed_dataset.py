@@ -1,8 +1,11 @@
 """Write and validate raw Gazebo C10 captures for later manual annotation."""
 
 from datetime import datetime, timezone
+import hashlib
+import os
 from pathlib import Path
 import re
+import shutil
 
 import cv2
 import yaml
@@ -10,6 +13,7 @@ import yaml
 
 CLASS_NAMES = {0: 'tree', 1: 'healthy_fruit', 2: 'diseased_fruit'}
 FRUIT_SEG_CLASS_NAMES = {0: 'healthy_fruit', 1: 'diseased_fruit'}
+TREE_DETECT_CLASS_NAMES = {0: 'tree'}
 IMAGE_SIZE = (1280, 720)
 
 
@@ -62,6 +66,31 @@ def _write_fruit_seg_data_yaml(root):
         'train': 'images/train',
         'val': 'images/val',
         'names': FRUIT_SEG_CLASS_NAMES,
+    }, sort_keys=False), encoding='utf-8')
+
+
+def _tree_detect_manifest(path):
+    if path.exists():
+        manifest = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+        if manifest.get('classes') != TREE_DETECT_CLASS_NAMES:
+            raise ValueError('manifest does not match tree detection classes')
+        return manifest
+    return {
+        'version': 1,
+        'dataset_layout': 'tree_detect',
+        'source_topic': '/camera/camera/color/image_raw',
+        'image_size': list(IMAGE_SIZE),
+        'classes': TREE_DETECT_CLASS_NAMES,
+        'samples': [],
+    }
+
+
+def _write_tree_detect_data_yaml(root):
+    (root / 'data.yaml').write_text(yaml.safe_dump({
+        'path': str(root.resolve()),
+        'train': 'images/train',
+        'val': 'images/val',
+        'names': TREE_DETECT_CLASS_NAMES,
     }, sort_keys=False), encoding='utf-8')
 
 
@@ -120,6 +149,36 @@ def write_fruit_seg_sample(root, image, sample_name, split, metadata):
     manifest_path.write_text(yaml.safe_dump(
         manifest, allow_unicode=True, sort_keys=False), encoding='utf-8')
     _write_fruit_seg_data_yaml(root)
+    return record
+
+
+def copy_tree_detect_sample(root, fruit_root, fruit_record):
+    """Copy one raw fruit capture into the matching tree-detection dataset."""
+    root = Path(root)
+    fruit_root = Path(fruit_root)
+    image_path = Path(fruit_record['image'])
+    if image_path.parts[:2] != ('images', fruit_record.get('split')):
+        raise ValueError('fruit record must reference an image split')
+    source = fruit_root / image_path
+    destination = root / image_path
+    if not source.is_file():
+        raise OSError(f'fruit capture does not exist: {source}')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    (root / 'labels' / fruit_record['split']).mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    if hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(destination.read_bytes()).digest():
+        raise OSError(f'copied tree image differs: {destination}')
+    manifest_path = root / 'manifest.yaml'
+    manifest = _tree_detect_manifest(manifest_path)
+    record = dict(fruit_record)
+    record['annotation_status'] = 'pending'
+    manifest['samples'] = [
+        sample for sample in manifest['samples'] if sample.get('image') != record['image']]
+    manifest['samples'].append(record)
+    manifest['samples'].sort(key=lambda sample: sample['image'])
+    manifest_path.write_text(yaml.safe_dump(
+        manifest, allow_unicode=True, sort_keys=False), encoding='utf-8')
+    _write_tree_detect_data_yaml(root)
     return record
 
 
@@ -242,3 +301,146 @@ def validate_fruit_seg_dataset(root, expected_train=24, expected_val=6):
     if errors:
         raise ValueError('\n'.join(errors))
     return {'train': len(images_by_split['train']), 'val': len(images_by_split['val'])}
+
+
+def validate_tree_detect_dataset(root, expected_train=24, expected_val=6):
+    """Validate a manually annotatable tree-detection image-only dataset."""
+    root = Path(root)
+    errors = []
+    images_by_split = {
+        split: sorted((root / 'images' / split).glob('*.png'))
+        for split in ('train', 'val')
+    }
+    expected = {'train': expected_train, 'val': expected_val}
+    for split, images in images_by_split.items():
+        if len(images) != expected[split]:
+            errors.append(
+                f'{split}: expected {expected[split]} images, found {len(images)}')
+        for image_path in images:
+            image = cv2.imread(str(image_path))
+            if image is None or image.shape[:2] != (IMAGE_SIZE[1], IMAGE_SIZE[0]):
+                errors.append(f'{image_path}: expected 1280x720 image')
+        if not (root / 'labels' / split).is_dir():
+            errors.append(f'labels/{split}: directory is required')
+    if list((root / 'labels').rglob('*.txt')):
+        errors.append('dataset must not contain automatic YOLO labels')
+    if list((root / 'images').rglob('*.json')):
+        errors.append('dataset must not contain stale Labelme JSON files')
+    data = yaml.safe_load((root / 'data.yaml').read_text(encoding='utf-8')) \
+        if (root / 'data.yaml').exists() else {}
+    if data != {
+            'path': str(root.resolve()),
+            'train': 'images/train',
+            'val': 'images/val',
+            'names': TREE_DETECT_CLASS_NAMES,
+    }:
+        errors.append('data.yaml does not match the tree-detect class contract')
+    manifest = _tree_detect_manifest(root / 'manifest.yaml')
+    samples = manifest.get('samples', [])
+    image_paths = {
+        path.relative_to(root).as_posix()
+        for images in images_by_split.values() for path in images
+    }
+    if {sample.get('image') for sample in samples} != image_paths:
+        errors.append('manifest image paths do not match captured images')
+    for sample in samples:
+        if sample.get('annotation_status') != 'pending':
+            errors.append(f'{sample.get("image")}: must be pending annotation')
+        if sample.get('split') not in ('train', 'val'):
+            errors.append(f'{sample.get("image")}: invalid split')
+    if errors:
+        raise ValueError('\n'.join(errors))
+    return {'train': len(images_by_split['train']), 'val': len(images_by_split['val'])}
+
+
+def validate_matching_dataset_images(fruit_root, tree_root):
+    """Require the two image-only datasets to have identical PNG bytes."""
+    fruit_root = Path(fruit_root)
+    tree_root = Path(tree_root)
+    errors = []
+    fruit_images = {
+        path.relative_to(fruit_root).as_posix(): path
+        for path in fruit_root.glob('images/*/*.png')
+    }
+    tree_images = {
+        path.relative_to(tree_root).as_posix(): path
+        for path in tree_root.glob('images/*/*.png')
+    }
+    if set(fruit_images) != set(tree_images):
+        errors.append('fruit and tree image paths differ')
+    for relative_path in sorted(set(fruit_images) & set(tree_images)):
+        if hashlib.sha256(fruit_images[relative_path].read_bytes()).digest() != \
+                hashlib.sha256(tree_images[relative_path].read_bytes()).digest():
+            errors.append(f'{relative_path}: image bytes differ')
+    if errors:
+        raise ValueError('\n'.join(errors))
+    return {'images': len(fruit_images)}
+
+
+def replace_dataset_pair(
+        fruit_staging, tree_staging, fruit_destination, tree_destination,
+        expected_train=24, expected_val=6):
+    """Validate staged raw captures, preserve trainers, then atomically replace both roots."""
+    fruit_staging = Path(fruit_staging).resolve()
+    tree_staging = Path(tree_staging).resolve()
+    fruit_destination = Path(fruit_destination).resolve()
+    tree_destination = Path(tree_destination).resolve()
+    validate_fruit_seg_dataset(
+        fruit_staging, expected_train=expected_train, expected_val=expected_val)
+    validate_tree_detect_dataset(
+        tree_staging, expected_train=expected_train, expected_val=expected_val)
+    validate_matching_dataset_images(fruit_staging, tree_staging)
+    destinations = (
+        (fruit_staging, fruit_destination, 'train_seg.py', _write_fruit_seg_data_yaml),
+        (tree_staging, tree_destination, 'train_detect.py', _write_tree_detect_data_yaml),
+    )
+    for _staging, destination, script, _write_yaml in destinations:
+        if not (destination / script).is_file():
+            raise FileNotFoundError(f'missing preserved training script: {destination / script}')
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    candidates = []
+    backups = []
+    try:
+        for staging, destination, script, write_yaml in destinations:
+            candidate = destination.parent / f'.{destination.name}.new-{stamp}'
+            if candidate.exists():
+                raise FileExistsError(f'candidate already exists: {candidate}')
+            shutil.copytree(staging, candidate)
+            shutil.copy2(destination / script, candidate / script)
+            write_yaml(candidate)
+            candidates.append((candidate, destination, write_yaml))
+        validate_fruit_seg_dataset(
+            candidates[0][0], expected_train=expected_train, expected_val=expected_val)
+        validate_tree_detect_dataset(
+            candidates[1][0], expected_train=expected_train, expected_val=expected_val)
+        validate_matching_dataset_images(candidates[0][0], candidates[1][0])
+        for _candidate, destination, _write_yaml in candidates:
+            backup = destination.parent / f'{destination.name}.backup-{stamp}'
+            if backup.exists():
+                raise FileExistsError(f'backup already exists: {backup}')
+            os.replace(destination, backup)
+            backups.append((destination, backup))
+        for candidate, destination, _write_yaml in candidates:
+            os.replace(candidate, destination)
+        for _candidate, destination, write_yaml in candidates:
+            write_yaml(destination)
+        validate_fruit_seg_dataset(
+            fruit_destination, expected_train=expected_train, expected_val=expected_val)
+        validate_tree_detect_dataset(
+            tree_destination, expected_train=expected_train, expected_val=expected_val)
+        validate_matching_dataset_images(fruit_destination, tree_destination)
+    except Exception:
+        for candidate, _destination, _write_yaml in candidates:
+            if candidate.exists():
+                shutil.rmtree(candidate)
+        for destination, backup in reversed(backups):
+            if destination.exists():
+                shutil.rmtree(destination)
+            if backup.exists():
+                os.replace(backup, destination)
+        raise
+    return {
+        'fruit_backup': str(backups[0][1]),
+        'tree_backup': str(backups[1][1]),
+        'images': expected_train + expected_val,
+    }

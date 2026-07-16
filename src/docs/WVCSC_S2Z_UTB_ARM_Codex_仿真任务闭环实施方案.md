@@ -286,16 +286,29 @@ ros2 launch my_navigation2 nav2_qt.launch.py use_sim_time:=false
 
 ## 6. 两级 YOLO 数据与后续实施
 
-原始 C10 种子集位于 `/home/robot/ultralytics-main/datasets/wvcsc_fruit_seg/`。当前已完成 30 张 `1280×720` 图像及实例分割标注：`train` 24 张、`val` 6 张；采集来源为 `/camera/camera/color/image_raw`。
+本次已重新采集 30 张无标注原始 C10 图像，并安全替换两个数据集根目录：
 
-本轮使用 seed `50–54`，每个 seed 采集左侧 3 棵、右侧 3 棵；果树资产固定每棵最多 5 个果实，病果按 seed 固定随机生成 1–2 个，健康果为鲜红色、病果为黄色。采集前临时隐藏 tool0 白球，采集后已恢复原始 URDF，文件 SHA256 为 `71b93d066b6d7c6354d5412da4e37352518f270a4ff77161feb192e2b813e5a5`。
+- `/home/robot/ultralytics-main/datasets/wvcsc_fruit_seg/`：`train` 24 张、`val` 6 张，类别预留为 `healthy_fruit`、`diseased_fruit`；
+- `/home/robot/ultralytics-main/datasets/wvcsc_tree_detect/`：同一批 PNG、同一划分，类别预留为 `tree`；
+- 两个数据集的同名 PNG 已按 SHA256 逐张校验为字节完全一致；标签目录存在但为空，不包含 `.txt`、`.cache`、Labelme JSON 或调试图；
+- 原数据已保留为 `wvcsc_fruit_seg.backup-20260716T170751Z` 和 `wvcsc_tree_detect.backup-20260716T170751Z`，未删除训练脚本。
+
+图片清单固定为：seeds `50–53` 的 `left_tree_01–03`、`right_tree_01–03` 共 24 张 `train`；seed `54` 的同六个视角共 6 张 `val`。所有图片来自 `/camera/camera/color/image_raw`，尺寸均为 `1280×720`。
+
+果树生成规则已更新：134 个原始网格连通组件先配对为 67 颗完整果实；每棵树只生成 5 颗完整果实，其中按 seed 固定为 2–3 颗亮黄色病果、其余为鲜红色健康果。果实只从道路侧、外层且源模型高度不低于 `0.90` 的候选中选择；每颗果实周围清除 `0.18` 模型单位叶片，并固定仅保留 269 个叶片组件。这样避免低位果实被车体遮挡，也避免叶片遮住用于标注的果实。
+
+`tool0` 的球形 `<visual>` 已永久移除；`tool0` link、固定关节和 C10 相机安装关系仍保留。当前 URDF SHA256 为 `72cba78355ca07a753941394a4b170b74f88f1dad35f3881d4e10490600c05fe`。重采集通过 `capture_yolo_seed_direct.py` 直接设置六个停靠位姿、调用真实 `ExecuteSpray` Action 到达观察姿态，并使用无病果 Mock perception 完成观察与 HOME；不依赖 Nav2。
 
 数据采集验收命令：
 
 ```bash
 PYTHONPATH=$PWD/wvcsc_simulation python3 -c \
-  "from wvcsc_simulation.yolo_seed_dataset import validate_fruit_seg_dataset; \
-   print(validate_fruit_seg_dataset('/home/robot/ultralytics-main/datasets/wvcsc_fruit_seg'))"
+  "from wvcsc_simulation.yolo_seed_dataset import (validate_fruit_seg_dataset, validate_tree_detect_dataset, validate_matching_dataset_images); \
+   fruit='/home/robot/ultralytics-main/datasets/wvcsc_fruit_seg'; \
+   tree='/home/robot/ultralytics-main/datasets/wvcsc_tree_detect'; \
+   print(validate_fruit_seg_dataset(fruit)); \
+   print(validate_tree_detect_dataset(tree)); \
+   print(validate_matching_dataset_images(fruit, tree))"
 ```
 
 注意：Gazebo 11 相机需要在 source ROS 2 后再次加载 Gazebo 环境，避免 `GAZEBO_RESOURCE_PATH` 被 ROS 环境覆盖：

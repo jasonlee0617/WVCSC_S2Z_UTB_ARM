@@ -1,10 +1,16 @@
 import cv2
 import numpy as np
+from pathlib import Path
 import yaml
 
 from wvcsc_simulation.yolo_seed_dataset import (
     FRUIT_SEG_CLASS_NAMES,
+    TREE_DETECT_CLASS_NAMES,
+    copy_tree_detect_sample,
+    replace_dataset_pair,
     validate_fruit_seg_dataset,
+    validate_matching_dataset_images,
+    validate_tree_detect_dataset,
     validate_unlabeled_dataset,
     write_fruit_seg_sample,
     write_unlabeled_sample,
@@ -51,3 +57,45 @@ def test_fruit_seg_capture_is_ready_for_manual_annotation(tmp_path):
         (tmp_path / 'data.yaml').read_text(encoding='utf-8'))
     assert data['names'] == FRUIT_SEG_CLASS_NAMES
     assert not list((tmp_path / 'labels').rglob('*.txt'))
+
+
+def test_tree_dataset_copies_the_exact_unlabelled_fruit_frame(tmp_path):
+    fruit_root = tmp_path / 'fruit'
+    tree_root = tmp_path / 'tree'
+    train = write_fruit_seg_sample(
+        fruit_root, _image(), 'train_tree', 'train', {'tree_id': 'left_tree_01'})
+    val = write_fruit_seg_sample(
+        fruit_root, _image(), 'val_tree', 'val', {'tree_id': 'right_tree_01'})
+    copy_tree_detect_sample(tree_root, fruit_root, train)
+    copy_tree_detect_sample(tree_root, fruit_root, val)
+    assert validate_tree_detect_dataset(
+        tree_root, expected_train=1, expected_val=1) == {'train': 1, 'val': 1}
+    assert validate_matching_dataset_images(fruit_root, tree_root) == {'images': 2}
+    data = yaml.safe_load((tree_root / 'data.yaml').read_text(encoding='utf-8'))
+    assert data['names'] == TREE_DETECT_CLASS_NAMES
+    assert not list((tree_root / 'labels').rglob('*.txt'))
+
+
+def test_replace_dataset_pair_preserves_trainers_and_backups(tmp_path):
+    fruit_staging = tmp_path / 'fruit_staging'
+    tree_staging = tmp_path / 'tree_staging'
+    for split in ('train', 'val'):
+        record = write_fruit_seg_sample(
+            fruit_staging, _image(), f'{split}_tree', split, {'tree_id': split})
+        copy_tree_detect_sample(tree_staging, fruit_staging, record)
+    fruit_destination = tmp_path / 'fruit_destination'
+    tree_destination = tmp_path / 'tree_destination'
+    fruit_destination.mkdir()
+    tree_destination.mkdir()
+    (fruit_destination / 'train_seg.py').write_text('fruit trainer', encoding='utf-8')
+    (tree_destination / 'train_detect.py').write_text('tree trainer', encoding='utf-8')
+    result = replace_dataset_pair(
+        fruit_staging, tree_staging, fruit_destination, tree_destination,
+        expected_train=1, expected_val=1)
+    assert result['images'] == 2
+    assert (fruit_destination / 'train_seg.py').read_text(encoding='utf-8') == 'fruit trainer'
+    assert (tree_destination / 'train_detect.py').read_text(encoding='utf-8') == 'tree trainer'
+    assert validate_matching_dataset_images(fruit_destination, tree_destination) == {
+        'images': 2}
+    assert Path(result['fruit_backup']).is_dir()
+    assert Path(result['tree_backup']).is_dir()

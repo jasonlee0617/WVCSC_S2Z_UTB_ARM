@@ -11,6 +11,8 @@ install(PROGRAMS
   scripts/ackermann_sim.py
   scripts/mock_vision.py
   scripts/capture_yolo_seed.py
+  scripts/capture_yolo_seed_direct.py
+  scripts/replace_yolo_seed_datasets.py
   scripts/validate_yolo_seed.py
   DESTINATION lib/${PROJECT_NAME}
 )

@@ -486,7 +486,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz', default_value='false'),
         DeclareLaunchArgument('gazebo_gui', default_value='true'),
         DeclareLaunchArgument('orchard_seed', default_value='42'),
-        DeclareLaunchArgument('diseased_fruit_ratio', default_value='0.20'),
+        DeclareLaunchArgument('diseased_fruit_ratio', default_value='0.50'),
         DeclareLaunchArgument('use_nav2_qt', default_value='false'),
         DeclareLaunchArgument('enable_arm_control', default_value='true'),
         DeclareLaunchArgument('enable_ackermann', default_value='true'),

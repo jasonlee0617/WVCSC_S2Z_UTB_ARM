@@ -8,9 +8,19 @@ import yaml
 
 from wvcsc_simulation.orchard_assets import (
     CAMERA_FACING_CANDIDATE_COUNT,
+    EXPECTED_COMPLETE_FRUIT_COUNT,
     EXPECTED_FRUIT_COUNT,
+    EXPECTED_LEAF_COMPONENT_COUNT,
+    FRUIT_LEAF_CLEARANCE,
     FRUIT_COUNT_PER_TREE,
+    MIN_CAMERA_VISIBLE_FRUIT_Z,
+    MAX_DISEASED_FRUIT_COUNT,
+    MIN_DISEASED_FRUIT_COUNT,
+    RETAINED_LEAF_COMPONENT_COUNT,
     TREE_SCALE,
+    _complete_fruits,
+    _fruit_components,
+    _tree_mesh_components,
     generate_orchard_assets,
 )
 
@@ -20,9 +30,10 @@ WORLD = PACKAGE_DIR / 'worlds' / 'orchard.world'
 MODEL = PACKAGE_DIR / 'models' / 'apple_tree'
 MAP = PACKAGE_DIR / 'maps' / 'orchard.pgm'
 MAP_YAML = PACKAGE_DIR / 'maps' / 'orchard.yaml'
+ROBOT_URDF = PACKAGE_DIR.parents[0] / 'Alicia-M-ROS2' / 'alicia_m_descriptions' / 'urdf' / 'Alicia_M_v1_1' / 'Alicia_M_v1_1_follower.urdf'
 
 
-def _generate(tmp_path, seed, ratio=0.20):
+def _generate(tmp_path, seed, ratio=0.50):
     return generate_orchard_assets(
         WORLD, MODEL, seed=seed, diseased_ratio=ratio,
         output_dir=tmp_path / f'orchard_{seed}',
@@ -120,6 +131,28 @@ def test_tree_scale_limits_source_mesh_to_1_8_m():
         1.5 * TREE_SCALE, abs=1e-6)
 
 
+def test_source_assets_contain_complete_fruits_and_leaf_components():
+    fruit_lines = (MODEL / 'meshes' / 'apple_tree_apples.obj').read_text(
+        encoding='utf-8').splitlines(keepends=True)
+    complete_fruits = _complete_fruits(_fruit_components(fruit_lines))
+    assert len(complete_fruits) == EXPECTED_COMPLETE_FRUIT_COUNT
+    assert all(len(fruit['source_components']) == 2 for fruit in complete_fruits)
+    tree_lines = (MODEL / 'meshes' / 'apple_tree.obj').read_text(
+        encoding='utf-8').splitlines(keepends=True)
+    _, leaves = _tree_mesh_components(tree_lines)
+    assert len(leaves) == EXPECTED_LEAF_COMPONENT_COUNT
+
+
+def test_tool0_frame_is_preserved_without_a_visual_marker():
+    robot = ET.parse(ROBOT_URDF).getroot()
+    tool0 = next(link for link in robot.findall('link') if link.get('name') == 'tool0')
+    assert tool0.find('visual') is None
+    joint = next(
+        joint for joint in robot.findall('joint')
+        if joint.get('name') == 'tool0_fixed_joint')
+    assert joint.find('child').get('link') == 'tool0'
+
+
 def test_each_tree_has_reproducible_healthy_and_diseased_fruits(tmp_path):
     first = _generate(tmp_path / 'first', 42)
     second = _generate(tmp_path / 'second', 42)
@@ -130,19 +163,30 @@ def test_each_tree_has_reproducible_healthy_and_diseased_fruits(tmp_path):
     assert (first_manifest['camera_facing_candidate_count'] ==
             CAMERA_FACING_CANDIDATE_COUNT)
     for tree_name, data in first_manifest['trees'].items():
-        assert data['healthy_count'] in (3, 4)
-        assert data['diseased_count'] in (1, 2)
-        selected = set(data['selected_components'])
-        healthy = set(data['healthy_components'])
-        diseased = set(data['diseased_components'])
+        assert data['healthy_count'] in (2, 3)
+        assert data['diseased_count'] in (
+            MIN_DISEASED_FRUIT_COUNT, MAX_DISEASED_FRUIT_COUNT)
+        selected = set(data['selected_fruits'])
+        healthy = set(data['healthy_fruits'])
+        diseased = set(data['diseased_fruits'])
         assert len(selected) == FRUIT_COUNT_PER_TREE
         assert selected == healthy | diseased
         assert not healthy & diseased
-        assert selected <= set(data['candidate_components'])
-        assert len(data['candidate_components']) == CAMERA_FACING_CANDIDATE_COUNT
+        assert selected <= set(data['candidate_fruits'])
+        assert len(data['candidate_fruits']) == CAMERA_FACING_CANDIDATE_COUNT
+        assert len(data['selected_source_components']) == FRUIT_COUNT_PER_TREE
+        assert all(len(group) == 2 for group in data['selected_source_components'])
+        assert all(center[2] >= MIN_CAMERA_VISIBLE_FRUIT_Z
+                   for center in data['selected_fruit_centers'])
+        assert data['retained_leaf_count'] == RETAINED_LEAF_COMPONENT_COUNT
+        assert all(
+            sum((leaf[axis] - fruit[axis]) ** 2 for axis in range(3)) >=
+            FRUIT_LEAF_CLEARANCE ** 2
+            for leaf in data['retained_leaf_centers']
+            for fruit in data['selected_fruit_centers'])
         assert data == second_manifest['trees'][tree_name]
         model_name = f'orchard_{tree_name}'
-        for mesh in ('healthy_apples.obj', 'diseased_apples.obj'):
+        for mesh in ('healthy_apples.obj', 'diseased_apples.obj', 'sparse_tree.obj'):
             assert _digest(first.parent / 'models' / model_name / mesh) == _digest(
                 second.parent / 'models' / model_name / mesh)
         model = ET.parse(
@@ -162,17 +206,21 @@ def test_each_tree_has_reproducible_healthy_and_diseased_fruits(tmp_path):
             if 'apples' in visual.get('name', '')
         }
         assert colors == {
-            'healthy_apples_visual': '1.00 0.00 0.00 1.00',
-            'diseased_apples_visual': '1.00 1.00 0.00 1.00',
+            'healthy_apples_visual': '1.00 0.04 0.02 1.00',
+            'diseased_apples_visual': '1.00 0.95 0.02 1.00',
         }
+        assert all(
+            visual.findtext('./material/emissive') is not None
+            for visual in model.findall('.//visual')
+            if 'apples' in visual.get('name', ''))
 
 
 def test_different_seed_changes_diseased_fruit_selection(tmp_path):
     first = _manifest(_generate(tmp_path / 'first', 42))
     second = _manifest(_generate(tmp_path / 'second', 43))
     assert any(
-        first['trees'][name]['selected_components'] !=
-        second['trees'][name]['selected_components']
+        first['trees'][name]['selected_fruits'] !=
+        second['trees'][name]['selected_fruits']
         for name in first['trees']
     )
 

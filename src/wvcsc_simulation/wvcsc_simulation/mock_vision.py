@@ -33,6 +33,7 @@ class MockVision(Node):
                 'error_u': 0.0,
                 'error_v': 0.0,
                 'confidence': 0.95,
+                'publish_diseased_fruit': True,
                 'publish_rate_hz': 10.0,
         }.items():
             self.declare_parameter(name, default)
@@ -78,9 +79,10 @@ class MockVision(Node):
             width * 0.7, height * 0.8)]
         fruit = Detection2DArray()
         fruit.header = header
-        fruit.detections = [_detection(
-            header, 'mock-fruit-1', 'diseased_fruit', confidence,
-            width / 2.0, height / 2.0, 120.0, 120.0)]
+        if self.get_parameter('publish_diseased_fruit').value:
+            fruit.detections = [_detection(
+                header, 'mock-fruit-1', 'diseased_fruit', confidence,
+                width / 2.0, height / 2.0, 120.0, 120.0)]
         self._tree_pub.publish(tree)
         self._fruit_pub.publish(fruit)
         if self._selected_target_id != 'mock-fruit-1':
