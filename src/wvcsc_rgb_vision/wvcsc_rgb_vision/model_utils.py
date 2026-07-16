@@ -18,6 +18,17 @@ def canonical_class_name(class_id, model_names):
     return f'cls{class_id}'
 
 
+def validate_yolo_model(model, expected_task, expected_names):
+    """Fail fast when a deployment weight has the wrong task or class map."""
+    actual_names = ({int(key): str(value) for key, value in model.names.items()}
+                    if isinstance(model.names, dict)
+                    else {index: str(value) for index, value in enumerate(model.names)})
+    if model.task != expected_task or actual_names != expected_names:
+        raise ValueError(
+            f'YOLO model contract mismatch: expected task={expected_task}, '
+            f'names={expected_names}; found task={model.task}, names={model.names}')
+
+
 def resolve_yolo_model_path(path_value):
     path = Path(path_value).expanduser()
     if path.is_absolute():

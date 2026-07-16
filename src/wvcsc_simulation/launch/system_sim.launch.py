@@ -117,7 +117,11 @@ def generate_launch_description():
         alicia_model_root,
         os.environ.get('GAZEBO_MODEL_PATH'),
     ]))
-
+    gazebo_resource_path = os.pathsep.join(filter(None, [
+        os.environ.get('GAZEBO_RESOURCE_PATH'),
+        '/usr/share/gazebo-11',
+        '/opt/ros/humble/share',
+    ]))
     xacro_file = os.path.join(description_share, 'urdf', 'wvcsc_utb_alicia.urdf.xacro')
     robot_description = {
         'robot_description': ParameterValue(
@@ -502,6 +506,7 @@ def generate_launch_description():
         DeclareLaunchArgument('web_host', default_value='127.0.0.1'),
         DeclareLaunchArgument('web_port', default_value='8080'),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
+        SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),
         OpaqueFunction(function=ensure_fresh_gazebo_master),
         OpaqueFunction(
             function=prepare_orchard,

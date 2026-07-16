@@ -1,8 +1,12 @@
 import cv2
 import numpy as np
+import yaml
 
 from wvcsc_simulation.yolo_seed_dataset import (
+    FRUIT_SEG_CLASS_NAMES,
+    validate_fruit_seg_dataset,
     validate_unlabeled_dataset,
+    write_fruit_seg_sample,
     write_unlabeled_sample,
 )
 
@@ -32,3 +36,18 @@ def test_validation_accepts_only_raw_images_and_matching_manifest(tmp_path):
         assert '1280x720' in str(error)
     else:
         raise AssertionError('invalid image size must fail validation')
+
+
+def test_fruit_seg_capture_is_ready_for_manual_annotation(tmp_path):
+    train = write_fruit_seg_sample(
+        tmp_path, _image(), 'train_tree', 'train', {'tree_id': 'left_tree_01'})
+    val = write_fruit_seg_sample(
+        tmp_path, _image(), 'val_tree', 'val', {'tree_id': 'right_tree_01'})
+    assert train['image'] == 'images/train/train_tree.png'
+    assert val['annotation_status'] == 'pending'
+    assert validate_fruit_seg_dataset(
+        tmp_path, expected_train=1, expected_val=1) == {'train': 1, 'val': 1}
+    data = yaml.safe_load(
+        (tmp_path / 'data.yaml').read_text(encoding='utf-8'))
+    assert data['names'] == FRUIT_SEG_CLASS_NAMES
+    assert not list((tmp_path / 'labels').rglob('*.txt'))

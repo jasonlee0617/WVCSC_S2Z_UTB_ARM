@@ -14,7 +14,10 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.action._execute_spray import ExecuteSpray_FeedbackMessage
 from wvcsc_interfaces.msg import DiseaseTreeArray, MissionStatus
-from wvcsc_simulation.yolo_seed_dataset import write_unlabeled_sample
+from wvcsc_simulation.yolo_seed_dataset import (
+    write_fruit_seg_sample,
+    write_unlabeled_sample,
+)
 
 
 class SeedCapture(Node):
@@ -85,14 +88,20 @@ class SeedCapture(Node):
         }
         try:
             sample_name = f'seed_{self.args.orchard_seed}_{tree_id}'
-            record = write_unlabeled_sample(
-                self.args.output, image, sample_name, metadata)
+            if self.args.split == 'unlabeled':
+                record = write_unlabeled_sample(
+                    self.args.output, image, sample_name, metadata)
+            else:
+                record = write_fruit_seg_sample(
+                    self.args.output, image, sample_name, self.args.split,
+                    metadata)
         except (OSError, ValueError) as error:
             self.get_logger().error(f'rejected {tree_id} frame: {error}')
             return
         self.captured.add(tree_id)
         self.pending = ''
-        self.get_logger().info(f'captured {record["image"]}: unlabeled')
+        status = 'unlabeled' if self.args.split == 'unlabeled' else 'pending annotation'
+        self.get_logger().info(f'captured {record["image"]}: {status}')
         if len(self.captured) >= self.args.expected:
             self.done.set()
 
@@ -102,11 +111,13 @@ def _arguments():
     parser.add_argument('--output', required=True)
     parser.add_argument('--orchard-seed', type=int, required=True)
     parser.add_argument('--expected', type=int, required=True)
+    parser.add_argument(
+        '--split', choices=('unlabeled', 'train', 'val'), default='unlabeled')
     parser.add_argument('--timeout', type=float, default=900.0)
     parser.add_argument('--diseased-fruit-ratio', type=float, default=0.20)
     parser.add_argument('--observation-distance', type=float, default=1.40)
     parser.add_argument(
-        '--image-topic', default='/camera/camera/color/image_rect_raw')
+        '--image-topic', default='/camera/camera/color/image_raw')
     return parser.parse_args()
 
 

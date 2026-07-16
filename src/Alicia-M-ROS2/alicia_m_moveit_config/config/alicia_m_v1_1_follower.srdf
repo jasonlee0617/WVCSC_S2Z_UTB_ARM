@@ -50,14 +50,13 @@
     <disable_collisions link1="link1" link2="link2" reason="Adjacent"/>
     <disable_collisions link1="link1" link2="link3" reason="Never"/>
     <!-- 2 -->
-    <!-- <disable_collisions link1="link1" link2="link4" reason="Never"/>
+    <!-- link1/link5 is a permanent overlap in the supplied collision meshes. -->
     <disable_collisions link1="link1" link2="link5" reason="Never"/>
-    <disable_collisions link1="link1" link2="link6" reason="Never"/>
-    <disable_collisions link1="link1" link2="link7" reason="Never"/>
-    <disable_collisions link1="link1" link2="link8" reason="Never"/> -->
     <!-- 2 -->
     <disable_collisions link1="link2" link2="link3" reason="Adjacent"/>
     <disable_collisions link1="link2" link2="link4" reason="Never"/>
+    <!-- link2/link5 also overlap in the supplied collision meshes. -->
+    <disable_collisions link1="link2" link2="link5" reason="Never"/>
     <!-- 3 -->
     <!-- <disable_collisions link1="link2" link2="link5" reason="Never"/>
     <disable_collisions link1="link2" link2="link6" reason="Never"/>

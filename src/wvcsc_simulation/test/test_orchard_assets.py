@@ -7,7 +7,9 @@ import pytest
 import yaml
 
 from wvcsc_simulation.orchard_assets import (
+    CAMERA_FACING_CANDIDATE_COUNT,
     EXPECTED_FRUIT_COUNT,
+    FRUIT_COUNT_PER_TREE,
     TREE_SCALE,
     generate_orchard_assets,
 )
@@ -124,15 +126,20 @@ def test_each_tree_has_reproducible_healthy_and_diseased_fruits(tmp_path):
     first_manifest = _manifest(first)
     second_manifest = _manifest(second)
     assert len(first_manifest['trees']) == 8
+    assert first_manifest['fruit_count_per_tree'] == FRUIT_COUNT_PER_TREE
+    assert (first_manifest['camera_facing_candidate_count'] ==
+            CAMERA_FACING_CANDIDATE_COUNT)
     for tree_name, data in first_manifest['trees'].items():
-        assert data['healthy_count'] == 107
-        assert data['diseased_count'] == 27
-        healthy = set(range(EXPECTED_FRUIT_COUNT)) - set(
-            data['diseased_components'])
-        assert (
-            len(healthy) + len(data['diseased_components']) ==
-            EXPECTED_FRUIT_COUNT
-        )
+        assert data['healthy_count'] in (3, 4)
+        assert data['diseased_count'] in (1, 2)
+        selected = set(data['selected_components'])
+        healthy = set(data['healthy_components'])
+        diseased = set(data['diseased_components'])
+        assert len(selected) == FRUIT_COUNT_PER_TREE
+        assert selected == healthy | diseased
+        assert not healthy & diseased
+        assert selected <= set(data['candidate_components'])
+        assert len(data['candidate_components']) == CAMERA_FACING_CANDIDATE_COUNT
         assert data == second_manifest['trees'][tree_name]
         model_name = f'orchard_{tree_name}'
         for mesh in ('healthy_apples.obj', 'diseased_apples.obj'):
@@ -149,14 +156,23 @@ def test_each_tree_has_reproducible_healthy_and_diseased_fruits(tmp_path):
             f'model://{model_name}/healthy_apples.obj',
             f'model://{model_name}/diseased_apples.obj',
         ]
+        colors = {
+            visual.get('name'): visual.findtext('./material/diffuse')
+            for visual in model.findall('.//visual')
+            if 'apples' in visual.get('name', '')
+        }
+        assert colors == {
+            'healthy_apples_visual': '1.00 0.00 0.00 1.00',
+            'diseased_apples_visual': '1.00 1.00 0.00 1.00',
+        }
 
 
 def test_different_seed_changes_diseased_fruit_selection(tmp_path):
     first = _manifest(_generate(tmp_path / 'first', 42))
     second = _manifest(_generate(tmp_path / 'second', 43))
     assert any(
-        first['trees'][name]['diseased_components'] !=
-        second['trees'][name]['diseased_components']
+        first['trees'][name]['selected_components'] !=
+        second['trees'][name]['selected_components']
         for name in first['trees']
     )
 

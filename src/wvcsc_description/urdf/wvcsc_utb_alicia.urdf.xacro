@@ -72,12 +72,15 @@
     </joint>
 
     <xacro:if value="$(arg enable_c10_gazebo)">
-      <gazebo reference="camera_link">
+      <!-- Gazebo lumps fixed camera_link into link6, so attach its sensor to
+           the retained parent link with the equivalent fixed transform. -->
+      <gazebo reference="link6">
         <sensor name="c10_color" type="camera">
           <always_on>true</always_on>
           <update_rate>30.0</update_rate>
           <visualize>false</visualize>
-          <camera name="c10_color">
+          <pose>-0.055 0 0.05 0 -1.57079632679 0</pose>
+          <camera name="c10_optical">
             <horizontal_fov>1.8</horizontal_fov>
             <image>
               <width>1280</width>
@@ -90,9 +93,8 @@
           <plugin name="c10_camera_plugin" filename="libgazebo_ros_camera.so">
             <ros>
               <namespace>/camera/camera</namespace>
-              <remapping>color/image_raw:=color/image_rect_raw</remapping>
               <qos>
-                <topic name="color/image_rect_raw">
+                <topic name="color/image_raw">
                   <publisher>
                     <reliability>best_effort</reliability>
                     <history depth="1">keep_last</history>
@@ -162,4 +164,5 @@
       </plugin>
     </gazebo>
   </xacro:if>
+
 </robot>

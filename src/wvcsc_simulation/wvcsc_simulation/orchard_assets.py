@@ -14,6 +14,10 @@ import xml.etree.ElementTree as ET
 
 TREE_SCALE = 1.8 / 2.2833495
 EXPECTED_FRUIT_COUNT = 134
+FRUIT_COUNT_PER_TREE = 5
+MIN_DISEASED_FRUIT_COUNT = 1
+MAX_DISEASED_FRUIT_COUNT = 2
+CAMERA_FACING_CANDIDATE_COUNT = 32
 
 
 def _face_vertices(line, vertex_count):
@@ -25,7 +29,11 @@ def _face_vertices(line, vertex_count):
 
 
 def _fruit_components(lines):
-    vertex_count = sum(line.startswith('v ') for line in lines)
+    points = [
+        tuple(float(value) for value in line.split()[1:4])
+        for line in lines if line.startswith('v ')
+    ]
+    vertex_count = len(points)
     faces = [line for line in lines if line.startswith('f ')]
     parent = list(range(vertex_count))
 
@@ -53,8 +61,20 @@ def _fruit_components(lines):
 
     grouped = {}
     for face, vertices in zip(faces, face_vertices):
-        grouped.setdefault(find(vertices[0]), []).append(face)
-    return [grouped[key] for key in sorted(grouped)]
+        component = grouped.setdefault(
+            find(vertices[0]), {'faces': [], 'vertices': set()})
+        component['faces'].append(face)
+        component['vertices'].update(vertices)
+    return [
+        {
+            'faces': grouped[key]['faces'],
+            'center': tuple(
+                sum(points[index][axis] for index in grouped[key]['vertices']) /
+                len(grouped[key]['vertices'])
+                for axis in range(3)),
+        }
+        for key in sorted(grouped)
+    ]
 
 
 def _write_obj(path, source_lines, faces, material_name, material_file):
@@ -78,10 +98,10 @@ def _write_material(path, name, diffuse):
     path.write_text(
         '# Generated fruit material\n'
         f'newmtl {name}\n'
-        'Ka 0.15 0.15 0.15\n'
+        f'Ka {red * 0.45:.2f} {green * 0.45:.2f} {blue * 0.45:.2f}\n'
         f'Kd {red:.2f} {green:.2f} {blue:.2f}\n'
-        'Ks 0.20 0.20 0.20\n'
-        'Ns 24.0\n'
+        'Ks 0.05 0.05 0.05\n'
+        'Ns 8.0\n'
         'illum 2\n',
         encoding='utf-8',
     )
@@ -90,6 +110,58 @@ def _write_material(path, name, diffuse):
 def _tree_seed(seed, tree_name):
     digest = hashlib.sha256(f'{seed}:{tree_name}'.encode()).digest()
     return int.from_bytes(digest[:8], byteorder='big')
+
+
+def _road_facing_components(components, pose):
+    """Return component indices nearest the road-facing side of a tree."""
+    values = [float(value) for value in pose.split()]
+    if len(values) != 6:
+        raise ValueError('apple tree pose must contain six values')
+    _, tree_y, _, _, _, yaw = values
+    road_direction_y = math.cos(yaw) * (-tree_y)
+    if abs(road_direction_y) < 1e-9:
+        raise ValueError('apple tree must not be placed on the road center')
+    direction = 1.0 if road_direction_y > 0.0 else -1.0
+    ordered = sorted(
+        range(len(components)),
+        key=lambda index: (direction * components[index]['center'][1], -index),
+        reverse=True,
+    )
+    if len(ordered) < FRUIT_COUNT_PER_TREE:
+        raise ValueError('not enough fruit components for one tree')
+    return ordered[:min(CAMERA_FACING_CANDIDATE_COUNT, len(ordered))]
+
+
+def _select_fruits(candidates, seed, diseased_ratio):
+    """Select five visible fruits and constrain disease count to one or two."""
+    rng = random.Random(seed)
+    selected = sorted(rng.sample(candidates, FRUIT_COUNT_PER_TREE))
+    diseased = [
+        component for component in selected if rng.random() < diseased_ratio
+    ]
+    if not diseased:
+        diseased = [rng.choice(selected)]
+    elif len(diseased) > MAX_DISEASED_FRUIT_COUNT:
+        diseased = sorted(rng.sample(diseased, MAX_DISEASED_FRUIT_COUNT))
+    if len(diseased) < MIN_DISEASED_FRUIT_COUNT:
+        raise AssertionError('disease count must not be zero')
+    diseased = sorted(diseased)
+    healthy = sorted(set(selected) - set(diseased))
+    return selected, healthy, diseased
+
+
+def _set_visual_material(visual, color):
+    material = visual.find('material')
+    if material is None:
+        material = ET.SubElement(visual, 'material')
+    for name, value in (
+            ('ambient', tuple(component * 0.45 for component in color[:3]) + (1.0,)),
+            ('diffuse', color),
+            ('specular', (0.05, 0.05, 0.05, 1.0))):
+        node = material.find(name)
+        if node is None:
+            node = ET.SubElement(material, name)
+        node.text = ' '.join(f'{component:.2f}' for component in value)
 
 
 def _write_tree_model(
@@ -106,9 +178,11 @@ def _write_tree_model(
     healthy_visual.set('name', 'healthy_apples_visual')
     tree_visual.find('./geometry/mesh/uri').text = tree_mesh_uri
     healthy_visual.find('./geometry/mesh/uri').text = healthy_mesh_uri
+    _set_visual_material(healthy_visual, (1.0, 0.0, 0.0, 1.0))
     diseased_visual = copy.deepcopy(healthy_visual)
     diseased_visual.set('name', 'diseased_apples_visual')
     diseased_visual.find('./geometry/mesh/uri').text = diseased_mesh_uri
+    _set_visual_material(diseased_visual, (1.0, 1.0, 0.0, 1.0))
     link.append(diseased_visual)
     ET.indent(root, space='  ')
     ET.ElementTree(root).write(
@@ -152,14 +226,13 @@ def generate_orchard_assets(world_path, apple_tree_dir, seed=42,
         if len(components) != EXPECTED_FRUIT_COUNT:
             raise ValueError(
                 f'expected {EXPECTED_FRUIT_COUNT} fruits, found {len(components)}')
-        diseased_count = int(len(components) * diseased_ratio + 0.5)
-
         world_tree = ET.parse(world_path)
         manifest = {
             'seed': seed,
             'diseased_fruit_ratio': diseased_ratio,
             'tree_scale': TREE_SCALE,
-            'fruit_count_per_tree': len(components),
+            'fruit_count_per_tree': FRUIT_COUNT_PER_TREE,
+            'camera_facing_candidate_count': CAMERA_FACING_CANDIDATE_COUNT,
             'trees': {},
         }
         for include in world_tree.getroot().findall('.//include'):
@@ -171,14 +244,17 @@ def generate_orchard_assets(world_path, apple_tree_dir, seed=42,
             model_name = f'orchard_{tree_name}'
             model_dir = models_dir / model_name
             model_dir.mkdir()
-            diseased = set(random.Random(_tree_seed(seed, tree_name)).sample(
-                range(len(components)), diseased_count))
-            healthy = set(range(len(components))) - diseased
+            pose = include.findtext('pose')
+            if pose is None:
+                raise ValueError(f'{tree_name}: apple tree pose is required')
+            candidates = _road_facing_components(components, pose)
+            selected, healthy, diseased = _select_fruits(
+                candidates, _tree_seed(seed, tree_name), diseased_ratio)
             healthy_faces = [
-                face for index in sorted(healthy) for face in components[index]
+                face for index in healthy for face in components[index]['faces']
             ]
             diseased_faces = [
-                face for index in sorted(diseased) for face in components[index]
+                face for index in diseased for face in components[index]['faces']
             ]
             healthy_obj = model_dir / 'healthy_apples.obj'
             diseased_obj = model_dir / 'diseased_apples.obj'
@@ -188,10 +264,10 @@ def generate_orchard_assets(world_path, apple_tree_dir, seed=42,
                        'DiseasedFruit', 'diseased_apples.mtl')
             _write_material(
                 model_dir / 'healthy_apples.mtl',
-                'HealthyFruit', (0.90, 0.02, 0.02))
+                'HealthyFruit', (1.00, 0.00, 0.00))
             _write_material(
                 model_dir / 'diseased_apples.mtl',
-                'DiseasedFruit', (1.00, 0.80, 0.00))
+                'DiseasedFruit', (1.00, 1.00, 0.00))
             _write_tree_model(
                 model_dir,
                 apple_tree_dir / 'model.sdf',
@@ -203,7 +279,10 @@ def generate_orchard_assets(world_path, apple_tree_dir, seed=42,
             manifest['trees'][tree_name] = {
                 'healthy_count': len(healthy),
                 'diseased_count': len(diseased),
-                'diseased_components': sorted(diseased),
+                'candidate_components': candidates,
+                'selected_components': selected,
+                'healthy_components': healthy,
+                'diseased_components': diseased,
             }
 
         if not manifest['trees']:

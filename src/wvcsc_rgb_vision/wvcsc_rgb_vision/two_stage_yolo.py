@@ -15,7 +15,13 @@ from std_msgs.msg import String
 from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 from wvcsc_interfaces.msg import MissionStatus, Target2D
 
-from .model_utils import FRUIT_CLASS_NAMES, TREE_CLASS_NAMES, canonical_class_name, resolve_yolo_model_path
+from .model_utils import (
+    FRUIT_CLASS_NAMES,
+    TREE_CLASS_NAMES,
+    canonical_class_name,
+    resolve_yolo_model_path,
+    validate_yolo_model,
+)
 
 
 @dataclass(frozen=True)
@@ -110,14 +116,15 @@ class TwoStageYolo(Node):
 
     def _declare_parameters(self):
         values = {
-            'image_topic': '/camera/camera/color/image_rect_raw',
+            'image_topic': '/camera/camera/color/image_raw',
             'selected_target_topic': '/vision/selected_target_id',
             'tree_detections_topic': '/vision/tree_detections',
             'fruit_detections_topic': '/vision/fruit_detections',
             'target_topic': '/vision/target',
             'debug_image_topic': '/vision/debug_image',
-            'tree_model_path': 'wvcsc_tree_yolov8s.pt',
-            'fruit_model_path': 'wvcsc_fruit_yolov8s_seg.pt',
+            'tree_model_path': 'wvcsc_tree_yolov8n.pt',
+            'fruit_model_path': 'wvcsc_fruit_yolov8n_seg.pt',
+            'assume_tree_in_view': False,
             'tree_confidence': 0.50,
             'fruit_confidence': 0.50,
             'roi_padding': 0.10,
@@ -132,14 +139,24 @@ class TwoStageYolo(Node):
             from ultralytics import YOLO
         except ImportError as error:
             raise RuntimeError('Ultralytics is required for perception_mode:=yolo') from error
-        paths = (
-            resolve_yolo_model_path(self.get_parameter('tree_model_path').value),
-            resolve_yolo_model_path(self.get_parameter('fruit_model_path').value),
-        )
+        assume_tree = bool(self.get_parameter('assume_tree_in_view').value)
+        if assume_tree:
+            self.get_logger().warn(
+                'assume_tree_in_view=true: using the complete image as a simulated tree ROI')
+        tree_path = resolve_yolo_model_path(
+            self.get_parameter('tree_model_path').value)
+        fruit_path = resolve_yolo_model_path(
+            self.get_parameter('fruit_model_path').value)
+        paths = [fruit_path] if assume_tree else [tree_path, fruit_path]
         missing = [path for path in paths if not Path(path).is_file()]
         if missing:
             raise FileNotFoundError(f'YOLO weight files are missing: {missing}')
-        return YOLO(paths[0]), YOLO(paths[1])
+        tree_model = None if assume_tree else YOLO(tree_path)
+        fruit_model = YOLO(fruit_path)
+        if tree_model is not None:
+            validate_yolo_model(tree_model, 'detect', TREE_CLASS_NAMES)
+        validate_yolo_model(fruit_model, 'segment', FRUIT_CLASS_NAMES)
+        return tree_model, fruit_model
 
     def _on_status(self, message):
         active = message.state == MissionStatus.ARM_SPRAYING
@@ -170,6 +187,12 @@ class TwoStageYolo(Node):
             self._publish_debug(message, image, tree, fruits)
 
     def _best_tree(self, image):
+        if self._tree_model is None:
+            height, width = image.shape[:2]
+            # ponytail: simulation assumes the observation pose already frames one tree.
+            return Instance(
+                '', 'tree', 1.0, 0.0, 0.0, float(width), float(height),
+                width / 2.0, height / 2.0)
         result = self._tree_model(
             image, verbose=False, conf=float(self.get_parameter('tree_confidence').value))[0]
         instances = self._box_instances(result, TREE_CLASS_NAMES)

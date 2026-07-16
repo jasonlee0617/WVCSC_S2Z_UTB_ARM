@@ -1,13 +1,14 @@
 wvcsc_two_stage_yolo:
   ros__parameters:
-    image_topic: /camera/camera/color/image_rect_raw
+    image_topic: /camera/camera/color/image_raw
     selected_target_topic: /vision/selected_target_id
     tree_detections_topic: /vision/tree_detections
     fruit_detections_topic: /vision/fruit_detections
     target_topic: /vision/target
     debug_image_topic: /vision/debug_image
-    tree_model_path: wvcsc_tree_yolov8s.pt
-    fruit_model_path: wvcsc_fruit_yolov8s_seg.pt
+    tree_model_path: wvcsc_tree_yolov8n.pt
+    fruit_model_path: wvcsc_fruit_yolov8n_seg.pt
+    assume_tree_in_view: true
     tree_confidence: 0.50
     fruit_confidence: 0.50
     roi_padding: 0.10

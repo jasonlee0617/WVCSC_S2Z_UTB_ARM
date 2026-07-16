@@ -286,7 +286,26 @@ ros2 launch my_navigation2 nav2_qt.launch.py use_sim_time:=false
 
 ## 6. 两级 YOLO 数据与后续实施
 
-原始 C10 种子集位于 `datasets/wvcsc_orchard_seed_v1/`（已由 `.gitignore` 排除）。它只保存 30 张 `1280×720` 无标注图像、`data.yaml` 和可追溯的 `manifest.yaml`；采集来源固定为 `/camera/camera/color/image_rect_raw`。不在工作区自动生成颜色分割、标签或预览图。
+原始 C10 种子集位于 `/home/robot/ultralytics-main/datasets/wvcsc_fruit_seg/`。当前已完成 30 张 `1280×720` 图像及实例分割标注：`train` 24 张、`val` 6 张；采集来源为 `/camera/camera/color/image_raw`。
+
+本轮使用 seed `50–54`，每个 seed 采集左侧 3 棵、右侧 3 棵；果树资产固定每棵最多 5 个果实，病果按 seed 固定随机生成 1–2 个，健康果为鲜红色、病果为黄色。采集前临时隐藏 tool0 白球，采集后已恢复原始 URDF，文件 SHA256 为 `71b93d066b6d7c6354d5412da4e37352518f270a4ff77161feb192e2b813e5a5`。
+
+数据采集验收命令：
+
+```bash
+PYTHONPATH=$PWD/wvcsc_simulation python3 -c \
+  "from wvcsc_simulation.yolo_seed_dataset import validate_fruit_seg_dataset; \
+   print(validate_fruit_seg_dataset('/home/robot/ultralytics-main/datasets/wvcsc_fruit_seg'))"
+```
+
+注意：Gazebo 11 相机需要在 source ROS 2 后再次加载 Gazebo 环境，避免 `GAZEBO_RESOURCE_PATH` 被 ROS 环境覆盖：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/robot/WVCSC_S2Z_UTB_ARM/install/setup.bash
+source /usr/share/gazebo/setup.sh
+export GAZEBO_RESOURCE_PATH=/usr/share/gazebo-11:/opt/ros/humble/share
+```
 
 采集工具在机械臂成功进入 `SCANNING_TREE` 的稳定观察姿态后保存一帧。类别规范为 `tree`、`healthy_fruit`、`diseased_fruit`，后续人工标注和训练工程放在 `/home/robot/ultralytics-main/datasets`：第一级完整图训练 `tree` Detect，第二级树冠 ROI 训练健康/病害果实实例分割。观察距离默认为 `1.40m`，位于已确认的 `0.8–1.5m` 喷距范围内，并为左右两侧 MoveIt 规划保留更多可达空间。
 
@@ -303,13 +322,16 @@ MOVING_TO_OBSERVE
 → DETECTING_FRUITS / RETURNING_HOME
 ```
 
-Action 已实际执行上述状态。两级模型权重未就绪时使用 `perception_mode:=mock` 验证完全相同的 Action 与话题链路；权重就绪后，向 `wvcsc_rgb_vision/models/` 放入（Git 已忽略）`wvcsc_tree_yolov8s.pt` 和 `wvcsc_fruit_yolov8s_seg.pt`，再切换为：
+Action 已实际执行上述状态。当前候选权重已安装到 `wvcsc_rgb_vision/models/wvcsc_fruit_yolov8n_seg.pt`，SHA256 为 `a882588ceb56d22d4f1237db0f505acfcae6123dc4cc5988d48cdfdd09b59913`。该模型的 Mask mAP50 为 `0.196`、病果 Mask mAP50 为 `0.135`，`conf=0.50` 时 6 张 val 图像均无检测，因此只用于 ROS 接口接线验证，不作为可用闭环模型。
+
+仿真配置临时使用 `assume_tree_in_view:=true`：观察位姿已将单棵树置于画面中，视觉节点以完整画面作为 tree ROI，同时继续发布树确认消息。这只是临时仿真边界，合格 tree 模型就绪后必须设回 `false`。常规回归仍使用 `perception_mode:=mock`；只做 YOLO 接线验证时执行：
 
 ```bash
-ros2 launch wvcsc_simulation system_sim.launch.py perception_mode:=yolo
+ros2 launch wvcsc_simulation system_sim.launch.py \
+  perception_mode:=yolo auto_start_mission:=false
 ```
 
-也可通过 `vision_sim.yaml` 将两个权重参数改为绝对路径。真实图像验收需覆盖：树 ROI、实例掩膜安全点、目标 ID 连续性、稳定帧对准、目标丢失、超时、Servo 安全锁定与逐病果复检。
+重训后只有在病果 Mask precision、recall 均 `≥0.80`、Mask mAP50 `≥0.70`，且 `conf=0.50` 时至少检出 val 中 `4/5` 个病果，才允许进入自动任务验收。真实图像验收还需覆盖实例掩膜安全点、目标 ID 连续性、稳定帧对准、目标丢失、超时、Servo 安全锁定与逐病果复检。
 
 ## 7. 保留的接口边界
 
@@ -320,9 +342,9 @@ ros2 launch wvcsc_simulation system_sim.launch.py perception_mode:=yolo
 | `/navigate_to_pose` | 到达道路作业位姿 |
 | `/arm/execute_spray` | 完成一棵树的观察、处理和 HOME |
 | `/mission/status` | 发布任务、目标计数和活动 Goal 状态 |
-| `/camera/camera/color/image_rect_raw` | 仿真/实机统一 RGB 图像 |
-| `/vision/tree_detections` | 第一级 YOLOv8s Detect 的 tree 候选 |
-| `/vision/fruit_detections` | 第二级 YOLOv8s-seg 的健康/病果实例候选 |
+| `/camera/camera/color/image_raw` | 仿真/实机统一 RGB 图像 |
+| `/vision/tree_detections` | tree 候选；临时仿真模式为完整画面 ROI |
+| `/vision/fruit_detections` | YOLOv8n-seg 健康/病果实例候选 |
 | `/vision/selected_target_id` | Arm Task 选择的病果实例 ID |
 | `/vision/target` | 已选病果的掩膜安全点，供 IBVS 使用 |
 | `/vision/align_target` | 对指定 target_id 执行单个目标的 XY 对准 |
