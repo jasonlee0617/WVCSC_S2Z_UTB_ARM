@@ -115,7 +115,8 @@ class SpraySimulator(Node):
 
     def force_off(self):
         self._interlock.set_emergency_stop(True)
-        self._set_active(False)
+        if self.context.ok():
+            self._set_active(False)
 
 
 def main():

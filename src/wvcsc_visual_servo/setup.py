@@ -16,6 +16,7 @@ setup(
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
+    tests_require=['pytest'],
     zip_safe=True,
     maintainer='robot',
     maintainer_email='robot@example.com',

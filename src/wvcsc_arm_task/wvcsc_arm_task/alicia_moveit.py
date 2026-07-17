@@ -278,6 +278,61 @@ class AliciaMoveIt:
         )
         return self._execute(trajectory, epoch, allow_locked)
 
+    def plan_pose(
+            self, position, quat_xyzw, frame_id=None, allow_locked=False,
+            tolerance_position=0.001, tolerance_orientation=0.001):
+        """Plan a pose without executing it so task code can inspect the endpoint."""
+        if self.state.locked and not allow_locked:
+            return None
+        return self._plan(
+            position=position,
+            quat_xyzw=quat_xyzw,
+            frame_id=frame_id,
+            target_link=self._moveit.end_effector_name,
+            tolerance_position=float(tolerance_position),
+            tolerance_orientation=float(tolerance_orientation),
+        )
+
+    def execute_trajectory(self, trajectory, allow_locked=False):
+        """Execute a trajectory returned by :meth:`plan_pose`."""
+        epoch = self._epoch()
+        return self._execute(trajectory, epoch, allow_locked)
+
+    def compute_ik(self, position, quat_xyzw, start_joint_positions, timeout=0.2):
+        """Return a collision-aware IK state without emitting failures for rejects."""
+        if self.state.locked:
+            return None
+        future = self._moveit.compute_ik_async(
+            position=position,
+            quat_xyzw=quat_xyzw,
+            ik_link_name=self._moveit.end_effector_name,
+            start_joint_state=list(start_joint_positions),
+            wait_for_server_timeout_sec=float(timeout),
+        )
+        if future is None or not self._wait_future(future, timeout):
+            return None
+        try:
+            response = future.result()
+        except Exception:
+            return None
+        if response is None or response.error_code.val != MoveItErrorCodes.SUCCESS:
+            return None
+        return response.solution.joint_state
+
+    @staticmethod
+    def trajectory_final_positions(trajectory, joint_names):
+        """Extract the final arm joint vector from either MoveIt trajectory shape."""
+        joint_trajectory = getattr(trajectory, 'joint_trajectory', trajectory)
+        points = getattr(joint_trajectory, 'points', ())
+        names = getattr(joint_trajectory, 'joint_names', ())
+        if not points or not names:
+            return None
+        values = dict(zip(names, points[-1].positions))
+        try:
+            return tuple(float(values[name]) for name in joint_names)
+        except KeyError:
+            return None
+
     def move_cartesian(
             self, position, quat_xyzw, frame_id=None, max_step=0.0025,
             fraction_threshold=1.0, allow_locked=False):

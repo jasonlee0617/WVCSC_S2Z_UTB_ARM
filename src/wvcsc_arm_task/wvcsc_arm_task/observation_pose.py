@@ -26,14 +26,17 @@ def transform_point(point, translation, quat_xyzw):
 
 
 def camera_look_at_pose(
-        tree_root, aim_height, camera_height, observation_distance):
+        tree_root, aim_height, camera_height, observation_distance,
+        azimuth_offset_degrees=0.0):
     """Return a high camera pose whose optical +Z aims at the crown."""
     tx, ty, tz = (float(value) for value in tree_root)
     aim_height = float(aim_height)
     camera_height = float(camera_height)
     observation_distance = float(observation_distance)
+    azimuth_offset_degrees = float(azimuth_offset_degrees)
     if not all(math.isfinite(value) for value in (
-            tx, ty, tz, aim_height, camera_height, observation_distance)):
+            tx, ty, tz, aim_height, camera_height, observation_distance,
+            azimuth_offset_degrees)):
         raise ValueError('observation values must be finite')
     if aim_height <= 0.0 or camera_height <= 0.0 or observation_distance <= 0.0:
         raise ValueError('observation heights and distance must be positive')
@@ -41,8 +44,9 @@ def camera_look_at_pose(
     if horizontal_distance <= observation_distance + 0.05:
         raise ValueError('tree hint is too close for the requested observation distance')
 
-    forward_x = tx / horizontal_distance
-    forward_y = ty / horizontal_distance
+    bearing = math.atan2(ty, tx) + math.radians(azimuth_offset_degrees)
+    forward_x = math.cos(bearing)
+    forward_y = math.sin(bearing)
     camera = (
         tx - observation_distance * forward_x,
         ty - observation_distance * forward_y,
@@ -120,6 +124,14 @@ def quaternion_multiply(left, right):
         lw * rz + lx * ry - ly * rx + lz * rw,
         lw * rw - lx * rx - ly * ry - lz * rz,
     ))
+
+
+def yaw_rotate_quaternion(quat_xyzw, yaw_degrees):
+    """Rotate an optical-camera orientation around the arm-base vertical axis."""
+    yaw = math.radians(float(yaw_degrees)) / 2.0
+    return quaternion_multiply(
+        (0.0, 0.0, math.sin(yaw), math.cos(yaw)),
+        quat_xyzw)
 
 
 def rotate_vector(vector, quat_xyzw):

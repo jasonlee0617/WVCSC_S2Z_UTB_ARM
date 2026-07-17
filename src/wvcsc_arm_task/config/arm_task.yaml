@@ -1,16 +1,34 @@
 wvcsc_spray_task:
   ros__parameters:
     home_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    # tree_hint denotes the root; plan camera optical +Z toward its crown.
-    # Keep the camera high enough for MoveIt while pitching down at the crown.
-    tree_aim_height: 1.20
-    camera_observation_height: 1.90
-    observation_distance: 1.40
+    # Physical fruit envelope, searched online with CameraInfo, collision IK,
+    # Jacobian condition number and joint-limit margin. These are not poses.
+    fruit_zone_height_min_m: 0.70
+    fruit_zone_height_max_m: 1.70
+    fruit_zone_radius_m: 0.50
+    observation_distance_min_m: 0.90
+    observation_distance_max_m: 1.50
+    observation_distance_step_m: 0.10
+    camera_height_min_m: 1.45
+    camera_height_max_m: 1.75
+    camera_height_step_m: 0.10
+    observation_azimuth_offsets_deg: [0.0, -12.0, 12.0]
+    observation_image_margin_ratio: 0.07
+    # Below MoveIt Servo's 17.0 singularity slowdown threshold; admits a
+    # separate recovery viewpoint instead of leaving only one safe candidate.
+    observation_max_condition_number: 14.0
+    observation_min_joint_margin_rad: 0.15
+    observation_input_timeout_sec: 2.0
+    observation_search_timeout_sec: 8.0
+    observation_max_plans: 8
+    observation_debug_topic: /arm/observation_debug
     camera_frame: camera_color_optical_frame
-    min_spray_duration: 0.2
+    min_spray_duration: 2.0
     max_spray_duration: 10.0
     vision_action_name: /vision/align_target
-    vision_timeout_sec: 8.0
+    # At the measured 10 Hz Servo cadence, edge targets need more than 15 s
+    # to traverse the camera field at the retained 0.04 m/s safety limit.
+    vision_timeout_sec: 25.0
     spray_action_name: /spray/execute
     downstream_server_timeout_sec: 2.0
     downstream_result_margin_sec: 2.0
@@ -18,12 +36,16 @@ wvcsc_spray_task:
     fruit_detection_topic: /vision/fruit_detections
     selected_target_topic: /vision/selected_target_id
     motion_locked_topic: /motion_control/locked
-    tree_confidence: 0.50
-    fruit_confidence: 0.50
+    tree_confidence: 0.10
+    fruit_confidence: 0.10
     confirmation_frames: 3
-    scan_timeout_sec: 3.0
-    detection_timeout_sec: 2.0
+    # Three consecutive real-YOLO detections need more than one inference period.
+    scan_pose_detection_timeout_sec: 5.0
+    detection_timeout_sec: 5.0
+    max_alignment_attempts: 2
     processed_iou_threshold: 0.30
     processed_center_distance_px: 40.0
     image_width: 1280
     image_height: 720
+    camera_info_topic: /camera/camera/color/camera_info
+    joint_state_topic: /joint_states

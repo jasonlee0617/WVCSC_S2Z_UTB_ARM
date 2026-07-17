@@ -47,6 +47,8 @@ class MissionManager(Node):
             self.get_parameter('manual_tree_base_z').value)
         self._nav_timeout = float(self.get_parameter('nav_goal_timeout_sec').value)
         self._spray_timeout = float(self.get_parameter('spray_goal_timeout_sec').value)
+        self._spray_progress_timeout = float(
+            self.get_parameter('spray_progress_timeout_sec').value)
         self._return_home_after_finish = bool(
             self.get_parameter('return_home_after_finish').value)
         self._home_pose = (
@@ -89,6 +91,7 @@ class MissionManager(Node):
         self._nav_pending = False
         self._spray_pending = False
         self._phase_started = None
+        self._spray_last_progress = None
         self._manual_return_home = False
 
         self.create_service(Trigger, '/mission/start', self._start)
@@ -115,11 +118,12 @@ class MissionManager(Node):
             'spray_action_name': '/arm/execute_spray',
             'road_center_y': 0.0,
             'road_yaw': 0.0,
-            'docking_lateral_offset': 0.5,
+            'docking_lateral_offset': 0.2,
             'manual_tree_standoff': 1.5,
             'manual_tree_base_z': 0.0,
             'nav_goal_timeout_sec': 120.0,
-            'spray_goal_timeout_sec': 60.0,
+            'spray_goal_timeout_sec': 180.0,
+            'spray_progress_timeout_sec': 30.0,
             'return_home_after_finish': False,
             'home_x': 0.0,
             'home_y': 0.0,
@@ -472,6 +476,7 @@ class MissionManager(Node):
         goal.tree_hint.point.z = tree_z
         self._spray_pending = True
         self._phase_started = self._now()
+        self._spray_last_progress = self._phase_started
         future = self._spray_client.send_goal_async(
             goal, feedback_callback=self._spray_feedback)
         future.add_done_callback(self._spray_goal_response)
@@ -504,11 +509,14 @@ class MissionManager(Node):
 
     def _spray_feedback(self, feedback_message):
         feedback = feedback_message.feedback
+        if self.core.state == MissionState.ARM_SPRAYING:
+            self._spray_last_progress = self._now()
         self.get_logger().info(
             f'[ARM] {feedback.phase_text} progress={feedback.progress:.2f}')
 
     def _spray_result(self, future):
         self._spray_handle = None
+        self._spray_last_progress = None
         try:
             wrapped = future.result()
         except Exception as error:
@@ -525,7 +533,10 @@ class MissionManager(Node):
             self._manual_return_home = False
             self.core.skip_current(self._return_home_after_finish)
             self.get_logger().info(
-                f'[MISSION] skipped tree={skipped}: {result.message}')
+                f'[MISSION] skipped tree={skipped} '
+                f'processed={self.core.completed_targets + self.core.skipped_targets}/'
+                f'{len(self.core.targets)} completed={self.core.completed_targets} '
+                f'skipped={self.core.skipped_targets}: {result.message}')
             if self.core.state in {
                     MissionState.NAVIGATING,
                     MissionState.RETURNING_HOME}:
@@ -541,13 +552,19 @@ class MissionManager(Node):
         finished = self.core.current_target.tree_id
         self._manual_return_home = False
         self.core.arm_succeeded(self._return_home_after_finish)
-        outcome = (
-            'inspected without disease'
-            if result.error_code == ExecuteSpray.Result.INSPECTED_NO_DISEASE
-            else 'sprayed')
+        if result.error_code == ExecuteSpray.Result.INSPECTED_NO_DISEASE:
+            outcome = 'inspected without disease'
+        elif result.error_code == ExecuteSpray.Result.PARTIAL_SUCCESS:
+            outcome = 'partially sprayed'
+            self.get_logger().warn(
+                f'[MISSION] partial tree={finished}: {result.message}')
+        else:
+            outcome = 'sprayed'
         self.get_logger().info(
             f'[MISSION] {outcome} tree={finished} '
-            f'count={self.core.completed_targets}/{len(self.core.targets)}')
+            f'processed={self.core.completed_targets + self.core.skipped_targets}/'
+            f'{len(self.core.targets)} completed={self.core.completed_targets} '
+            f'skipped={self.core.skipped_targets}: {result.message}')
         if self.core.state == MissionState.NAVIGATING:
             self._send_nav_goal()
         elif self.core.state == MissionState.RETURNING_HOME:
@@ -576,6 +593,9 @@ class MissionManager(Node):
         elif self.core.state == MissionState.ARM_SPRAYING and self._phase_started is not None:
             if now - self._phase_started >= self._spray_timeout:
                 self._fail('spray Action timed out')
+            elif (self._spray_last_progress is not None and
+                  now - self._spray_last_progress >= self._spray_progress_timeout):
+                self._fail('spray Action made no progress')
 
     def _fail(self, message):
         if not self.core.fail(message):

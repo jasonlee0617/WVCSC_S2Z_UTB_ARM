@@ -18,6 +18,7 @@ uint16 INTERNAL_ERROR=7
 uint16 VISION_FAILED=8
 uint16 SPRAY_FAILED=9
 uint16 INSPECTED_NO_DISEASE=10
+uint16 PARTIAL_SUCCESS=11
 bool success
 uint16 error_code
 string message

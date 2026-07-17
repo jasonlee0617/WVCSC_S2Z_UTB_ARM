@@ -48,7 +48,6 @@ dist/
 *.swn
 
 # AI / model files
-*.pth
 *.onnx
 *.engine
 *.weights

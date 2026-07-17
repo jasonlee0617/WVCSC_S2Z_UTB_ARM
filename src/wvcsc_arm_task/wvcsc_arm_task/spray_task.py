@@ -1,6 +1,7 @@
 """One-tree MoveIt observation, RGB alignment and spray coordinator."""
 
 from dataclasses import dataclass
+import json
 import math
 import threading
 import time
@@ -10,7 +11,9 @@ from action_msgs.msg import GoalStatus
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data)
+from sensor_msgs.msg import CameraInfo, JointState
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection2DArray
@@ -18,11 +21,8 @@ from wvcsc_interfaces.action import AlignTarget, ExecuteSpray, Spray
 
 from .motion_state import MotionControlState
 from .node_parameters import create_alicia_moveit
-from .observation_pose import (
-    camera_look_at_pose,
-    tool_pose_from_camera_pose,
-    transform_point,
-)
+from .observation_optimizer import ObservationOptimizer
+from .observation_pose import transform_point
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,12 @@ class FruitTarget:
                           self.center_v - other.center_v)
 
 
+@dataclass
+class TargetAttempt:
+    target: FruitTarget
+    count: int = 0
+
+
 def detection_candidates(message, class_name, min_confidence):
     """Translate standard Detection2D messages into sorted task candidates."""
     candidates = []
@@ -74,8 +80,13 @@ def detection_candidates(message, class_name, min_confidence):
     return sorted(candidates, key=lambda item: item.confidence, reverse=True)
 
 
+def spray_summary(detected, sprayed, unresolved, alignment_failures):
+    return (
+        f'detected={detected} sprayed={sprayed} unresolved={unresolved} '
+        f'alignment_failures={alignment_failures}')
+
+
 class SprayTask(Node):
-    _OBSERVATION_DISTANCES = (1.40, 1.30, 1.20, 1.10, 1.00, 0.90, 1.50)
     _OBSERVATION_POSITION_TOLERANCE = 0.02
     _OBSERVATION_ORIENTATION_TOLERANCE = 0.05
 
@@ -90,18 +101,20 @@ class SprayTask(Node):
             self.get_parameter('downstream_server_timeout_sec').value)
         self._downstream_margin = float(
             self.get_parameter('downstream_result_margin_sec').value)
-        self._tree_aim_height = float(self.get_parameter('tree_aim_height').value)
-        self._camera_observation_height = float(
-            self.get_parameter('camera_observation_height').value)
-        self._observation_distance = float(
-            self.get_parameter('observation_distance').value)
         self._camera_frame = str(self.get_parameter('camera_frame').value)
-        if not 0.8 <= self._observation_distance <= 1.5:
-            raise ValueError('observation_distance must be within 0.8 to 1.5 m')
+        self._base_frame = str(self.get_parameter('base_frame').value)
+        self._observation_config = self._observation_parameters()
+        self._observation_optimizer = ObservationOptimizer(
+            self.get_parameter('robot_description').value,
+            self._base_frame,
+            'tool0',
+            self.arm_joint_names,
+            self._observation_config)
+        if int(self.get_parameter('max_alignment_attempts').value) <= 0:
+            raise ValueError('max_alignment_attempts must be positive')
 
         self.state = MotionControlState()
         self.arm, self._callback_group = create_alicia_moveit(self, self.state)
-        self._base_frame = str(self.get_parameter('base_frame').value)
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._vision_client = ActionClient(
@@ -114,12 +127,16 @@ class SprayTask(Node):
             String, str(self.get_parameter('selected_target_topic').value), 10)
         self._motion_command_pub = self.create_publisher(
             String, '/motion_control/command', 10)
+        self._observation_debug_pub = self.create_publisher(
+            String, str(self.get_parameter('observation_debug_topic').value), 10)
 
         latched = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        self._inference_mode_pub = self.create_publisher(
+            String, str(self.get_parameter('inference_mode_topic').value), latched)
         self.create_subscription(
             Bool, str(self.get_parameter('motion_locked_topic').value),
             self._on_motion_locked, latched, callback_group=self._callback_group)
@@ -129,6 +146,14 @@ class SprayTask(Node):
         self.create_subscription(
             Detection2DArray, str(self.get_parameter('fruit_detection_topic').value),
             self._on_fruit_detections, 10, callback_group=self._callback_group)
+        self.create_subscription(
+            CameraInfo, str(self.get_parameter('camera_info_topic').value),
+            self._on_camera_info, qos_profile_sensor_data,
+            callback_group=self._callback_group)
+        self.create_subscription(
+            JointState, str(self.get_parameter('joint_state_topic').value),
+            self._on_joint_state, qos_profile_sensor_data,
+            callback_group=self._callback_group)
 
         self._action_server = ActionServer(
             self, ExecuteSpray, '/arm/execute_spray',
@@ -140,11 +165,26 @@ class SprayTask(Node):
         self._busy_mutex = threading.Lock()
         self._busy = False
         self._vision_mutex = threading.Lock()
+        self._state_mutex = threading.Lock()
         self._tree_frames = 0
         self._fruit_frames = 0
         self._fruit_counts = {}
         self._fruit_latest = {}
         self._observation_pose = None
+        self._observation_candidates = []
+        self._observation_candidate_index = -1
+        self._observation_distance = None
+        self._tree_in_base = None
+        self._camera_mount = None
+        self._camera_model = None
+        self._joint_positions = None
+        self._joint_state_sequence = 0
+        self._active_mission = ''
+        self._active_tree = ''
+
+    @property
+    def arm_joint_names(self):
+        return ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6')
 
     def _declare_parameters(self):
         parameters = {
@@ -152,28 +192,51 @@ class SprayTask(Node):
             'min_spray_duration': 0.2,
             'max_spray_duration': 10.0,
             'vision_action_name': '/vision/align_target',
-            'vision_timeout_sec': 8.0,
+            'vision_timeout_sec': 25.0,
             'spray_action_name': '/spray/execute',
             'downstream_server_timeout_sec': 2.0,
             'downstream_result_margin_sec': 2.0,
             'tree_detection_topic': '/vision/tree_detections',
             'fruit_detection_topic': '/vision/fruit_detections',
             'selected_target_topic': '/vision/selected_target_id',
+            'inference_mode_topic': '/vision/inference_mode',
             'motion_locked_topic': '/motion_control/locked',
-            'tree_confidence': 0.50,
-            'fruit_confidence': 0.50,
+            'tree_confidence': 0.10,
+            'fruit_confidence': 0.10,
             'confirmation_frames': 3,
-            'scan_timeout_sec': 3.0,
+            # Real tree YOLO needs several frames to satisfy confirmation_frames.
+            # One second can expire before its first complete inference.
+            'scan_pose_detection_timeout_sec': 5.0,
             'detection_timeout_sec': 2.0,
+            'max_alignment_attempts': 2,
             'processed_iou_threshold': 0.30,
             'processed_center_distance_px': 40.0,
             'image_width': 1280,
             'image_height': 720,
             'base_frame': 'alicia_base_link',
-            'tree_aim_height': 1.20,
-            'camera_observation_height': 1.90,
-            'observation_distance': 1.40,
             'camera_frame': 'camera_color_optical_frame',
+            'camera_info_topic': '/camera/camera/color/camera_info',
+            'joint_state_topic': '/joint_states',
+            'robot_description': '',
+            'observation_debug_topic': '/arm/observation_debug',
+            'observation_input_timeout_sec': 2.0,
+            'observation_search_timeout_sec': 8.0,
+            'observation_max_plans': 8,
+            'fruit_zone_height_min_m': 0.70,
+            'fruit_zone_height_max_m': 1.70,
+            'fruit_zone_radius_m': 0.50,
+            'observation_distance_min_m': 0.90,
+            'observation_distance_max_m': 1.50,
+            'observation_distance_step_m': 0.10,
+            'camera_height_min_m': 1.45,
+            'camera_height_max_m': 1.75,
+            'camera_height_step_m': 0.10,
+            'observation_azimuth_offsets_deg': [0.0, -12.0, 12.0],
+            'observation_image_margin_ratio': 0.07,
+            # Keep a margin below MoveIt Servo's 17.0 singularity slowdown
+            # threshold while retaining a second physically distinct recovery view.
+            'observation_max_condition_number': 14.0,
+            'observation_min_joint_margin_rad': 0.15,
         }
         for name, default in parameters.items():
             self.declare_parameter(name, default)
@@ -182,6 +245,52 @@ class SprayTask(Node):
         values = [float(value) for value in self.get_parameter(name).value]
         if len(values) != 6 or not all(math.isfinite(value) for value in values):
             raise ValueError(f'{name} must contain six finite joint positions')
+        return values
+
+    def _observation_parameters(self):
+        values = {
+            'fruit_zone_height_min_m': float(
+                self.get_parameter('fruit_zone_height_min_m').value),
+            'fruit_zone_height_max_m': float(
+                self.get_parameter('fruit_zone_height_max_m').value),
+            'fruit_zone_radius_m': float(
+                self.get_parameter('fruit_zone_radius_m').value),
+            'distance_min_m': float(
+                self.get_parameter('observation_distance_min_m').value),
+            'distance_max_m': float(
+                self.get_parameter('observation_distance_max_m').value),
+            'distance_step_m': float(
+                self.get_parameter('observation_distance_step_m').value),
+            'camera_height_min_m': float(
+                self.get_parameter('camera_height_min_m').value),
+            'camera_height_max_m': float(
+                self.get_parameter('camera_height_max_m').value),
+            'camera_height_step_m': float(
+                self.get_parameter('camera_height_step_m').value),
+            'azimuth_offsets_deg': tuple(float(value) for value in
+                self.get_parameter('observation_azimuth_offsets_deg').value),
+            'image_margin_ratio': float(
+                self.get_parameter('observation_image_margin_ratio').value),
+            'max_condition_number': float(
+                self.get_parameter('observation_max_condition_number').value),
+            'min_joint_margin_rad': float(
+                self.get_parameter('observation_min_joint_margin_rad').value),
+        }
+        positive = (
+            'fruit_zone_height_min_m', 'fruit_zone_height_max_m',
+            'fruit_zone_radius_m', 'distance_min_m', 'distance_max_m',
+            'distance_step_m', 'camera_height_min_m', 'camera_height_max_m',
+            'camera_height_step_m', 'max_condition_number',
+            'min_joint_margin_rad')
+        if (not all(math.isfinite(values[name]) and values[name] > 0.0
+                    for name in positive) or
+                values['fruit_zone_height_min_m'] >=
+                values['fruit_zone_height_max_m'] or
+                values['distance_min_m'] > values['distance_max_m'] or
+                values['camera_height_min_m'] > values['camera_height_max_m'] or
+                not values['azimuth_offsets_deg'] or
+                not 0.0 <= values['image_margin_ratio'] < 0.5):
+            raise ValueError('observation search parameters are invalid')
         return values
 
     def _on_motion_locked(self, message):
@@ -213,6 +322,29 @@ class SprayTask(Node):
             }
             self._fruit_latest = current
 
+    def _on_camera_info(self, message):
+        if message.width <= 0 or message.height <= 0:
+            return
+        fx, fy, cx, cy = (
+            float(message.k[0]), float(message.k[4]),
+            float(message.k[2]), float(message.k[5]))
+        if min(fx, fy) <= 0.0:
+            return
+        with self._state_mutex:
+            self._camera_model = (fx, fy, cx, cy, int(message.width), int(message.height))
+
+    def _on_joint_state(self, message):
+        values = dict(zip(message.name, message.position))
+        try:
+            joints = tuple(float(values[name]) for name in self.arm_joint_names)
+        except KeyError:
+            return
+        if not all(math.isfinite(value) for value in joints):
+            return
+        with self._state_mutex:
+            self._joint_positions = joints
+            self._joint_state_sequence += 1
+
     def _goal_callback(self, request):
         error = self._validate_goal(request)
         if error or not self._claim():
@@ -238,6 +370,7 @@ class SprayTask(Node):
             result.success = code in {
                 ExecuteSpray.Result.OK,
                 ExecuteSpray.Result.INSPECTED_NO_DISEASE,
+                ExecuteSpray.Result.PARTIAL_SUCCESS,
             }
             result.error_code = code
             result.message = message
@@ -256,53 +389,164 @@ class SprayTask(Node):
             return result
         finally:
             self._select_target('')
+            self._set_inference_mode('idle')
+            self._active_mission = ''
+            self._active_tree = ''
             self._release()
 
     def _run_sequence(self, request, cancel_requested, feedback):
+        tree = str(request.tree_id).strip()
+        self._active_mission = str(request.mission_id).strip()
+        self._active_tree = tree
+        self.get_logger().info(
+            f'[ARM][{tree}] GOAL_ACCEPTED mission={request.mission_id.strip()} '
+            f'side={request.spray_side} spray_duration={request.spray_duration:.1f}s')
         self._reset_vision()
+        self._set_inference_mode('idle')
+        self.get_logger().info(f'[ARM][{tree}] OBSERVE computing look-at pose from tree_hint...')
         feedback(ExecuteSpray.Feedback.MOVING_TO_OBSERVE, 0.05, 'MOVING_TO_OBSERVE')
         if not self._move_to_observation(request.tree_hint):
             return self._observe_failure(cancel_requested)
+        self.get_logger().info(
+            f'[ARM][{tree}] OBSERVE selected distance={self._observation_distance}m '
+            f'index={self._observation_candidate_index} '
+            f'tree_in_base=({self._tree_in_base[0]:.2f},{self._tree_in_base[1]:.2f},'
+            f'{self._tree_in_base[2]:.2f})')
 
         feedback(ExecuteSpray.Feedback.SCANNING_TREE, 0.15, 'SCANNING_TREE')
-        if not self._wait_for_tree(cancel_requested):
+        self.get_logger().info(
+            f'[ARM][{tree}] SCAN inference_mode=tree '
+            f'conf={float(self.get_parameter("tree_confidence").value):.2f}')
+        if not self._scan_for_tree(cancel_requested):
             return self._vision_failure('tree was not confirmed in the camera view',
                                         cancel_requested)
+        self.get_logger().info(f'[ARM][{tree}] SCAN tree confirmed')
 
         processed = []
-        attempted = []
+        exhausted = []
+        attempts = []
+        pending_attempt = None
         sprayed = 0
         saw_disease = False
+        detected = 0
+        alignment_failures = 0
         while True:
+            self._set_inference_mode('fruits')
             feedback(ExecuteSpray.Feedback.DETECTING_FRUITS, 0.25, 'DETECTING_FRUITS')
+            self.get_logger().info(
+                f'[ARM][{tree}] DETECT inference_mode=fruits '
+                f'timeout={float(self.get_parameter("detection_timeout_sec").value):.1f}s '
+                f'confirmation={int(self.get_parameter("confirmation_frames").value)}')
             candidates = self._wait_for_fruits(cancel_requested)
             if candidates is None:
                 return self._vision_failure('fruit detector did not provide frames',
                                             cancel_requested)
+            self.get_logger().info(
+                f'[ARM][{tree}] DETECT found={len(candidates)} stable candidates '
+                f'ids=({",".join(c.target_id for c in candidates[:8])})'
+                f'{"..." if len(candidates) > 8 else ""}')
             saw_disease = saw_disease or bool(candidates)
+            detected = max(detected, len(candidates))
             feedback(ExecuteSpray.Feedback.QUEUING, 0.35, 'QUEUING')
-            queue = self._queue(candidates, processed + attempted)
+            queue = self._queue(candidates, processed + exhausted)
+            self.get_logger().info(
+                f'[ARM][{tree}] QUEUE candidates={len(candidates)} '
+                f'processed={len(processed)} exhausted={len(exhausted)} '
+                f'→ queued={len(queue)}')
             if not queue:
+                if pending_attempt is not None:
+                    self._mark_unresolved(pending_attempt.target, exhausted)
+                    self.get_logger().warn(
+                        f'[ARM][ALIGN] target={pending_attempt.target.target_id} '
+                        'was not redetected after observation recovery; marked unresolved')
+                    pending_attempt = None
+                self.get_logger().info(
+                    f'[ARM][{tree}] DETECT queue empty '
+                    f'(processed={len(processed)} exhausted={len(exhausted)}) → breaking loop')
                 break
-            target = queue[0]
+            if pending_attempt is not None:
+                target = min(
+                    queue, key=lambda item: item.distance_to(pending_attempt.target))
+                attempt = pending_attempt
+                attempt.target = target
+                pending_attempt = None
+            else:
+                target = queue[0]
+                attempt = self._attempt_for(target, attempts)
+                if attempt is None:
+                    attempt = TargetAttempt(target)
+                    attempts.append(attempt)
+            attempt.count += 1
             self._select_target(target.target_id)
+            self._set_inference_mode('target')
             feedback(ExecuteSpray.Feedback.ALIGNING, 0.45, 'ALIGNING')
-            ok, canceled, message = self._align_target(
+            self.get_logger().info(
+                f'[ARM][ALIGN] start target={target.target_id} '
+                f'attempt={attempt.count}/'
+                f'{int(self.get_parameter("max_alignment_attempts").value)} '
+                f'observation_distance={self._observation_distance}')
+            ok, canceled, align_code, message = self._align_target(
                 request.mission_id, request.tree_id, target.target_id, cancel_requested)
+            self.get_logger().info(
+                f'[ARM][ALIGN] result target={target.target_id} '
+                f'code={align_code} message={message}')
             if not ok:
+                alignment_failures += 1
                 if canceled:
                     return ExecuteSpray.Result.CANCELED, message
-                if message.startswith('[SAFETY]'):
+                if align_code == AlignTarget.Result.SERVO_SAFETY_STOP:
+                    safety_message = (
+                        f'[SAFETY] visual alignment code={align_code}: {message}')
+                    self.get_logger().error(f'[ARM][ALIGN] {safety_message}')
                     self._request_motion_stop()
-                    return ExecuteSpray.Result.INTERNAL_ERROR, message
-                attempted.append(target)
+                    return ExecuteSpray.Result.INTERNAL_ERROR, safety_message
+                recoverable = align_code in {
+                    AlignTarget.Result.TIMEOUT,
+                    AlignTarget.Result.TARGET_STALE,
+                    AlignTarget.Result.SERVO_SINGULARITY,
+                }
+                if not recoverable:
+                    return self._alignment_recovery_failure(
+                        f'visual alignment code={align_code}: {message}',
+                        cancel_requested)
+                self._select_target('')
+                self._set_inference_mode('idle')
+                if self._alignment_retry_allowed(attempt.count):
+                    self.get_logger().warn(
+                        f'[ARM][ALIGN] recoverable failure code={align_code}; '
+                        'trying the next observation candidate')
+                    recovered, moved = self._recover_to_next_observation(
+                        cancel_requested, feedback)
+                    if recovered:
+                        pending_attempt = attempt
+                        self._reset_fruit_tracking()
+                        self.get_logger().info(
+                            f'[ARM][ALIGN] recovery ready at '
+                            f'{self._observation_distance} m; redetecting fruit')
+                        continue
+                    if moved:
+                        return self._alignment_recovery_failure(
+                            f'visual alignment code={align_code}: {message}; '
+                            'tree reconfirmation failed after observation recovery',
+                            cancel_requested)
+                self._mark_unresolved(attempt.target, exhausted)
+                feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
+                         'RETURNING_TO_OBSERVE')
                 if not self._return_to_observation():
-                    return ExecuteSpray.Result.HOME_FAILED, (
-                        f'{message}; observation return failed')
+                    return self._alignment_recovery_failure(
+                        f'visual alignment code={align_code}: {message}; '
+                        'observation recovery failed', cancel_requested)
+                self.get_logger().warn(
+                    f'[ARM][ALIGN] exhausted target={target.target_id} '
+                    f'after {attempt.count} attempt(s)')
                 self._reset_fruit_tracking()
                 continue
 
+            self._set_inference_mode('idle')
             feedback(ExecuteSpray.Feedback.SPRAYING, 0.60, 'SPRAYING')
+            self.get_logger().info(
+                f'[ARM][{tree}] SPRAY target={target.target_id} '
+                f'duration={request.spray_duration:.1f}s')
             ok, canceled, message = self._spray_target(
                 request.mission_id, request.tree_id, request.spray_duration,
                 cancel_requested)
@@ -310,25 +554,41 @@ class SprayTask(Node):
                 if canceled:
                     return ExecuteSpray.Result.CANCELED, message
                 return self._spray_failure(message, cancel_requested)
+            self.get_logger().info(
+                f'[ARM][{tree}] SPRAY target={target.target_id} done → TREATED '
+                f'({sprayed + 1} sprayed so far)')
             sprayed += 1
             processed.append(target)
             self._select_target('')
             feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.75,
                      'RETURNING_TO_OBSERVE')
+            self.get_logger().info(
+                f'[ARM][{tree}] RETURN_TO_OBSERVE distance={self._observation_distance}m')
             if not self._return_to_observation():
                 return ExecuteSpray.Result.HOME_FAILED, 'observation return failed'
             self._reset_fruit_tracking()
 
         feedback(ExecuteSpray.Feedback.RETURNING_HOME, 0.90, 'RETURNING_HOME')
+        self.get_logger().info(f'[ARM][{tree}] HOME returning to home_pose...')
         if not self._return_home(cancel_requested):
             return (ExecuteSpray.Result.CANCELED, 'spray goal canceled') if self._aborted(
                 cancel_requested) else (ExecuteSpray.Result.HOME_FAILED, 'HOME motion failed')
+        self.get_logger().info(f'[ARM][{tree}] HOME reached')
         feedback(ExecuteSpray.Feedback.COMPLETED, 1.0, 'COMPLETED')
+        summary = spray_summary(
+            detected, sprayed, len(exhausted), alignment_failures)
+        self.get_logger().info(
+            f'[ARM][{tree}] ═══ SUMMARY ═══ '
+            f'side={request.spray_side} distance={self._observation_distance}m '
+            f'{summary}')
+        if sprayed and exhausted:
+            return ExecuteSpray.Result.PARTIAL_SUCCESS, summary
         if sprayed:
-            return ExecuteSpray.Result.OK, f'sprayed {sprayed} diseased fruit(s)'
+            return ExecuteSpray.Result.OK, summary
         if saw_disease:
-            return ExecuteSpray.Result.VISION_FAILED, 'diseased fruit could not be aligned'
-        return ExecuteSpray.Result.INSPECTED_NO_DISEASE, 'tree inspected; no diseased fruit detected'
+            return ExecuteSpray.Result.VISION_FAILED, summary
+        return (ExecuteSpray.Result.INSPECTED_NO_DISEASE,
+                f'{summary}; tree inspected; no diseased fruit detected')
 
     def _observe_failure(self, cancel_requested):
         if self._aborted(cancel_requested):
@@ -351,8 +611,62 @@ class SprayTask(Node):
             return ExecuteSpray.Result.HOME_FAILED, f'{message}; HOME motion failed'
         return ExecuteSpray.Result.SPRAY_FAILED, message
 
+    def _alignment_retry_allowed(self, attempt_count):
+        return attempt_count < int(
+            self.get_parameter('max_alignment_attempts').value)
+
+    def _recover_to_next_observation(self, cancel_requested, feedback):
+        moved = False
+        while not self._aborted(cancel_requested):
+            feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
+                     'ALIGN_RECOVERY')
+            if not self._move_to_next_observation():
+                return False, moved
+            moved = True
+            self.get_logger().info(
+                f'[ARM][ALIGN] moved to recovery observation '
+                f'distance={self._observation_distance} m')
+            feedback(ExecuteSpray.Feedback.SCANNING_TREE, 0.42,
+                     'SCANNING_TREE')
+            if self._scan_for_tree(cancel_requested):
+                self.get_logger().info(
+                    f'[ARM][ALIGN] tree reconfirmed at '
+                    f'{self._observation_distance} m')
+                return True, moved
+            self._set_inference_mode('idle')
+            self.get_logger().warn(
+                f'[ARM][ALIGN] tree not confirmed at '
+                f'{self._observation_distance} m; trying next candidate')
+        return False, moved
+
+    def _alignment_recovery_failure(self, message, cancel_requested):
+        if self._aborted(cancel_requested):
+            return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
+        self._set_inference_mode('idle')
+        self.get_logger().error(f'[ARM][ALIGN] {message}; returning HOME')
+        if self._return_home(cancel_requested):
+            return ExecuteSpray.Result.VISION_FAILED, f'{message}; returned HOME'
+        locked_message = f'{message}; HOME motion failed; motion locked'
+        self.get_logger().error(f'[ARM][ALIGN] {locked_message}')
+        self._request_motion_stop()
+        return ExecuteSpray.Result.HOME_FAILED, locked_message
+
+    def _scan_for_tree(self, cancel_requested):
+        while not self._aborted(cancel_requested):
+            self._reset_tree_tracking()
+            self._set_inference_mode('tree')
+            if self._wait_for_tree(cancel_requested):
+                self._publish_observation_debug('tree_confirmed')
+                return True
+            self._publish_observation_debug(
+                'candidate_rejected', rejection_reason='tree_not_confirmed')
+            if not self._move_to_next_observation():
+                return False
+        return False
+
     def _wait_for_tree(self, cancel_requested):
-        deadline = time.monotonic() + float(self.get_parameter('scan_timeout_sec').value)
+        deadline = time.monotonic() + float(
+            self.get_parameter('scan_pose_detection_timeout_sec').value)
         required = int(self.get_parameter('confirmation_frames').value)
         while time.monotonic() < deadline:
             if self._aborted(cancel_requested):
@@ -371,10 +685,12 @@ class SprayTask(Node):
                 return None
             with self._vision_mutex:
                 if self._fruit_frames >= required:
-                    return [
+                    candidates = [
                         candidate for target_id, candidate in self._fruit_latest.items()
                         if self._fruit_counts.get(target_id, 0) >= required
                     ]
+                    if candidates:
+                        return candidates
             time.sleep(0.02)
         with self._vision_mutex:
             return [] if self._fruit_frames else None
@@ -399,9 +715,32 @@ class SprayTask(Node):
                 -item.confidence),
         )
 
+    def _attempt_for(self, candidate, attempts):
+        return next((attempt for attempt in attempts if self._same_target(
+            candidate, attempt.target)), None)
+
+    def _mark_unresolved(self, target, exhausted):
+        if not any(self._same_target(target, previous) for previous in exhausted):
+            exhausted.append(target)
+
+    def _same_target(self, candidate, previous):
+        return (
+            candidate.iou(previous) >= float(
+                self.get_parameter('processed_iou_threshold').value) or
+            candidate.distance_to(previous) <= float(
+                self.get_parameter('processed_center_distance_px').value))
+
     def _reset_vision(self):
         self._observation_pose = None
+        self._observation_candidates = []
+        self._observation_candidate_index = -1
+        self._observation_distance = None
+        self._tree_in_base = None
+        self._camera_mount = None
         self._reset_fruit_tracking()
+        self._reset_tree_tracking()
+
+    def _reset_tree_tracking(self):
         with self._vision_mutex:
             self._tree_frames = 0
 
@@ -421,10 +760,17 @@ class SprayTask(Node):
             self._vision_client, goal, self._vision_timeout + self._downstream_margin,
             cancel_requested, 'vision alignment')
         if wrapped is None:
-            return False, canceled, error
+            code = (AlignTarget.Result.CANCELED if canceled
+                    else AlignTarget.Result.TIMEOUT)
+            return False, canceled, code, error
         result = wrapped.result
         ok = wrapped.status == GoalStatus.STATUS_SUCCEEDED and result.success
-        return ok, False, result.message or f'vision status={wrapped.status}'
+        canceled = (
+            wrapped.status == GoalStatus.STATUS_CANCELED or
+            result.error_code == AlignTarget.Result.CANCELED)
+        return (
+            ok, canceled, int(result.error_code),
+            result.message or f'vision status={wrapped.status}')
 
     def _spray_target(self, mission_id, tree_id, duration, cancel_requested):
         goal = Spray.Goal()
@@ -526,35 +872,195 @@ class SprayTask(Node):
             return False
         camera_translation = camera_transform.transform.translation
         camera_rotation = camera_transform.transform.rotation
-        distances = (self._observation_distance,) + tuple(
-            distance for distance in self._OBSERVATION_DISTANCES
-            if distance != self._observation_distance)
-        for distance in distances:
-            try:
-                camera_position, camera_quat = camera_look_at_pose(
-                    tree_in_base, self._tree_aim_height,
-                    self._camera_observation_height, distance)
-                tool_position, tool_quat = tool_pose_from_camera_pose(
-                    camera_position, camera_quat,
-                    (camera_translation.x, camera_translation.y, camera_translation.z),
-                    (camera_rotation.x, camera_rotation.y,
-                     camera_rotation.z, camera_rotation.w))
-            except ValueError:
+        self._tree_in_base = tree_in_base
+        self._camera_mount = (
+            (camera_translation.x, camera_translation.y, camera_translation.z),
+            (camera_rotation.x, camera_rotation.y,
+             camera_rotation.z, camera_rotation.w),
+        )
+        if not self._prepare_observation_candidates():
+            return False
+        return self._move_to_next_observation()
+
+    def _prepare_observation_candidates(self):
+        inputs = self._wait_for_observation_inputs()
+        if inputs is None:
+            self._publish_observation_debug(
+                'search_failed', rejection_reason='camera_or_joint_state_unavailable')
+            return False
+        camera, current_joints = inputs
+        started = time.monotonic()
+        candidates = self._observation_optimizer.generate(
+            self._tree_in_base, self._camera_mount, camera)
+        visible_count = sum(candidate.visible for candidate in candidates)
+        best_margin = max(
+            (candidate.visible_margin_px for candidate in candidates),
+            default=-math.inf)
+        self.get_logger().info(
+            f'[ARM][OBSERVE] tree_in_base=({self._tree_in_base[0]:.2f},'
+            f'{self._tree_in_base[1]:.2f},{self._tree_in_base[2]:.2f}) '
+            f'camera={camera[4]}x{camera[5]} fx={camera[0]:.1f} fy={camera[1]:.1f} '
+            f'generated={len(candidates)} fully_visible={visible_count} '
+            f'best_margin_px={best_margin:.1f}')
+        for candidate in candidates:
+            if not candidate.visible:
+                self._publish_observation_debug('candidate_rejected', candidate)
                 continue
+            if time.monotonic() - started >= float(
+                    self.get_parameter('observation_search_timeout_sec').value):
+                candidate.rejection_reason = 'ik_search_timeout'
+                self._publish_observation_debug('candidate_rejected', candidate)
+                continue
+            ik = self.arm.compute_ik(
+                candidate.tool_position, candidate.tool_quat, current_joints)
+            if ik is None:
+                candidate.rejection_reason = 'collision_ik_failed'
+                self._publish_observation_debug('candidate_rejected', candidate)
+                continue
+            try:
+                self._observation_optimizer.evaluate_ik(
+                    candidate, dict(zip(ik.name, ik.position)), current_joints)
+            except (KeyError, TypeError, ValueError):
+                candidate.rejection_reason = 'incomplete_ik_state'
+            self._publish_observation_debug(
+                'candidate_ranked' if not candidate.rejection_reason
+                else 'candidate_rejected', candidate)
+        self._observation_candidates = self._observation_optimizer.rank(candidates)[
+            :int(self.get_parameter('observation_max_plans').value)]
+        self._observation_candidate_index = -1
+        if not self._observation_candidates:
+            self._publish_observation_debug(
+                'search_failed', rejection_reason='no_servo_safe_candidate')
+            return False
+        return True
+
+    def _move_to_next_observation(self):
+        while self._observation_candidate_index + 1 < len(
+                self._observation_candidates):
+            self._observation_candidate_index += 1
+            candidate = self._observation_candidates[self._observation_candidate_index]
             if self._aborted(lambda: False):
                 return False
-            if self.arm.move_pose(
-                    tool_position, tool_quat, frame_id=self._base_frame,
-                    tolerance_position=self._OBSERVATION_POSITION_TOLERANCE,
-                    tolerance_orientation=self._OBSERVATION_ORIENTATION_TOLERANCE):
-                self._observation_pose = (tool_position, tool_quat)
+            trajectory = self.arm.plan_pose(
+                candidate.tool_position, candidate.tool_quat, frame_id=self._base_frame,
+                tolerance_position=self._OBSERVATION_POSITION_TOLERANCE,
+                tolerance_orientation=self._OBSERVATION_ORIENTATION_TOLERANCE)
+            planned = self.arm.trajectory_final_positions(
+                trajectory, self.arm_joint_names) if trajectory is not None else None
+            if planned is None:
+                candidate.rejection_reason = 'moveit_plan_failed'
+                self._publish_observation_debug('candidate_rejected', candidate)
+                continue
+            self._observation_optimizer.evaluate_ik(candidate, planned, planned)
+            if candidate.rejection_reason:
+                self._publish_observation_debug('candidate_rejected', candidate)
+                continue
+            with self._state_mutex:
+                joint_state_sequence = self._joint_state_sequence
+            if self.arm.execute_trajectory(trajectory):
+                actual = self._wait_for_joint_state(joint_state_sequence)
+                if actual is None:
+                    candidate.rejection_reason = 'joint_state_unavailable_after_motion'
+                else:
+                    self._observation_optimizer.evaluate_ik(candidate, actual, actual)
+                if candidate.rejection_reason:
+                    self._publish_observation_debug('candidate_rejected', candidate)
+                    continue
+                self._observation_distance = candidate.distance_m
+                self._observation_pose = (candidate.tool_position, candidate.tool_quat)
+                self.get_logger().info(
+                    f'[ARM][ALIGN] selected observation candidate '
+                    f'index={self._observation_candidate_index} '
+                    f'id={candidate.candidate_id} distance={candidate.distance_m} m '
+                    f'condition={candidate.condition_number:.2f} '
+                    f'joint_margin={candidate.min_joint_margin_rad:.2f}')
+                self._publish_observation_debug('candidate_selected', candidate)
                 return True
+            candidate.rejection_reason = 'moveit_execution_failed'
+            self._publish_observation_debug('candidate_rejected', candidate)
+            self.get_logger().warn(
+                f'[ARM][ALIGN] planning failed for observation candidate '
+                f'index={self._observation_candidate_index} '
+                f'id={candidate.candidate_id}')
         return False
+
+    def _wait_for_observation_inputs(self):
+        deadline = time.monotonic() + float(
+            self.get_parameter('observation_input_timeout_sec').value)
+        while time.monotonic() < deadline:
+            with self._state_mutex:
+                camera = self._camera_model
+                joints = self._joint_positions
+            if camera is not None and joints is not None:
+                return camera, joints
+            time.sleep(0.02)
+        return None
+
+    def _wait_for_joint_state(self, after_sequence=None):
+        deadline = time.monotonic() + float(
+            self.get_parameter('observation_input_timeout_sec').value)
+        while time.monotonic() < deadline:
+            with self._state_mutex:
+                joints = self._joint_positions
+                sequence = self._joint_state_sequence
+            if joints is not None and (
+                    after_sequence is None or sequence > after_sequence):
+                return joints
+            time.sleep(0.02)
+        return None
+
+    def _publish_observation_debug(self, event, candidate=None, rejection_reason=''):
+        if candidate is None:
+            candidate_id = ''
+            distance = camera_height = azimuth = 0.0
+            visible = ik_valid = selected = False
+            condition = math.inf
+            margin = motion = 0.0
+        else:
+            candidate_id = candidate.candidate_id
+            distance = candidate.distance_m
+            camera_height = candidate.camera_height_m
+            azimuth = candidate.azimuth_deg
+            visible = bool(candidate.visible)
+            ik_valid = candidate.ik_joints is not None
+            selected = event == 'candidate_selected'
+            condition = candidate.condition_number
+            margin = candidate.min_joint_margin_rad
+            motion = candidate.joint_motion_norm
+            rejection_reason = rejection_reason or candidate.rejection_reason
+        payload = {
+            'event': event,
+            'mission_id': self._active_mission,
+            'tree_id': self._active_tree,
+            'candidate_id': candidate_id,
+            'distance_m': distance,
+            'camera_height_m': camera_height,
+            'azimuth_deg': azimuth,
+            'visible': visible,
+            'ik_valid': ik_valid,
+            'condition_number': None if not math.isfinite(condition) else condition,
+            'min_joint_margin_rad': margin,
+            'joint_motion_norm': motion,
+            'rejection_reason': rejection_reason,
+            'selected': selected,
+        }
+        self._observation_debug_pub.publish(String(data=json.dumps(
+            payload, sort_keys=True, separators=(',', ':'))))
+        if event != 'candidate_rejected' or visible:
+            self.get_logger().info(
+                f'[ARM][OBSERVE] event={event} id={candidate_id or "-"} '
+                f'visible={visible} ik={ik_valid} '
+                f'condition={payload["condition_number"]} '
+                f'joint_margin={margin:.3f} reason={rejection_reason or "-"}')
 
     def _return_to_observation(self):
         if self._observation_pose is None or self._abort.is_set():
             return False
         position, quat = self._observation_pose
+        return self._move_to_pose((position, quat))
+
+    def _move_to_pose(self, pose):
+        position, quat = pose
         return self.arm.move_pose(
             position, quat, frame_id=self._base_frame,
             tolerance_position=self._OBSERVATION_POSITION_TOLERANCE,
@@ -567,6 +1073,11 @@ class SprayTask(Node):
         message = String()
         message.data = target_id
         self._selected_target_pub.publish(message)
+
+    def _set_inference_mode(self, mode):
+        message = String()
+        message.data = mode
+        self._inference_mode_pub.publish(message)
 
     def _request_motion_stop(self):
         message = String()

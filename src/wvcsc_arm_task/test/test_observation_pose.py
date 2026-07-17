@@ -6,6 +6,7 @@ from wvcsc_arm_task.observation_pose import (
     camera_look_at_pose,
     tool_pose_from_camera_pose,
     transform_point,
+    yaw_rotate_quaternion,
 )
 
 
@@ -53,3 +54,9 @@ def test_tool_pose_from_camera_pose_inverts_fixed_camera_translation():
     )
     assert position == pytest.approx((0.9, 2.0, 3.0))
     assert quat == pytest.approx((0.0, 0.0, 0.0, 1.0))
+
+
+def test_yaw_rotate_quaternion_keeps_a_horizontal_fan_at_fixed_camera_position():
+    forward = _forward_from_quaternion(
+        yaw_rotate_quaternion((0.0, math.sqrt(0.5), 0.0, math.sqrt(0.5)), 90.0))
+    assert forward == pytest.approx((0.0, 1.0, 0.0))

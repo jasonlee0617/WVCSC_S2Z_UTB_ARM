@@ -5,12 +5,23 @@ wvcsc_two_stage_yolo:
     tree_detections_topic: /vision/tree_detections
     fruit_detections_topic: /vision/fruit_detections
     target_topic: /vision/target
-    debug_image_topic: /vision/debug_image
-    tree_model_path: wvcsc_tree_yolov8n.pt
-    fruit_model_path: wvcsc_fruit_yolov8n_seg.pt
-    assume_tree_in_view: true
-    tree_confidence: 0.50
-    fruit_confidence: 0.50
+    tree_visualization_topic: /vision/tree_debug_image
+    fruit_visualization_topic: /vision/fruit_debug_image
+    perception_debug_topic: /vision/perception_debug
+    perception_debug_rate_hz: 5.0
+    tree_model_path: wvcsc_tree_yolov8s.pt
+    fruit_model_path: wvcsc_fruit_yolov8s_seg.pt
+    inference_mode_topic: /vision/inference_mode
+    tree_confidence: 0.10
+    fruit_confidence: 0.10
     roi_padding: 0.10
     track_iou_threshold: 0.30
-    publish_debug_image: true
+    track_center_distance_px: 40.0
+    track_max_missed_frames: 3
+    target_reassociation_iou_margin: 0.10
+    target_reassociation_distance_margin_px: 8.0
+    # Merge only masks whose safe spray points are already within fine tolerance.
+    target_equivalent_aim_distance_px: 8.0
+    target_lock_ema_alpha: 0.35
+    tree_lock_iou_threshold: 0.20
+    publish_visualization: true

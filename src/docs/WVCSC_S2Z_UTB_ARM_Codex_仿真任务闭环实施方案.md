@@ -1,203 +1,312 @@
-# WVCSC 空地协同喷洒仿真闭环实施方案
+# WVCSC ARMSpray 视觉喷洒闭环实施方案
 
-> 更新日期：2026-07-16
-> 当前阶段：已接入两级 YOLO 作业链路、独立 Motion Control 与逐病果喷洒状态机；默认 `perception_mode:=mock` 用于无权重回归，配置权重后切换为 `yolo`。
-> 验证结果：16 个相关包构建通过，74 项针对性测试通过。`perception_mode:=mock` 已覆盖同一接口的状态机回归；真实权重的 Gazebo 图像闭环需在模型训练完成后单独验收。
+> 更新日期：2026-07-17
+> 当前阶段：两级 YOLO 作业链路已编码完成，mock 模式状态机通过；下一步目标是在真实 YOLO 权重训练完成后完成完整 ARM_SPRAYING 七阶段闭环验收。
+> 验证结果：16 个相关包构建通过，74 项针对性测试通过。动态观察位姿、扇形扫描、病果队列、对准重试和观察距离恢复均已实现。
 
-## 1. 已确认的作业目标
+## 1. 目标与边界
 
-四棵目标按无人机给出的顺序逐棵处理：
+### 1.1 本次目标
 
-```text
-tree_01 left → tree_02 right → tree_03 left → tree_04 right
-```
-
-当前闭环：
+完成一棵树的完整视觉喷洒闭环：
 
 ```text
-Mock UAV 发布病树 map 坐标
-  → 任务管理器生成道路作业位姿
-  → Nav2 导航
-  → /odom 连续停稳确认
-  → 机械臂到左/右观察姿态
-  → 逐病果对准与 Spray Action
-  → 机械臂返回 HOME
-  → 下一棵树
+MOVING_TO_OBSERVE → SCANNING_TREE → DETECTING_FRUITS → QUEUING
+    → ALIGNING → SPRAYING → RETURNING_TO_OBSERVE → 复检直到队列为空 → HOME
 ```
 
-未来视觉闭环：在每棵树上识别全部 `diseased_fruit`，去重后逐个完成图像平面 XY 对准和喷洒，全部处理完才返回 HOME。
+Mock 模式下已完成状态机验证。真实权重就绪后的验收目标是：四棵树全部按上述链路完成，每棵树最少喷洒 1 个病果，连续运行三轮无安全锁定。
 
-## 2. 当前阶段的关键决策
+### 1.2 明确不纳入本次的范围
 
-### 2.1 无人机只发送树的全局信息
+- 真实无人机飞控与视觉识别
+- 真实 C10 相机内参/手眼标定
+- 真实喷洒泵阀硬件
+- Web UI
+- 多无人机调度
 
-`DiseaseTree` 继续提供：
+---
 
-- `tree_id`；
-- `map` 坐标；
-- 置信度；
-- `spray_side`；
-- 当前仿真使用的喷洒时长；
-- 可选证据 URI。
+## 2. ARM_SPRAYING 七阶段详解
 
-不让无人机发送“相对小车坐标”。小车移动后该相对量会失效。未来需要树相对小车的方向时，由任务端用最新 TF 将树的 `map` 坐标变换到 `base_footprint`。
+### 2.1 整体架构
 
-### 2.2 导航到道路作业位姿，不导航到树干中心
+```
+mission_manager (一棵树)
+    │
+    ├─ tree_hint: PoseStamped (果树在 alicia_base_link 下的坐标)
+    └─ ExecuteSpray.Goal → spray_task
+                              │
+                              ├─ MoveIt2 (plan + execute)
+                              ├─ YOLO 两级推理 (tree detect + fruit seg)
+                              ├─ moveit_servo (IBVS XY 对准)
+                              └─ spray_controller (Spray Action)
+```
 
-目标树本身是障碍物，Nav2 不能把树干中心作为底盘中心目标。当前道路为直线，作业位姿统一为：
+### 2.2 [1] MOVING_TO_OBSERVE — 动态观察位姿
+
+**不再使用固定关节角度**。每个观察位姿都根据果树的实际位置动态计算。
+
+**计算链**：
+
+```
+mission_manager 发送 tree_hint (PoseStamped, 在 alicia_base_link 下)
+    ↓
+spray_task._move_to_observation():
+    1. TF 查询 tree_hint 在 base_frame 下的坐标 → tree_in_base = (tx, ty, tz)
+    2. TF 查询 tool0 → camera_color_optical_frame 的外参 → camera_mount
+    3. 从 observation_distance_candidates 依次尝试距离
+    4. camera_look_at_pose(tree_in_base, aim_height, camera_height, distance)
+       → 相机光轴(+Z)指向树冠位置，得到 camera 位姿
+    5. tool_pose_from_camera_pose() → 转为 tool0 位姿
+    6. yaw_rotate_quaternion() 生成 scan_poses (扇形扫描候选)
+    7. arm.move_pose() → MoveIt IK + 规划 + 执行
+    ↓
+机械臂到达观察位姿，相机光轴对准树冠
+```
+
+**关键参数**（`arm_task.yaml`）：
+
+```yaml
+tree_aim_height: 1.20              # 相机瞄准树冠高度 (m, 相对树根)
+camera_observation_height: 1.90    # 相机安装高度 (m, 相对树根)
+observation_distance_candidates:    # 尝试距离列表，依次尝试直到找到一个 IK 可解
+  [1.10, 1.00, 1.20, 0.90, 1.30, 1.40, 1.50]
+scan_yaw_offsets_deg:               # 扇形扫描的相机偏航角偏移
+  [0.0, -10.0, 10.0, -20.0, 20.0]
+```
+
+**为什么距离是候选列表？** 不同距离对应的 IK 解可达性不同。太近可能碰撞、太远可能超出机械臂工作空间。按列表顺序尝试，第一个规划成功的距离被采纳。如果对准失败，还可以自动尝试下一候选距离（`_recover_to_next_observation`）。
+
+### 2.3 [2] SCANNING_TREE — 果树确认
+
+```
+到达观察位姿
+    ↓
+spray_task._scan_for_tree():
+    for each scan_pose (从 yaw=0° 开始，依次尝试 ±10°, ±20°):
+        1. arm.move_pose(scan_pose) → 移动相机朝向
+        2. 发布 /vision/inference_mode = "tree"
+        3. 等待 tree_detections 连续 confirmation_frames=3 帧
+        4. 找到 → 记录当前 pose 为 observation_pose，返回成功
+        5. 未找到 → 尝试下一个 scan_pose
+    ↓
+全部 scan_pose 尝试完毕仍未找到 → VISION_FAILED → return HOME
+```
+
+**扫描参数**：
+
+```yaml
+scan_pose_detection_timeout_sec: 1.0   # 每个扫描姿态最多等待 1 秒
+confirmation_frames: 3                 # 需要连续 3 帧确认
+tree_confidence: 0.50                  # tree 检测置信度阈值
+```
+
+`scan_yaw_offsets_deg` 定义了 5 个扫描姿态（0° 标称 + 左右各 2 个偏角），每个姿态最多等 1 秒，总计最多约 5 秒。
+
+### 2.4 [3] DETECTING_FRUITS — 果实实例分割
+
+```
+tree 确认后
+    ↓
+发布 /vision/inference_mode = "fruits"
+    ↓
+YOLOv8s-seg 推理 (tree + healthy_fruit + diseased_fruit)
+    ↓
+spray_task._wait_for_fruits():
+    1. 等待 fruit_detections 连续 confirmation_frames=3 帧
+    2. 只接受连续出现 ≥confirmation_frames 帧的候选
+       (过滤单帧误检)
+    ↓
+返回候选列表 (只含 diseased_fruit 类)
+```
+
+**参数**：
+
+```yaml
+detection_timeout_sec: 2.0     # 最多等 2 秒
+fruit_confidence: 0.50         # 病果检测置信度阈值
+```
+
+**两类 YOLO 模型的职责分工**：
+
+| 模型 | 任务 | 输入 | 输出 |
+|------|------|------|------|
+| `wvcsc_tree_yolov8s.pt` | 目标检测 (Detect) | 完整 1280×720 图像 | `tree` bbox |
+| `wvcsc_fruit_yolov8s_seg.pt` | 实例分割 (Seg) | 完整图像（tree ROI 由下游过滤） | `healthy_fruit` mask + `diseased_fruit` mask |
+
+### 2.5 [4] QUEUING — 病果队列
+
+```
+候选列表 (diseased_fruit 的 Detection2D 消息)
+    ↓
+spray_task._queue():
+    1. 过滤已处理 (processed) 和已耗尽 (exhausted) 的目标
+       - IoU ≥ processed_iou_threshold (0.30) → 已处理
+       - 中心距离 ≤ processed_center_distance_px (40px) → 已处理
+    2. 按距离图像中心的远近排序 (近的优先)
+    3. 同距离按下置信度降序
+    ↓
+返回排序后的待喷洒队列
+```
+
+**队列不跨帧持久化**（第一版简化设计）：每轮 `DETECTING_FRUITS → QUEUING` 是独立的。去重依赖 `processed` 列表（已喷洒成功的）和 `exhausted` 列表（对准失败的）。
+
+**去重参数**：
+
+```yaml
+processed_iou_threshold: 0.30
+processed_center_distance_px: 40.0
+```
+
+### 2.6 [5] ALIGNING — IBVS 对准
+
+```
+队列首目标 (FruitTarget)
+    ↓
+spray_task._align_target():
+    1. 发布 /vision/selected_target_id → target.target_id
+    2. 发布 /vision/inference_mode = "target"
+    3. 发送 AlignTarget.Goal 到 /vision/align_target Action
+    4. 等待结果 (timeout = vision_timeout_sec = 8.0s)
+    ↓
+成功 → 进入 SPRAYING
+失败 → 判断失败类型:
+    ├─ TIMEOUT / TARGET_STALE / SERVO_SINGULARITY (可恢复)
+    │   ├─ max_alignment_attempts=2 次内重试 → 尝试下一观察距离
+    │   └─ 重试耗尽 → 标记 exhausted，继续下一目标
+    ├─ SERVO_SAFETY_STOP → 触发 motion stop → INTERNAL_ERROR → 锁定
+    └─ 其他 → VISION_FAILED → 尝试 HOME
+```
+
+**对准重试 + 观察距离恢复**：
+
+```
+对准失败 (可恢复类型)
+    ↓
+_recover_to_next_observation():
+    1. _move_to_next_observation() → 尝试下一个 observation_distance_candidates
+    2. _scan_for_tree() → 重新确认 tree
+    3. 重置 fruit 跟踪 → 重新 DETECTING_FRUITS
+    4. 用 pending_attempt 机制保留上次对准的 target_id
+    ↓
+继续对准（同一目标，新观察位姿）
+```
+
+**为什么需要观察距离恢复？** 某些距离下末端靠近奇异点或关节限位，导致 Servo 无法正常微调。换一个观察距离可能有更好的运动学条件。
+
+### 2.7 [6] SPRAYING — 喷洒执行
+
+```
+对准成功
+    ↓
+发布 /vision/inference_mode = "idle"  (停止推理)
+    ↓
+spray_task._spray_target():
+    1. 发送 Spray.Goal 到 /spray/execute Action
+       (mission_id, tree_id, duration=spray_duration, mode="continuous")
+    2. 等待结果
+    ↓
+成功 → 加入 processed 列表，sprayed 计数 +1
+失败 → SPRAY_FAILED → 尝试 HOME
+```
+
+### 2.8 [7] RETURNING_TO_OBSERVE / HOME — 复检
+
+```
+喷洒完成
+    ↓
+return_to_observation() → 移回当前 observation_pose
+    ↓
+reset_fruit_tracking() → 清空帧计数
+    ↓
+回到 DETECTING_FRUITS → 重新检测
+    ↓
+    ├─ 仍有未处理 diseased_fruit → QUEUING → ALIGNING → ...
+    └─ 队列为空 → RETURNING_HOME
+
+HOME:
+    arm.move_joints([0,0,0,0,0,0])
+    ↓
+COMPLETED / PARTIAL_SUCCESS / INSPECTED_NO_DISEASE
+```
+
+**为什么每次喷洒后要回到观察姿态？** 视觉伺服可能使机械臂偏离观察姿态（尤其是多目标连续对准时）。回到标称观察位姿保证下一次检测时相机朝向一致，避免累积漂移。
+
+---
+
+## 3. 状态机完整定义
+
+### 3.1 ExecuteSpray Feedback Phase
 
 ```text
-goal_x   = tree.position.x
-goal_y   = road_center_y + 0.5  # left
-         = road_center_y - 0.5  # right
-goal_yaw = road_yaw
+MOVING_TO_OBSERVE (0.05)
+    → SCANNING_TREE (0.15)
+    → DETECTING_FRUITS (0.25)
+    → QUEUING (0.35)
+    → ALIGNING (0.45) ← 逐目标循环
+    → SPRAYING (0.60)
+    → RETURNING_TO_OBSERVE (0.75)
+    → 回到 DETECTING_FRUITS / RETURNING_HOME (0.90)
+    → COMPLETED (1.00)
 ```
 
-默认 `road_center_y=0.0`、`road_yaw=0.0`、`docking_lateral_offset=0.5`，所以四个作业位姿为：
+### 3.2 ExecuteSpray Result Codes
 
-```text
-tree_01 → ( 3.0,  0.5, 0.0)
-tree_02 → ( 5.0, -0.5, 0.0)
-tree_03 → (11.0,  0.5, 0.0)
-tree_04 → (13.0, -0.5, 0.0)
+| Code | 含义 | 触发条件 |
+|------|------|---------|
+| OK (0) | 全部喷洒成功 | 至少 1 个病果喷洒成功，无失败/跳过 |
+| PARTIAL_SUCCESS (10) | 部分成功 | 至少 1 个成功 + 至少 1 个跳过 |
+| INSPECTED_NO_DISEASE (11) | 无病果 | tree 确认但未检测到 diseased_fruit |
+| INVALID_GOAL (1) | 目标非法 | tree_hint 缺失或参数越界 |
+| BUSY (2) | 正在执行 | 上一 Goal 未完成 |
+| LOCKED (3) | 运动锁定 | motion_control 已发出 stop 锁 |
+| OBSERVE_FAILED (4) | 观察位姿失败 | 所有距离候选 IK 均失败 |
+| CANCELED (5) | 被取消 | 用户或 mission_manager 取消 |
+| HOME_FAILED (6) | HOME 失败 | HOME 运动规划或执行失败 |
+| INTERNAL_ERROR (7) | 内部错误 | Servo 安全停止等不可恢复错误 |
+| VISION_FAILED (8) | 视觉失败 | tree 未找到或对准不可恢复 |
+| SPRAY_FAILED (9) | 喷洒失败 | Spray Action 失败 |
+
+---
+
+## 4. 接口边界
+
+### 4.1 输入
+
+| 接口 | 类型 | 内容 |
+|------|------|------|
+| `/uav/disease_trees` | `DiseaseTreeArray` | 树级任务列表（map 坐标 + spray_side） |
+| `tree_hint` (ExecuteSpray Goal) | `PoseStamped` | 果树在 `alicia_base_link` 下的位姿 |
+| `/vision/tree_detections` | `Detection2DArray` | tree 检测候选 (class_id='tree') |
+| `/vision/fruit_detections` | `Detection2DArray` | 果实分割候选 (class_id='diseased_fruit') |
+| `/motion_control/locked` | `Bool` | 运动锁状态 |
+
+### 4.2 输出
+
+| 接口 | 类型 | 内容 |
+|------|------|------|
+| `/arm/execute_spray` | `ExecuteSpray` Action | 一棵树完整作业 |
+| `/vision/align_target` | `AlignTarget` Action (调用) | 单病果 XY 对准 |
+| `/spray/execute` | `Spray` Action (调用) | 喷洒执行 |
+| `/vision/inference_mode` | `String` | 推理模式切换: idle / tree / fruits / target |
+| `/vision/selected_target_id` | `String` | 当前对准的病果 ID |
+| `/motion_control/command` | `String` | stop 指令（安全故障时） |
+
+### 4.3 推理模式切换
+
+```
+idle     → 无活跃推理（导航中 / HOME / SPRAYING 时）
+tree     → 仅 tree Detect（SCANNING_TREE 阶段）
+fruits   → tree Detect + fruit Seg（DETECTING_FRUITS / QUEUING 阶段）
+target   → 全推理 + 发布 selected_target_id（ALIGNING 阶段）
 ```
 
-已去除 `standoff_distance` / `spray_standoff_distance`。`docking_lateral_offset` 只表示小车从道路中心向作业侧靠近的距离，不代表喷嘴到病斑的物理喷距。后续若道路不规则，应由地图或路径生成器提供道路中心线/候选作业位姿。
+模式切换的作用：减少不必要推理（省 GPU/CPU），确保下游节点知道当前阶段以调整行为。
 
-### 2.3 去除独立病斑模型
+---
 
-`orchard.world` 不再加载四个悬空的病斑模型。果树网格上的红色果实标注为 `healthy_fruit`，黄色果实标注为 `diseased_fruit`，分布由 `orchard_seed` 可复现地生成。
-
-### 2.4 感知模式与独立运动控制
-
-`system_sim.launch.py` 默认：
-
-```text
-perception_mode=mock
-```
-
-`mock` 发布与两级 YOLO 相同的 tree、病果和选中目标接口，用于状态机回归；`yolo` 加载 tree Detect 与 fruit Seg 权重。MoveIt Servo 与 Spray Action 在启用机械臂控制时始终启动，不再提供绕过对准或喷洒执行器的开关。
-
-`wvcsc_motion_control` 保持独立节点和 setup 入口，是 `/motion_control/command` 的唯一解释者，并以锁存 `/motion_control/locked` 向喷洒任务广播锁状态。
-
-## 3. 当前可执行状态机
-
-每棵树必须按以下顺序执行：
-
-```text
-NAVIGATING
-  → VERIFYING_STOP
-  → ARM_SPRAYING / MOVING_TO_OBSERVE
-  → SCANNING_TREE
-  → DETECTING_FRUITS / QUEUING
-  → ALIGNING / SPRAYING / RETURNING_TO_OBSERVE
-  → RETURNING_HOME
-  → TARGET_COMPLETED
-```
-
-任务完成：
-
-```text
-MISSION_COMPLETED
-completed_targets=4
-skipped_targets=0
-nav_goal_active=false
-arm_goal_active=false
-```
-
-当前一次 `/arm/execute_spray` Goal 的边界仍是“一棵树”。其内部执行：
-
-```text
-动态 tree_hint 观察位姿 → tree 确认 → 病果队列 → XY 对准 → Spray Action → 复检 → HOME
-```
-
-单目 RGB 仍只提供像素、掩膜和置信度；喷距由停车位与观察位姿保证，不虚构深度闭环。
-
-## 4. YOLO 接入后的推荐作业流程
-
-YOLO 类别固定为：
-
-```text
-0: tree
-1: healthy_fruit
-2: diseased_fruit
-```
-
-未来仍保持“一棵树一个 ExecuteSpray Goal”，将多病斑循环封装在机械臂/视觉作业内部，任务管理器不需要知道像素级病斑数量：
-
-```text
-1. 小车到道路作业位姿并停稳
-2. 用 TF 计算目标树在 base_footprint 下的方位
-3. MoveIt 规划到该侧的粗观察姿态
-4. 启用 YOLO 推理，先锁定当前 tree 区域
-5. 未找到树时，在关节和碰撞约束内做有限扇形搜索
-6. 只接收当前 tree ROI 内的 healthy_fruit / diseased_fruit
-7. 对检测结果跟踪、去重并建立待喷洒队列
-8. 逐个处理待喷洒目标：
-   8.1 锁定一个 diseased_fruit
-   8.2 仅做图像平面 XY 视觉伺服
-   8.3 连续稳定若干帧后停止 Servo
-   8.4 开启喷洒并计时
-   8.5 关闭喷洒并标记该目标已处理
-   8.6 返回完全相同的观察姿态，重新检测并继续下一个未处理目标
-9. 扫描完成后返回 HOME
-10. 任务管理器进入下一棵树
-```
-
-相机建议保持持续采集，只按任务状态启停 YOLO 推理，不频繁关闭和重启相机设备。
-
-### 4.1 目标关联与去重
-
-必须先选中 `tree`，再处理其内部的果实，避免把相邻树的果实归到当前任务。队列只加入 `diseased_fruit`，至少需要：
-
-- `track_id`；
-- 包围框中心和尺寸；
-- 检测置信度；
-- 最近更新时间；
-- `PENDING / ALIGNING / TREATED / FAILED` 状态。
-
-同一目标不能因连续多帧检测被重复喷洒。第一版可用包围框中心距离或 IoU 做短时关联，暂不增加复杂三维重建。
-
-### 4.2 扇形搜索
-
-不建议直接向底层关节发送“J1 固定转多少度”。推荐由 MoveIt 执行受限观察姿态或小步扫描：
-
-- 左/右侧决定搜索中心；
-- J1 只在配置的安全区间内往返；
-- 每个扫描点等待图像稳定；
-- 命中目标后立即停止扫描；
-- 超过最大角度、最大时间或最大扫描次数后结束本树任务。
-
-观察位姿由 `tree_hint → camera look-at pose → tool0 pose` 动态计算，不再维护固定左右关节姿态回退。
-
-### 4.3 视觉伺服边界
-
-第一版只做图像平面 XY 对准是合理的，但它只能解决“目标位于画面中心”，不能证明实际喷距安全。因此：
-
-- 光轴 Z 命令保持为零；
-- 不用单目 RGB 虚构深度；
-- 只有底盘停稳、目标可信、Servo 正常且喷洒器就绪时才能喷洒；
-- 对准成功后先发零速并确认 Servo 停止，再开启喷洒；
-- 目标丢失、奇异、碰撞、超限或通信过期时立即关闭喷洒。
-
-真实设备最终仍需要喷嘴工作距离约束，来源可为标定后的停车位姿、深度传感器或测距传感器；此项暂缓，不在当前仿真中硬编码。
-
-### 4.4 推荐异常语义
-
-| 情况 | 推荐行为 |
-|---|---|
-| 未找到 `tree` | 有限扫描后记录 `TREE_NOT_FOUND`，不喷洒，返回 HOME |
-| 找到树但没有 `diseased_fruit` | 标记 `INSPECTED_NO_DISEASE`，不喷洒并返回 HOME |
-| 单个病斑对准失败 | 关闭喷洒，记录该病斑失败；第一版建议结束当前树并 HOME |
-| 单个病斑喷洒成功 | 标记 `TREATED`，继续该树剩余目标 |
-| Servo/碰撞/奇异安全故障 | 立即停机并锁定，整项任务失败 |
-| HOME 失败 | 保持锁定，不进入下一棵树 |
-
-`ExecuteSpray` 已增加 `INSPECTED_NO_DISEASE`；没有病果属于检查成功，不作为任务失败或跳过。
-
-## 5. 当前启动与验收
-
-2026-07-15 已完成无 GUI 的导航、观察、喷洒接口与 HOME 基线验收。两级 YOLO 权重的真实图像闭环仍需在人工标注和训练完成后验收。
+## 5. 构建与启动
 
 ### 5.1 构建
 
@@ -208,7 +317,7 @@ colcon build --symlink-install --packages-up-to wvcsc_simulation
 source install/setup.bash
 ```
 
-### 5.2 启动当前四树闭环
+### 5.2 Mock 模式启动（无 YOLO 权重回归）
 
 ```bash
 ros2 launch wvcsc_simulation system_sim.launch.py \
@@ -218,185 +327,161 @@ ros2 launch wvcsc_simulation system_sim.launch.py \
   use_web_ui:=false perception_mode:=mock
 ```
 
-### 5.3 监控
+### 5.3 YOLO 模式启动（需权重文件就绪）
 
 ```bash
-ros2 topic echo --no-daemon \
-  --qos-reliability reliable \
-  --qos-durability transient_local \
-  /mission/status
-```
-
-```bash
-ros2 topic echo --once \
-  --qos-reliability reliable \
-  --qos-durability transient_local \
-  /mission/plan
-```
-
-```bash
-ros2 action list | grep -E 'navigate_to_pose|execute_spray'
-ros2 topic hz /odom
-```
-
-### 5.4 当前阶段验收标准
-
-- [ ] `/mission/plan` 的四个作业位姿依次为 `(3,0.5)`、`(5,-0.5)`、`(11,0.5)`、`(13,-0.5)`；
-- [ ] Nav2 按输入顺序到达四个作业位姿；
-- [ ] 每次导航成功后 `/odom` 连续停稳 1 秒才启动机械臂；
-- [ ] 每棵树由 `tree_hint` 生成可达的动态观察姿态；
-- [ ] Mock 模式下确认 tree、生成病果队列，并完成对准、喷洒、复检；
-- [ ] 每棵树完成后机械臂均回到 HOME；
-- [ ] 任一导航或机械臂失败时不进入下一目标；
-- [ ] 最终 `MISSION_COMPLETED`，完成数为 4；
-- [ ] 同一启动方式连续完成 3 轮。
-
-真实 YOLO 模式还需验证 tree ROI、果实实例掩膜、像素误差和视觉 Servo 状态。
-
-### 5.5 Nav2 Qt 手动单点/多点作业
-
-手动任务模式与 Mock/Replay UAV 互斥。启动时设置
-`use_nav2_qt:=true` 后，系统不会启动 Mock 或 Replay UAV，且必须保持
-`auto_start_mission:=false`：
-
-```bash
+./run_system_sim.sh
+# 或手动指定
 ros2 launch wvcsc_simulation system_sim.launch.py \
-  use_rviz:=true use_nav2_qt:=true \
-  use_mock_uav:=false use_replay_uav:=false \
+  perception_mode:=yolo \
+  yolo_python_executable:=/home/robot/venvs/wvcsc_yolo_ros/bin/python \
   auto_start_mission:=false
 ```
 
-1. RViz 点击 `2D Estimate Pose`，Qt 点击“记录起点”；Qt优先记录
-   `/initialpose`，没有该消息时回退读取 `map -> base_footprint`。
-2. RViz 点击 `2D Goal Pose`。此工具只发布 `/manual_goal_pose`，不会直接发起
-   Nav2 Action。
-3. 每次RViz选点后点击“添加终点到列表”，检查顺序和左/右喷洒侧别。
-4. 列表恰有一个终点时可点击“单点导航+喷洒”；喷洒成功后该终点自动删除。
-   列表有两个及以上终点时可点击“多点导航+喷洒”；多点完成后列表保留。
-5. 任务执行期间可使用暂停、继续、跳过当前、取消和返回起点；最终查看
-   `/mission/status` 的 `MISSION_COMPLETED` 与完成数量。
-
-Qt向 `/mission/load_manual` 提交精确停车位姿；手动目标不再使用树坐标的
-`0.5m` 横向停靠偏移。实机使用同一个GUI启动文件，只需在已启动实机底盘、Nav2、
-任务管理器后执行：
+### 5.4 监控
 
 ```bash
-ros2 launch my_navigation2 nav2_qt.launch.py use_sim_time:=false
+# 任务状态
+ros2 topic echo --qos-reliability reliable --qos-durability transient_local /mission/status
+
+# 任务计划（含作业位姿）
+ros2 topic echo --once --qos-reliability reliable --qos-durability transient_local /mission/plan
+
+# 活跃 Action
+ros2 action list | grep -E 'navigate_to_pose|execute_spray|align_target'
+
+# 里程计频率
+ros2 topic hz /odom
 ```
 
-## 6. 两级 YOLO 数据与后续实施
+---
 
-本次已重新采集 30 张无标注原始 C10 图像，并安全替换两个数据集根目录：
+## 6. 验收标准
 
-- `/home/robot/ultralytics-main/datasets/wvcsc_fruit_seg/`：`train` 24 张、`val` 6 张，类别预留为 `healthy_fruit`、`diseased_fruit`；
-- `/home/robot/ultralytics-main/datasets/wvcsc_tree_detect/`：同一批 PNG、同一划分，类别预留为 `tree`；
-- 两个数据集的同名 PNG 已按 SHA256 逐张校验为字节完全一致；标签目录存在但为空，不包含 `.txt`、`.cache`、Labelme JSON 或调试图；
-- 原数据已保留为 `wvcsc_fruit_seg.backup-20260716T170751Z` 和 `wvcsc_tree_detect.backup-20260716T170751Z`，未删除训练脚本。
+### 6.1 Mock 模式（当前可验收）
 
-图片清单固定为：seeds `50–53` 的 `left_tree_01–03`、`right_tree_01–03` 共 24 张 `train`；seed `54` 的同六个视角共 6 张 `val`。所有图片来自 `/camera/camera/color/image_raw`，尺寸均为 `1280×720`。
+- [ ] `/mission/plan` 四个作业位姿依次为 `(3,0.5)` `(5,-0.5)` `(11,0.5)` `(13,-0.5)`
+- [ ] Nav2 按输入顺序到达四棵树
+- [ ] 每次导航成功后 `/odom` 连续停稳 1 秒才启动机械臂
+- [ ] 每棵树的 `tree_hint` 由 TF 动态转换为 `alicia_base_link` 坐标
+- [ ] 动态观察位姿规划成功且避免碰撞
+- [ ] Mock 模式确认 tree、生成病果队列、完成对准+喷洒+复检
+- [ ] 每棵树完成后机械臂回到 HOME
+- [ ] 任一故障不进入下一目标
+- [ ] 最终 `MISSION_COMPLETED`，`completed_targets=4`
+- [ ] 同一启动方式连续完成 3 轮
 
-果树生成规则已更新：134 个原始网格连通组件先配对为 67 颗完整果实；每棵树只生成 5 颗完整果实，其中按 seed 固定为 2–3 颗亮黄色病果、其余为鲜红色健康果。果实只从道路侧、外层且源模型高度不低于 `0.90` 的候选中选择；每颗果实周围清除 `0.18` 模型单位叶片，并固定仅保留 269 个叶片组件。这样避免低位果实被车体遮挡，也避免叶片遮住用于标注的果实。
+### 6.2 YOLO 模式（权重就绪后）
 
-`tool0` 的球形 `<visual>` 已永久移除；`tool0` link、固定关节和 C10 相机安装关系仍保留。当前 URDF SHA256 为 `72cba78355ca07a753941394a4b170b74f88f1dad35f3881d4e10490600c05fe`。重采集通过 `capture_yolo_seed_direct.py` 直接设置六个停靠位姿、调用真实 `ExecuteSpray` Action 到达观察姿态，并使用无病果 Mock perception 完成观察与 HOME；不依赖 Nav2。
+- [ ] `perception_mode:=yolo` 启动不报错
+- [ ] SCANNING_TREE 阶段真实 YOLO 检测到 tree（conf ≥ 0.50）
+- [ ] DETECTING_FRUITS 阶段真实 YOLO Seg 检测到 diseased_fruit
+- [ ] 病果队列按距离排序正确
+- [ ] 每个病果的 IBVS 在 8s 内对准（fine_tolerance_px=8, stable_frames=10）
+- [ ] Spray Action 调用成功，sprayed 计数正确
+- [ ] 复检逻辑正确（喷洒后回到观察姿态重新检测）
+- [ ] 无 Servo 安全锁定或碰撞
+- [ ] 最终 `/mission/status` 显示 `MISSION_COMPLETED`
+- [ ] 连续三轮无异常
 
-数据采集验收命令：
+---
+
+## 7. 下一步工作顺序
+
+```
+1. 完成 YOLO 权重训练
+   - tree Detect: 数据集 wvcsc_tree_detect (24 train / 6 val)
+   - fruit Seg: 数据集 wvcsc_fruit_seg (24 train / 6 val)
+   - 验收: Mask precision/recall ≥ 0.80, mAP50 ≥ 0.70
+
+2. YOLO 模式 Gazebo 单树闭环
+   - perception_mode:=yolo auto_start_mission:=false
+   - 手动触发一棵树，验证七阶段全部日志正确
+
+3. YOLO 模式 Gazebo 四树连续闭环
+   - 四树全自动，连续三轮
+
+4. C10 实机到位后
+   - 内参/手眼标定 → 实机 YOLO → 实机 Servo → 实机喷洒
+```
+
+---
+
+## 8. 关键设计决策
+
+### 8.1 观察位姿动态计算（替代固定关节角度）
+
+**旧方案**：`observe_left_pose` / `observe_right_pose` 固定的 6 关节角度。
+**新方案**：`tree_hint → camera_look_at_pose → tool_pose_from_camera_pose → MoveIt IK`。
+
+优势：
+- 不同树位置、不同株距自动适配
+- 支持观察距离候选列表（IK 失败时自动尝试其他距离）
+- 扇形扫描（yaw offset）由 `scan_yaw_offsets_deg` 参数化
+
+### 8.2 task_spray 内部设计
+
+- `tree_hint` 从 mission_manager 传入，已变换到 `alicia_base_link` 坐标系
+- 观察位姿动态生成，不依赖固定关节角度
+- `observation_distance_candidates` 优先列表中距离越近越好，依次回退
+- 每个观察位姿附带一组 `scan_poses`（yaw 偏移），以应对果树位置和地图的误差
+
+### 8.3 两级 YOLO 模型
+
+| 级 | 任务 | 模型 | 类别 |
+|----|------|------|------|
+| 第一级 | 果树检测 | YOLOv8s Detect | `tree` (0) |
+| 第二级 | 果实实例分割 | YOLOv8s-seg Seg | `healthy_fruit` (1), `diseased_fruit` (2) |
+
+分离的理由：
+- tree Detect：快速判断果树是否在视野中（不需要 mask）
+- fruit Seg：精确的像素级分割用于 IBVS 对准（需要 mask 质心）
+
+### 8.4 单目 RGB 边界
+
+- IBVS 只修正图像平面 X/Y，不发 Z 轴速度
+- 喷洒距离由停车位姿和观察距离参数保证（不虚构单目深度）
+- 仅当 Servo 正常、目标可信、喷洒就绪时开阀
+
+---
+
+## 9. 数据集与模型
+
+### 9.1 数据采集
+
+已于 2026-07-16 重新采集 30 张无标注 C10 模拟图像：
+
+- 6 个视角 × 5 个 seed = 30 张，`1280×720` PNG
+- 训练集：seed 50-53 (24 张)，验证集：seed 54 (6 张)
+- 每个视角来自 `camera_look_at_pose` 的真实观察位姿
+- 同名 PNG 的 SHA256 在两个数据集之间逐张一致
+- 标签目录已创建但为空（待人工标注）
+
+### 9.2 已部署权重
+
+| 文件 | SHA256 |
+|------|--------|
+| `wvcsc_tree_yolov8s.pt` | `71396df53b2ba831ac8380e70c64593967c18736efd63c3bfd8dbd6c39c9c6af` |
+| `wvcsc_fruit_yolov8s_seg.pt` | `1eb52a516227a74f4be59f7352e701ae3f6510a86891428907c24d8506d8503a` |
+
+### 9.3 YOLO 运行时
 
 ```bash
-PYTHONPATH=$PWD/wvcsc_simulation python3 -c \
-  "from wvcsc_simulation.yolo_seed_dataset import (validate_fruit_seg_dataset, validate_tree_detect_dataset, validate_matching_dataset_images); \
-   fruit='/home/robot/ultralytics-main/datasets/wvcsc_fruit_seg'; \
-   tree='/home/robot/ultralytics-main/datasets/wvcsc_tree_detect'; \
-   print(validate_fruit_seg_dataset(fruit)); \
-   print(validate_tree_detect_dataset(tree)); \
-   print(validate_matching_dataset_images(fruit, tree))"
+# 创建隔离 venv（不修改系统 Python）
+mkdir -p /home/robot/venvs
+python3 -m venv --system-site-packages /home/robot/venvs/wvcsc_yolo_ros
+PYTHONNOUSERSITE=1 /home/robot/venvs/wvcsc_yolo_ros/bin/python -m pip install \
+  --upgrade --force-reinstall --no-cache-dir \
+  -r /home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_rgb_vision/requirements-yolo-runtime.txt
 ```
 
-注意：Gazebo 11 相机需要在 source ROS 2 后再次加载 Gazebo 环境，避免 `GAZEBO_RESOURCE_PATH` 被 ROS 环境覆盖：
+---
 
-```bash
-source /opt/ros/humble/setup.bash
-source /home/robot/WVCSC_S2Z_UTB_ARM/install/setup.bash
-source /usr/share/gazebo/setup.sh
-export GAZEBO_RESOURCE_PATH=/usr/share/gazebo-11:/opt/ros/humble/share
-```
+## 10. 实机前仍需完成
 
-采集工具在机械臂成功进入 `SCANNING_TREE` 的稳定观察姿态后保存一帧。类别规范为 `tree`、`healthy_fruit`、`diseased_fruit`，后续人工标注和训练工程放在 `/home/robot/ultralytics-main/datasets`：第一级完整图训练 `tree` Detect，第二级树冠 ROI 训练健康/病害果实实例分割。观察距离默认为 `1.40m`，位于已确认的 `0.8–1.5m` 喷距范围内，并为左右两侧 MoveIt 规划保留更多可达空间。
-
-单树 Action 的目标状态机是：
-
-```text
-MOVING_TO_OBSERVE
-→ SCANNING_TREE
-→ DETECTING_FRUITS
-→ QUEUING
-→ ALIGNING
-→ SPRAYING
-→ RETURNING_TO_OBSERVE
-→ DETECTING_FRUITS / RETURNING_HOME
-```
-
-Action 已实际执行上述状态。当前候选权重已安装到 `wvcsc_rgb_vision/models/wvcsc_fruit_yolov8n_seg.pt`，SHA256 为 `a882588ceb56d22d4f1237db0f505acfcae6123dc4cc5988d48cdfdd09b59913`。该模型的 Mask mAP50 为 `0.196`、病果 Mask mAP50 为 `0.135`，`conf=0.50` 时 6 张 val 图像均无检测，因此只用于 ROS 接口接线验证，不作为可用闭环模型。
-
-仿真配置临时使用 `assume_tree_in_view:=true`：观察位姿已将单棵树置于画面中，视觉节点以完整画面作为 tree ROI，同时继续发布树确认消息。这只是临时仿真边界，合格 tree 模型就绪后必须设回 `false`。常规回归仍使用 `perception_mode:=mock`；只做 YOLO 接线验证时执行：
-
-```bash
-ros2 launch wvcsc_simulation system_sim.launch.py \
-  perception_mode:=yolo auto_start_mission:=false
-```
-
-重训后只有在病果 Mask precision、recall 均 `≥0.80`、Mask mAP50 `≥0.70`，且 `conf=0.50` 时至少检出 val 中 `4/5` 个病果，才允许进入自动任务验收。真实图像验收还需覆盖实例掩膜安全点、目标 ID 连续性、稳定帧对准、目标丢失、超时、Servo 安全锁定与逐病果复检。
-
-## 7. 保留的接口边界
-
-| 接口 | 当前职责 |
-|---|---|
-| `/uav/disease_trees` | 发布树级任务，不发布机械臂控制量 |
-| `/mission/plan` | 发布树坐标与道路作业位姿 |
-| `/navigate_to_pose` | 到达道路作业位姿 |
-| `/arm/execute_spray` | 完成一棵树的观察、处理和 HOME |
-| `/mission/status` | 发布任务、目标计数和活动 Goal 状态 |
-| `/camera/camera/color/image_raw` | 仿真/实机统一 RGB 图像 |
-| `/vision/tree_detections` | tree 候选；临时仿真模式为完整画面 ROI |
-| `/vision/fruit_detections` | YOLOv8n-seg 健康/病果实例候选 |
-| `/vision/selected_target_id` | Arm Task 选择的病果实例 ID |
-| `/vision/target` | 已选病果的掩膜安全点，供 IBVS 使用 |
-| `/vision/align_target` | 对指定 target_id 执行单个目标的 XY 对准 |
-| `/motion_control/locked` | 独立 Motion Control 广播的权威运动锁 |
-
-检测结果使用标准 `Detection2DArray`，不新增病果队列消息；队列仅在 Arm Task 内存中维护。
-
-## 8. 实机前仍需完成
-
-- C10 实机内参与手眼外参标定；
-- 相机持久设备路径、格式、曝光、时间戳和断线恢复测试；
-- 喷嘴真实工作距离、流量和启停延迟标定；
-- Alicia-M 关节速度、加速度和允许扫描范围确认；
-- 底盘停车误差和树行地图误差统计；
-- 喷洒互锁、急停、药液状态和人员安全区验证。
-
-## 9. 当前完成边界
-
-当前应完成的是：
-
-```text
-四树坐标任务
-→ 道路作业位姿导航
-→ 停稳
-→ 动态观察位姿
-→ tree Detect / fruit Seg
-→ 病果队列与逐个 XY 伺服
-→ Spray Action 与复检
-→ HOME
-→ 下一树
-```
-
-训练权重、真实 C10 标定和真实喷洒硬件仍是下一阶段工作。
-ARM_SPRAYING (一棵树开始)
-  │
-  ├─ [1] MOVING_TO_OBSERVE    → 机械臂到达左/右粗观察姿态
-  ├─ [2] SCANNING_TREE        → 启用YOLO tree类别推理，确认果树在主视野
-  ├─ [3] DETECTING_FRUITS     → 在tree ROI内执行果实实例分割
-  ├─ [4] QUEUING              → 对检测结果去重、排序、建立待喷洒队列
-  ├─ [5] ALIGNING             → IBVS逐个对准病斑（图像平面XY）
-  ├─ [6] SPRAYING             → 对准→稳定→开喷洒→计时→关喷洒
-  ├─ [7] RETURNING_TO_OBSERVE / HOME → 复检下一病果或全部完成返回HOME
+- C10 实机内参与手眼外参标定
+- 相机持久设备路径、格式、曝光、时间戳和断线恢复
+- 喷嘴真实工作距离、流量和启停延迟标定
+- Alicia-M 关节速度、加速度和扫描范围确认
+- 底盘停车误差和树行地图误差统计
+- 喷洒互锁、急停、药液状态和人员安全区

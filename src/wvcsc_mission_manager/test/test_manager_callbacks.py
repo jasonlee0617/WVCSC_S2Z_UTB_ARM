@@ -31,6 +31,9 @@ class _Logger:
     def info(self, _message):
         pass
 
+    def warn(self, _message):
+        pass
+
 
 class _Detector:
     def __init__(self, status=StopDetector.WAITING):
@@ -65,6 +68,8 @@ class _Harness:
         self._phase_started = 0.0
         self._nav_timeout = 5.0
         self._spray_timeout = 5.0
+        self._spray_progress_timeout = 3.0
+        self._spray_last_progress = 0.0
         self._auto_start = False
         self._return_home_after_finish = False
         self._manual_return_home = False
@@ -243,6 +248,24 @@ def test_inspected_without_disease_completes_the_tree():
     assert harness.core.skipped_targets == 0
 
 
+def test_partial_success_completes_the_tree():
+    harness = _Harness(MissionState.ARM_SPRAYING)
+    result = SimpleNamespace(
+        success=True,
+        error_code=ExecuteSpray.Result.PARTIAL_SUCCESS,
+        message='sprayed=1 skipped=1',
+    )
+
+    MissionManager._spray_result(
+        harness,
+        _Future(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED, result=result)),
+    )
+
+    assert harness.core.state == MissionState.MISSION_COMPLETED
+    assert harness.core.completed_targets == 1
+
+
 def test_nav_spray_and_stop_timeouts_fail_the_active_target():
     navigating = _Harness(MissionState.NAVIGATING)
     MissionManager._tick(navigating)
@@ -256,6 +279,20 @@ def test_nav_spray_and_stop_timeouts_fail_the_active_target():
     stale._stop_detector = _Detector(StopDetector.STALE)
     MissionManager._tick(stale)
     assert stale.failures == ['odom stop verification failed: stale']
+
+
+def test_spray_feedback_prevents_the_progress_watchdog_from_canceling_work():
+    harness = _Harness(MissionState.ARM_SPRAYING)
+    harness._spray_timeout = 10.0
+    harness._spray_progress_timeout = 3.0
+    harness._spray_last_progress = 4.0
+
+    MissionManager._tick(harness)
+
+    assert harness.failures == []
+    harness._spray_last_progress = 2.0
+    MissionManager._tick(harness)
+    assert harness.failures == ['spray Action made no progress']
 
 
 def test_fail_cancels_both_children_and_stops_odom_check():

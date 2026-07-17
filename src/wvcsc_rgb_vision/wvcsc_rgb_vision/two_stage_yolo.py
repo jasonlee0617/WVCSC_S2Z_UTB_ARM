@@ -1,8 +1,11 @@
 """Two-stage C10 perception: tree detection followed by fruit segmentation."""
 
 from dataclasses import dataclass
+import json
 import math
 from pathlib import Path
+import sys
+import time
 
 import cv2
 from cv_bridge import CvBridge
@@ -59,6 +62,127 @@ class Instance:
         union = self.width * self.height + other.width * other.height - intersection
         return 0.0 if union <= 0.0 else intersection / union
 
+    def distance_to(self, other):
+        return math.hypot(self.center_u - other.center_u,
+                          self.center_v - other.center_v)
+
+
+@dataclass
+class Track:
+    instance: Instance
+    missed_frames: int = 0
+
+
+def track_matches(instances, tracks, iou_threshold, center_distance_px):
+    """Return a deterministic one-to-one instance-to-track association."""
+    candidates = []
+    for instance_index, instance in enumerate(instances):
+        for track_index, track in enumerate(tracks):
+            if instance.class_name != track.instance.class_name:
+                continue
+            iou = instance.iou(track.instance)
+            distance = instance.distance_to(track.instance)
+            if iou >= iou_threshold or distance <= center_distance_px:
+                # Prefer overlap matches.  Centre distance is only the fallback
+                # for a detector jittering enough to lose box overlap.
+                candidates.append((
+                    0 if iou >= iou_threshold else 1,
+                    -iou,
+                    distance,
+                    instance_index,
+                    track_index,
+                ))
+    matches = {}
+    used_tracks = set()
+    for _kind, _iou, _distance, instance_index, track_index in sorted(candidates):
+        if instance_index in matches or track_index in used_tracks:
+            continue
+        matches[instance_index] = track_index
+        used_tracks.add(track_index)
+    return matches
+
+
+def reassociation_candidate(
+        reference, instances, iou_threshold, center_distance_px,
+        iou_margin, distance_margin_px, equivalent_aim_distance_px):
+    """Return a unique selected-target replacement, or a safe failure reason."""
+    scored = []
+    for instance in instances:
+        if instance.class_name != 'diseased_fruit':
+            continue
+        iou = instance.iou(reference)
+        distance = instance.distance_to(reference)
+        if iou >= iou_threshold or distance <= center_distance_px:
+            scored.append((instance, iou, distance))
+    overlap = sorted(
+        (item for item in scored if item[1] >= iou_threshold),
+        key=lambda item: (-item[1], item[2], item[0].target_id))
+    if overlap:
+        if (len(overlap) > 1 and
+                overlap[0][1] - overlap[1][1] < iou_margin):
+            if math.hypot(
+                    overlap[0][0].aim_u - overlap[1][0].aim_u,
+                    overlap[0][0].aim_v - overlap[1][0].aim_v) <= (
+                        equivalent_aim_distance_px):
+                return overlap[0][0], 'equivalent_reassociation'
+            return None, 'ambiguous_reassociation'
+        return overlap[0][0], 'none'
+    nearby = sorted(scored, key=lambda item: (item[2], item[0].target_id))
+    if not nearby:
+        return None, 'selected_id_missing'
+    if (len(nearby) > 1 and
+            nearby[1][2] - nearby[0][2] < distance_margin_px):
+        if math.hypot(
+                nearby[0][0].aim_u - nearby[1][0].aim_u,
+                nearby[0][0].aim_v - nearby[1][0].aim_v) <= (
+                    equivalent_aim_distance_px):
+            return nearby[0][0], 'equivalent_reassociation'
+        return None, 'ambiguous_reassociation'
+    return nearby[0][0], 'none'
+
+
+def smoothed_target(reference, target, alpha):
+    """Keep the detected geometry while damping only the spray point jitter."""
+    alpha = float(alpha)
+    return Instance(
+        target.target_id, target.class_name, target.confidence,
+        target.left, target.top, target.right, target.bottom,
+        (1.0 - alpha) * reference.aim_u + alpha * target.aim_u,
+        (1.0 - alpha) * reference.aim_v + alpha * target.aim_v,
+    )
+
+
+PERCEPTION_DEBUG_DEFAULTS = {
+    'event': 'frame',
+    'mission_id': '',
+    'tree_id': '',
+    'inference_mode': 'idle',
+    'tree_found': False,
+    'tree_confidence': 0.0,
+    'tree_bbox_xyxy': None,
+    'fruit_count': 0,
+    'diseased_count': 0,
+    'active_track_ids': [],
+    'selected_target_id': '',
+    'selected_target_found': False,
+    'target_valid': False,
+    'invalid_reason': 'not_target_mode',
+    'frame_latency_sec': -1.0,
+}
+
+
+def perception_debug_json(**values):
+    """Return a stable, machine-readable perception diagnostic payload."""
+    payload = dict(PERCEPTION_DEBUG_DEFAULTS)
+    payload.update(values)
+    return json.dumps(payload, sort_keys=True, separators=(',', ':'))
+
+
+def perception_debug_due(last_time, now, rate_hz):
+    """Limit steady-state debug output while allowing the first sample."""
+    return (last_time is None or now - last_time >=
+            1.0 / max(float(rate_hz), 1e-6) - 1e-9)
+
 
 def expanded_roi(left, top, right, bottom, image_width, image_height, padding):
     """Return a clipped detector ROI with a proportional border."""
@@ -89,8 +213,14 @@ class TwoStageYolo(Node):
         self._mission_id = ''
         self._tree_id = ''
         self._selected_target_id = ''
+        self._selected_target_reference = None
+        self._inference_mode = 'idle'
         self._next_target_number = 1
         self._tracks = []
+        self._locked_tree = None
+        self._last_perception_debug_time = None
+        self._last_perception_debug_state = None
+        self._last_target_state = None
         self._tree_model, self._fruit_model = self._load_models()
         latched = QoSProfile(
             depth=1,
@@ -103,6 +233,9 @@ class TwoStageYolo(Node):
             String, str(self.get_parameter('selected_target_topic').value),
             self._on_selected_target, 10)
         self.create_subscription(
+            String, str(self.get_parameter('inference_mode_topic').value),
+            self._on_inference_mode, latched)
+        self.create_subscription(
             Image, str(self.get_parameter('image_topic').value), self._on_image,
             qos_profile_sensor_data)
         self._tree_pub = self.create_publisher(
@@ -111,8 +244,12 @@ class TwoStageYolo(Node):
             Detection2DArray, str(self.get_parameter('fruit_detections_topic').value), 10)
         self._target_pub = self.create_publisher(
             Target2D, str(self.get_parameter('target_topic').value), 10)
-        self._debug_pub = self.create_publisher(
-            Image, str(self.get_parameter('debug_image_topic').value), 2)
+        self._tree_visualization_pub = self.create_publisher(
+            Image, str(self.get_parameter('tree_visualization_topic').value), 2)
+        self._fruit_visualization_pub = self.create_publisher(
+            Image, str(self.get_parameter('fruit_visualization_topic').value), 2)
+        self._perception_debug_pub = self.create_publisher(
+            String, str(self.get_parameter('perception_debug_topic').value), 10)
 
     def _declare_parameters(self):
         values = {
@@ -121,15 +258,25 @@ class TwoStageYolo(Node):
             'tree_detections_topic': '/vision/tree_detections',
             'fruit_detections_topic': '/vision/fruit_detections',
             'target_topic': '/vision/target',
-            'debug_image_topic': '/vision/debug_image',
-            'tree_model_path': 'wvcsc_tree_yolov8n.pt',
-            'fruit_model_path': 'wvcsc_fruit_yolov8n_seg.pt',
-            'assume_tree_in_view': False,
-            'tree_confidence': 0.50,
-            'fruit_confidence': 0.50,
+            'tree_visualization_topic': '/vision/tree_debug_image',
+            'fruit_visualization_topic': '/vision/fruit_debug_image',
+            'perception_debug_topic': '/vision/perception_debug',
+            'perception_debug_rate_hz': 5.0,
+            'tree_model_path': 'wvcsc_tree_yolov8s1.pt',
+            'fruit_model_path': 'wvcsc_fruit_yolov8s_seg1.pt',
+            'inference_mode_topic': '/vision/inference_mode',
+            'tree_confidence': 0.10,
+            'fruit_confidence': 0.10,
             'roi_padding': 0.10,
             'track_iou_threshold': 0.30,
-            'publish_debug_image': True,
+            'track_center_distance_px': 40.0,
+            'track_max_missed_frames': 3,
+            'target_reassociation_iou_margin': 0.10,
+            'target_reassociation_distance_margin_px': 8.0,
+            'target_equivalent_aim_distance_px': 8.0,
+            'target_lock_ema_alpha': 0.35,
+            'tree_lock_iou_threshold': 0.20,
+            'publish_visualization': True,
         }
         for name, default in values.items():
             self.declare_parameter(name, default)
@@ -138,39 +285,53 @@ class TwoStageYolo(Node):
         try:
             from ultralytics import YOLO
         except ImportError as error:
-            raise RuntimeError('Ultralytics is required for perception_mode:=yolo') from error
-        assume_tree = bool(self.get_parameter('assume_tree_in_view').value)
-        if assume_tree:
-            self.get_logger().warn(
-                'assume_tree_in_view=true: using the complete image as a simulated tree ROI')
+            raise RuntimeError(
+                f'YOLO runtime import failed with {sys.executable}: {error}. '
+                'Set yolo_python_executable to the isolated WVCSC YOLO environment.'
+            ) from error
         tree_path = resolve_yolo_model_path(
             self.get_parameter('tree_model_path').value)
         fruit_path = resolve_yolo_model_path(
             self.get_parameter('fruit_model_path').value)
-        paths = [fruit_path] if assume_tree else [tree_path, fruit_path]
-        missing = [path for path in paths if not Path(path).is_file()]
+        missing = [path for path in (tree_path, fruit_path) if not Path(path).is_file()]
         if missing:
             raise FileNotFoundError(f'YOLO weight files are missing: {missing}')
-        tree_model = None if assume_tree else YOLO(tree_path)
+        tree_model = YOLO(tree_path)
         fruit_model = YOLO(fruit_path)
-        if tree_model is not None:
-            validate_yolo_model(tree_model, 'detect', TREE_CLASS_NAMES)
+        validate_yolo_model(tree_model, 'detect', TREE_CLASS_NAMES)
         validate_yolo_model(fruit_model, 'segment', FRUIT_CLASS_NAMES)
         return tree_model, fruit_model
 
     def _on_status(self, message):
         active = message.state == MissionStatus.ARM_SPRAYING
-        self._mission_id = message.mission_id if active else ''
-        self._tree_id = message.current_tree_id if active else ''
+        mission_id = message.mission_id if active else ''
+        tree_id = message.current_tree_id if active else ''
+        if (mission_id, tree_id) != (self._mission_id, self._tree_id):
+            self._reset_tracking()
+        self._mission_id = mission_id
+        self._tree_id = tree_id
         if not active:
             self._selected_target_id = ''
-            self._tracks = []
+            self._selected_target_reference = None
 
     def _on_selected_target(self, message):
         self._selected_target_id = message.data.strip()
+        self._selected_target_reference = next(
+            (track.instance for track in self._tracks
+             if track.instance.target_id == self._selected_target_id), None)
+        self._last_target_state = None
+
+    def _on_inference_mode(self, message):
+        mode = message.data.strip()
+        if mode not in {'idle', 'tree', 'fruits', 'target'}:
+            self.get_logger().error(f'ignored invalid inference mode: {mode!r}')
+            return
+        if mode in {'idle', 'tree'}:
+            self._reset_tracking()
+        self._inference_mode = mode
 
     def _on_image(self, message):
-        if not self._tree_id:
+        if not self._tree_id or self._inference_mode == 'idle':
             return
         try:
             image = self._bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
@@ -179,31 +340,49 @@ class TwoStageYolo(Node):
             return
         tree = self._best_tree(image)
         self._tree_pub.publish(self._array(message, [] if tree is None else [tree]))
-        fruits = self._fruit_instances(image, tree) if tree is not None else []
-        fruits = self._assign_track_ids(fruits)
-        self._fruit_pub.publish(self._array(message, fruits))
-        self._publish_selected_target(message, fruits)
-        if bool(self.get_parameter('publish_debug_image').value):
-            self._publish_debug(message, image, tree, fruits)
+        if bool(self.get_parameter('publish_visualization').value):
+            self._publish_tree_visualization(message, image, tree)
+        fruits = []
+        if self._inference_mode in {'fruits', 'target'}:
+            ran_fruit_inference = tree is not None
+            fruits = self._assign_track_ids(
+                self._fruit_instances(image, tree) if ran_fruit_inference else [])
+            self._fruit_pub.publish(self._array(message, fruits))
+            if ran_fruit_inference and bool(self.get_parameter('publish_visualization').value):
+                self._publish_fruit_visualization(message, image, fruits)
+        target = None
+        invalid_reason = 'not_target_mode'
+        event = 'frame'
+        if self._inference_mode == 'target':
+            target, invalid_reason, event = self._publish_selected_target(message, fruits)
+        elif tree is None:
+            invalid_reason = 'no_tree'
+        elif self._inference_mode == 'fruits' and not any(
+                item.class_name == 'diseased_fruit' for item in fruits):
+            invalid_reason = 'no_diseased_fruit'
+        self._publish_perception_debug(
+            message, tree, fruits, target, invalid_reason, event)
 
     def _best_tree(self, image):
-        if self._tree_model is None:
-            height, width = image.shape[:2]
-            # ponytail: simulation assumes the observation pose already frames one tree.
-            return Instance(
-                '', 'tree', 1.0, 0.0, 0.0, float(width), float(height),
-                width / 2.0, height / 2.0)
         result = self._tree_model(
             image, verbose=False, conf=float(self.get_parameter('tree_confidence').value))[0]
         instances = self._box_instances(result, TREE_CLASS_NAMES)
         if not instances:
             return None
         height, width = image.shape[:2]
-        return max(
+        preferred = max(
             instances,
             key=lambda item: item.confidence - 0.15 * math.hypot(
                 item.center_u - width / 2.0, item.center_v - height / 2.0) / max(width, height),
         )
+        if self._locked_tree is not None:
+            locked = max(instances, key=self._locked_tree.iou)
+            if locked.iou(self._locked_tree) < float(
+                    self.get_parameter('tree_lock_iou_threshold').value):
+                return None
+            preferred = locked
+        self._locked_tree = preferred
+        return preferred
 
     def _fruit_instances(self, image, tree):
         height, width = image.shape[:2]
@@ -259,22 +438,33 @@ class TwoStageYolo(Node):
     def _assign_track_ids(self, instances):
         assigned = []
         threshold = float(self.get_parameter('track_iou_threshold').value)
-        unmatched = list(self._tracks)
-        for instance in instances:
-            matches = [track for track in unmatched
-                       if track.class_name == instance.class_name]
-            track = max(matches, key=instance.iou, default=None)
-            if track is not None and instance.iou(track) >= threshold:
-                target_id = track.target_id
-                unmatched.remove(track)
+        distance = float(self.get_parameter('track_center_distance_px').value)
+        matches = track_matches(instances, self._tracks, threshold, distance)
+        for index, instance in enumerate(instances):
+            if index in matches:
+                target_id = self._tracks[matches[index]].instance.target_id
             else:
                 target_id = f'fruit-{self._next_target_number}'
                 self._next_target_number += 1
             assigned.append(Instance(target_id, instance.class_name, instance.confidence,
                                      instance.left, instance.top, instance.right,
                                      instance.bottom, instance.aim_u, instance.aim_v))
-        self._tracks = assigned
+        retained = []
+        maximum_misses = int(self.get_parameter('track_max_missed_frames').value)
+        matched_tracks = set(matches.values())
+        for index, track in enumerate(self._tracks):
+            if index in matched_tracks:
+                continue
+            track.missed_frames += 1
+            if track.missed_frames <= maximum_misses:
+                retained.append(track)
+        self._tracks = retained + [Track(instance) for instance in assigned]
         return assigned
+
+    def _reset_tracking(self):
+        self._tracks = []
+        self._locked_tree = None
+        self._selected_target_reference = None
 
     @staticmethod
     def _array(image, instances):
@@ -298,11 +488,44 @@ class TwoStageYolo(Node):
         detection.results = [hypothesis]
         return detection
 
-    def _publish_selected_target(self, image, instances):
+    def _resolve_selected_target(self, instances):
+        """Keep an externally selected disease target stable across ID churn."""
         if not self._selected_target_id:
-            return
-        target = next((item for item in instances
-                       if item.target_id == self._selected_target_id), None)
+            return None, 'no_selected_target', 'target_invalid'
+        reference = self._selected_target_reference
+        if reference is None:
+            target = next((item for item in instances
+                           if item.target_id == self._selected_target_id
+                           and item.class_name == 'diseased_fruit'), None)
+            if target is None:
+                return None, 'selected_id_missing', 'target_invalid'
+            self._selected_target_reference = target
+            return target, 'none', 'target_valid'
+        target, reason = reassociation_candidate(
+            reference,
+            instances,
+            float(self.get_parameter('track_iou_threshold').value),
+            float(self.get_parameter('track_center_distance_px').value),
+            float(self.get_parameter('target_reassociation_iou_margin').value),
+            float(self.get_parameter(
+                'target_reassociation_distance_margin_px').value),
+            float(self.get_parameter(
+                'target_equivalent_aim_distance_px').value),
+        )
+        if target is not None:
+            target = smoothed_target(
+                reference, target,
+                self.get_parameter('target_lock_ema_alpha').value)
+            self._selected_target_reference = target
+            event = ('target_valid' if target.target_id == self._selected_target_id
+                     else 'target_reassociated')
+            return target, 'none', event
+        return None, reason, 'target_invalid'
+
+    def _publish_selected_target(self, image, instances):
+        target, invalid_reason, event = self._resolve_selected_target(instances)
+        if not self._selected_target_id:
+            return target, invalid_reason, event
         message = Target2D()
         message.header = image.header
         message.mission_id = self._mission_id
@@ -318,21 +541,102 @@ class TwoStageYolo(Node):
             message.width = target.width
             message.height = target.height
         self._target_pub.publish(message)
+        self._log_target_state(target, invalid_reason, event)
+        return target, invalid_reason, event
 
-    def _publish_debug(self, image_message, image, tree, fruits):
-        debug = image.copy()
-        for item, color in ((tree, (0, 255, 0)),):
-            if item is not None:
-                cv2.rectangle(debug, (int(item.left), int(item.top)),
-                              (int(item.right), int(item.bottom)), color, 2)
-        for fruit in fruits:
-            color = (0, 0, 255) if fruit.class_name == 'healthy_fruit' else (0, 255, 255)
-            cv2.rectangle(debug, (int(fruit.left), int(fruit.top)),
-                          (int(fruit.right), int(fruit.bottom)), color, 1)
-            cv2.circle(debug, (round(fruit.aim_u), round(fruit.aim_v)), 3, color, -1)
-        output = self._bridge.cv2_to_imgmsg(debug, encoding='bgr8')
+    def _log_target_state(self, target, invalid_reason, event):
+        state = (bool(target), invalid_reason, event)
+        if state == self._last_target_state:
+            return
+        self._last_target_state = state
+        if target is None:
+            self.get_logger().warn(
+                f'[VISION][TARGET] invalid id={self._selected_target_id} '
+                f'reason={invalid_reason}')
+            return
+        self.get_logger().info(
+            f'[VISION][TARGET] {event} id={self._selected_target_id} '
+            f'candidate={target.target_id}')
+
+    def _publish_perception_debug(
+            self, image, tree, fruits, target, invalid_reason, event):
+        now = time.monotonic()
+        state = (
+            self._inference_mode, tree is not None, self._selected_target_id,
+            target is not None, invalid_reason, event)
+        if (state == self._last_perception_debug_state and
+                not perception_debug_due(
+                    self._last_perception_debug_time, now,
+                    self.get_parameter('perception_debug_rate_hz').value)):
+            return
+        stamp = image.header.stamp
+        stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        frame_latency = -1.0
+        if stamp_sec > 0.0:
+            frame_latency = max(
+                0.0, self.get_clock().now().nanoseconds * 1e-9 - stamp_sec)
+        self._perception_debug_pub.publish(String(data=perception_debug_json(
+            event=event,
+            mission_id=self._mission_id,
+            tree_id=self._tree_id,
+            inference_mode=self._inference_mode,
+            tree_found=tree is not None,
+            tree_confidence=0.0 if tree is None else tree.confidence,
+            tree_bbox_xyxy=None if tree is None else [
+                round(tree.left), round(tree.top), round(tree.right), round(tree.bottom)],
+            fruit_count=len(fruits),
+            diseased_count=sum(
+                item.class_name == 'diseased_fruit' for item in fruits),
+            active_track_ids=sorted(
+                track.instance.target_id for track in self._tracks),
+            selected_target_id=self._selected_target_id,
+            selected_target_found=target is not None,
+            target_valid=target is not None,
+            invalid_reason=invalid_reason,
+            frame_latency_sec=frame_latency,
+        )))
+        self._last_perception_debug_time = now
+        self._last_perception_debug_state = state
+
+    @staticmethod
+    def _label(instance):
+        return (
+            f'{instance.class_name} conf={instance.confidence:.2f} '
+            f'xyxy=({round(instance.left)},{round(instance.top)},'
+            f'{round(instance.right)},{round(instance.bottom)})')
+
+    @staticmethod
+    def _annotated_image(image, instances, *, draw_diseased_aim_point=False):
+        annotated = image.copy()
+        for instance in instances:
+            color = ((0, 255, 0) if instance.class_name == 'tree' else
+                     (0, 0, 255) if instance.class_name == 'healthy_fruit' else
+                     (0, 255, 255))
+            left, top = round(instance.left), round(instance.top)
+            cv2.rectangle(annotated, (left, top),
+                          (round(instance.right), round(instance.bottom)), color, 2)
+            cv2.putText(annotated, TwoStageYolo._label(instance),
+                        (left, max(16, top - 5)), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45, color, 1, cv2.LINE_AA)
+            if draw_diseased_aim_point and instance.class_name == 'diseased_fruit':
+                cv2.circle(annotated, (round(instance.aim_u), round(instance.aim_v)),
+                           3, color, -1)
+        return annotated
+
+    def _publish_visualization(self, publisher, image_message, image):
+        output = self._bridge.cv2_to_imgmsg(image, encoding='bgr8')
         output.header = image_message.header
-        self._debug_pub.publish(output)
+        publisher.publish(output)
+
+    def _publish_tree_visualization(self, image_message, image, tree):
+        self._publish_visualization(
+            self._tree_visualization_pub, image_message,
+            self._annotated_image(image, [] if tree is None else [tree]))
+
+    def _publish_fruit_visualization(self, image_message, image, fruits):
+        self._publish_visualization(
+            self._fruit_visualization_pub, image_message,
+            self._annotated_image(image, fruits, draw_diseased_aim_point=True))
 
 
 def main():
@@ -343,5 +647,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
         rclpy.try_shutdown()

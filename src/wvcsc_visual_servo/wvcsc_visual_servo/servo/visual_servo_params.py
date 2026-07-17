@@ -10,6 +10,7 @@ class ServoRuntimeConfig:
     control_rate_hz: float
     default_timeout_sec: float
     stale_timeout_sec: float
+    invalid_target_hold_sec: float
     min_confidence: float
     coarse_tolerance_px: float
     fine_tolerance_px: float
@@ -31,6 +32,7 @@ class ServoRuntimeConfig:
             control_rate_hz=float(_value(node, 'control_rate_hz')),
             default_timeout_sec=float(_value(node, 'default_timeout_sec')),
             stale_timeout_sec=float(_value(node, 'target_stale_timeout_sec')),
+            invalid_target_hold_sec=float(_value(node, 'target_invalid_hold_sec')),
             min_confidence=float(_value(node, 'min_confidence')),
             coarse_tolerance_px=float(_value(node, 'coarse_tolerance_px')),
             fine_tolerance_px=float(_value(node, 'fine_tolerance_px')),
@@ -46,8 +48,11 @@ class ServoRuntimeConfig:
             predict_lead_sec=float(_value(node, 'predict_lead_sec')),
             max_predict_horizon_sec=float(_value(node, 'max_predict_horizon_sec')),
         )
-        if config.control_rate_hz <= 0.0 or config.stable_frames <= 0:
-            raise ValueError('control_rate_hz and stable_frames must be positive')
+        if (config.control_rate_hz <= 0.0 or config.stable_frames <= 0 or
+                config.stale_timeout_sec <= 0.0 or
+                not 0.0 <= config.invalid_target_hold_sec <= config.stale_timeout_sec):
+            raise ValueError(
+                'control_rate_hz, stable_frames and stale target timing are invalid')
         if not 0.0 < config.near_target_speed_scale <= 1.0:
             raise ValueError('near_target_speed_scale must be in (0, 1]')
         return config

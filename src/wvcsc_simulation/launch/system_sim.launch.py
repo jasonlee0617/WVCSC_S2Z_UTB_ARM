@@ -1,5 +1,6 @@
 import os
 import socket
+import subprocess
 from urllib.parse import urlparse
 
 import yaml
@@ -13,6 +14,7 @@ from launch.actions import (
     RegisterEventHandler,
     SetLaunchConfiguration,
     SetEnvironmentVariable,
+    Shutdown,
     TimerAction,
 )
 from launch.conditions import IfCondition
@@ -58,6 +60,40 @@ def ensure_fresh_gazebo_master(_context):
     return []
 
 
+def ensure_yolo_runtime(context):
+    """Fail before Gazebo starts when the selected YOLO interpreter is unusable."""
+    if LaunchConfiguration('perception_mode').perform(context) != 'yolo':
+        return []
+
+    interpreter = LaunchConfiguration('yolo_python_executable').perform(context)
+    if not os.path.isfile(interpreter) or not os.access(interpreter, os.X_OK):
+        raise RuntimeError(
+            f'YOLO Python interpreter is not executable: {interpreter}. '
+            'Set yolo_python_executable to the isolated WVCSC YOLO environment.')
+
+    environment = os.environ.copy()
+    environment['PYTHONNOUSERSITE'] = '1'
+    environment['YOLO_CONFIG_DIR'] = '/tmp/wvcsc_ultralytics'
+    os.makedirs(environment['YOLO_CONFIG_DIR'], exist_ok=True)
+    check = subprocess.run(
+        [
+            interpreter,
+            '-c',
+            'import cv_bridge, rclpy, torch, torchvision, ultralytics; '
+            'print(torch.__version__, torchvision.__version__, ultralytics.__version__)',
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if check.returncode:
+        detail = (check.stderr or check.stdout).strip()
+        raise RuntimeError(
+            f'YOLO runtime check failed for {interpreter}: {detail}')
+    return []
+
+
 def prepare_orchard(context, simulation_share, base_model_path):
     seed = LaunchConfiguration('orchard_seed').perform(context)
     ratio = LaunchConfiguration('diseased_fruit_ratio').perform(context)
@@ -90,6 +126,7 @@ def generate_launch_description():
     use_mission_manager = LaunchConfiguration('use_mission_manager')
     use_web_ui = LaunchConfiguration('use_web_ui')
     perception_mode = LaunchConfiguration('perception_mode')
+    yolo_python_executable = LaunchConfiguration('yolo_python_executable')
     auto_start_mission = LaunchConfiguration('auto_start_mission')
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
     mock_target_config = LaunchConfiguration('mock_target_config')
@@ -165,6 +202,9 @@ def generate_launch_description():
         'robot_description_kinematics': kinematics,
     }
     joint_limits = load_yaml('alicia_m_moveit_config', 'config/joint_limits.yaml')
+    robot_description_planning = {
+        'robot_description_planning': joint_limits,
+    }
     moveit_controllers = load_yaml('alicia_m_moveit_config', 'config/moveit_controllers.yaml')
     planning_pipeline = {
         'default_planning_pipeline': 'ompl',
@@ -186,7 +226,7 @@ def generate_launch_description():
         robot_description,
         robot_description_semantic,
         robot_description_kinematics,
-        joint_limits,
+        robot_description_planning,
         planning_pipeline,
         moveit_controllers,
         {
@@ -256,8 +296,8 @@ def generate_launch_description():
         'base_frame': 'alicia_base_link',
         'group_name': 'arm',
         'tool_link': 'tool0',
-        'velocity_scaling': 0.1,
-        'acceleration_scaling': 0.1,
+        'velocity_scaling': 0.2,
+        'acceleration_scaling': 0.2,
         'retime_timeout': 5.0,
         'execution_timeout': 60.0,
         'planning_time': 2.0,
@@ -297,6 +337,7 @@ def generate_launch_description():
         parameters=[
             os.path.join(arm_task_share, 'config', 'arm_task.yaml'),
             arm_task_parameters,
+            robot_description,
         ],
         condition=IfCondition(enable_arm_control), output='screen',
     )
@@ -437,13 +478,20 @@ def generate_launch_description():
     )
     yolo_vision = Node(
         package='wvcsc_rgb_vision', executable='two_stage_yolo',
+        prefix=[yolo_python_executable],
+        additional_env={
+            'PYTHONNOUSERSITE': '1',
+            'YOLO_CONFIG_DIR': '/tmp/wvcsc_ultralytics',
+        },
         parameters=[
             os.path.join(vision_share, 'config', 'vision_sim.yaml'),
             {'use_sim_time': True},
         ],
         condition=IfCondition(PythonExpression([
             "'", perception_mode, "' == 'yolo'",
-        ])), output='screen',
+        ])),
+        on_exit=[Shutdown(reason='YOLO perception node exited')],
+        output='screen',
     )
     mock_vision = Node(
         package='wvcsc_simulation', executable='mock_vision.py',
@@ -460,7 +508,7 @@ def generate_launch_description():
             robot_description_semantic,
             robot_description_kinematics,
             planning_pipeline,
-            joint_limits,
+            robot_description_planning,
             {'use_sim_time': True},
         ],
         condition=IfCondition(use_rviz), output='log',
@@ -494,7 +542,10 @@ def generate_launch_description():
         DeclareLaunchArgument('use_replay_uav', default_value='false'),
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
         DeclareLaunchArgument('use_web_ui', default_value='false'),
-        DeclareLaunchArgument('perception_mode', default_value='mock'),
+        DeclareLaunchArgument(
+            'perception_mode', default_value='yolo', choices=['mock', 'yolo']),
+        DeclareLaunchArgument(
+            'yolo_python_executable', default_value='/usr/bin/python3'),
         DeclareLaunchArgument('auto_start_mission', default_value='true'),
         DeclareLaunchArgument('return_home_after_finish', default_value='false'),
         DeclareLaunchArgument(
@@ -508,6 +559,7 @@ def generate_launch_description():
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),
         OpaqueFunction(function=ensure_fresh_gazebo_master),
+        OpaqueFunction(function=ensure_yolo_runtime),
         OpaqueFunction(
             function=prepare_orchard,
             args=[simulation_share, gazebo_model_path],

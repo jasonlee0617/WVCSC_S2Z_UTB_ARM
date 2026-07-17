@@ -5,7 +5,10 @@ scale:
   linear: 0.10
   rotational: 0.20
   joint: 0.50
-publish_period: 0.02
+# Gazebo measures a stable ~0.10 s Servo iteration.  For speed_units, this
+# period is part of the velocity-to-position increment, so it must match the
+# real cadence rather than the previously requested 0.02 s cadence.
+publish_period: 0.10
 low_latency_mode: false
 command_out_type: trajectory_msgs/JointTrajectory
 publish_joint_positions: true
@@ -17,7 +20,7 @@ move_group_name: arm
 planning_frame: alicia_base_link
 ee_frame_name: tool0
 robot_link_command_frame: camera_color_optical_frame
-incoming_command_timeout: 0.10
+incoming_command_timeout: 0.30
 num_outgoing_halt_msgs_to_publish: 5
 lower_singularity_threshold: 17.0
 hard_stop_singularity_threshold: 30.0
