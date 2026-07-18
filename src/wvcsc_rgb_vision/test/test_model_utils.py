@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import pytest
+from std_msgs.msg import Header
 from types import SimpleNamespace
 
 from wvcsc_rgb_vision.model_utils import (
@@ -14,6 +15,7 @@ from wvcsc_rgb_vision.two_stage_yolo import (
     Instance,
     Track,
     TwoStageYolo,
+    deduplicate_instances,
     expanded_roi,
     perception_debug_due,
     perception_debug_json,
@@ -85,6 +87,51 @@ def test_selected_target_is_reassociated_when_its_tracker_id_changes():
     assert node._selected_target_reference == target
 
 
+def test_repeated_selected_target_message_preserves_geometric_reference():
+    reference = Instance(
+        'fruit-9', 'diseased_fruit', 0.9, 12, 10, 32, 30, 22, 20)
+    node = object.__new__(TwoStageYolo)
+    node._selected_target_id = 'fruit-1'
+    node._selected_target_reference = reference
+    node._tracks = []
+    node._last_target_state = ('target_valid',)
+
+    node._on_selected_target(SimpleNamespace(data='fruit-1'))
+
+    assert node._selected_target_reference is reference
+    assert node._last_target_state == ('target_valid',)
+
+
+def test_candidate_id_churn_keeps_the_published_logical_target_id():
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    reference = Instance(
+        'fruit-1', 'diseased_fruit', 0.9, 10, 10, 30, 30, 20, 20)
+    node = _target_selection_node('fruit-1', reference)
+    node._mission_id = 'mission-1'
+    node._tree_id = 'tree-1'
+    node._target_pub = Publisher()
+    node._log_target_state = lambda *_args: None
+    image = SimpleNamespace(
+        header=Header(), width=1280, height=720)
+
+    for candidate_id, left in [('fruit-9', 12.0), ('fruit-10', 14.0)]:
+        candidate = Instance(
+            candidate_id, 'diseased_fruit', 0.9,
+            left, 10.0, left + 20.0, 30.0, left + 10.0, 20.0)
+        target, reason, _event = node._publish_selected_target(
+            image, [candidate])
+        assert target.target_id == candidate_id
+        assert reason == 'none'
+        assert node._target_pub.messages[-1].target_id == 'fruit-1'
+        assert node._target_pub.messages[-1].valid
+
+
 def test_selected_target_refuses_ambiguous_reassociation():
     reference = Instance('fruit-1', 'diseased_fruit', 0.9, 10, 10, 30, 30, 20, 20)
     node = _target_selection_node('fruit-1', reference)
@@ -145,11 +192,13 @@ def test_track_matching_is_one_to_one_when_detector_order_changes():
 
 def test_perception_debug_payload_has_the_stable_schema_and_rate_limit():
     payload = json.loads(perception_debug_json(
-        event='target_valid', target_valid=True, selected_target_id='fruit-1'))
+        event='target_valid', target_valid=True, selected_target_id='fruit-1',
+        candidate_target_id='fruit-9'))
 
     assert set(payload) == set(PERCEPTION_DEBUG_DEFAULTS)
     assert payload['event'] == 'target_valid'
     assert payload['target_valid'] is True
+    assert payload['candidate_target_id'] == 'fruit-9'
     assert perception_debug_due(None, 1.0, 5.0)
     assert not perception_debug_due(1.0, 1.19, 5.0)
     assert perception_debug_due(1.0, 1.20, 5.0)
@@ -166,9 +215,70 @@ def test_mask_safe_point_is_inside_the_instance_polygon():
     assert 20 <= v <= 40
 
 
-def test_visualization_labels_include_class_confidence_and_xyxy():
-    instance = Instance('', 'diseased_fruit', 0.937, 10.4, 20.6, 30.4, 40.6, 20.0, 30.0)
-    assert TwoStageYolo._label(instance) == 'diseased_fruit conf=0.94 xyxy=(10,21,30,41)'
+def test_deduplication_keeps_highest_confidence_same_class_instance():
+    best = Instance(
+        '', 'diseased_fruit', 0.80, 10, 10, 30, 30, 20, 20)
+    overlapping = Instance(
+        '', 'diseased_fruit', 0.60, 12, 12, 32, 32, 22, 22)
+    near_center = Instance(
+        '', 'diseased_fruit', 0.70, 17, 17, 37, 37, 27, 27)
+
+    assert deduplicate_instances(
+        [overlapping, near_center, best]) == [best]
+
+
+def test_fruit_inference_uses_stricter_nms_before_custom_deduplication():
+    calls = []
+
+    class Model:
+        def __call__(self, _image, **kwargs):
+            calls.append(kwargs)
+            return [object()]
+
+    stronger = Instance(
+        '', 'diseased_fruit', 0.80, 10, 10, 30, 30, 20, 20)
+    weaker = Instance(
+        '', 'diseased_fruit', 0.50, 12, 12, 32, 32, 22, 22)
+    node = object.__new__(TwoStageYolo)
+    node._fruit_model = Model()
+    node.get_parameter = lambda name: SimpleNamespace(value={
+        'roi_padding': 0.0,
+        'fruit_confidence': 0.10,
+    }[name])
+    node._seg_instances = lambda *_args: [weaker, stronger]
+    tree = Instance('', 'tree', 1.0, 0, 0, 64, 64, 32, 32)
+
+    result = node._fruit_instances(
+        np.zeros((64, 64, 3), dtype=np.uint8), tree)
+
+    assert calls == [{'verbose': False, 'conf': 0.10, 'iou': 0.45}]
+    assert result == [stronger]
+
+
+def test_deduplication_drops_ambiguous_cross_class_instance():
+    healthy = Instance(
+        '', 'healthy_fruit', 0.61, 10, 10, 30, 30, 20, 20)
+    diseased = Instance(
+        '', 'diseased_fruit', 0.65, 11, 11, 31, 31, 21, 21)
+
+    assert deduplicate_instances([healthy, diseased]) == []
+
+
+def test_deduplication_keeps_clear_cross_class_winner():
+    healthy = Instance(
+        '', 'healthy_fruit', 0.40, 10, 10, 30, 30, 20, 20)
+    diseased = Instance(
+        '', 'diseased_fruit', 0.65, 11, 11, 31, 31, 21, 21)
+
+    assert deduplicate_instances([healthy, diseased]) == [diseased]
+
+
+def test_visualization_labels_include_id_class_and_confidence():
+    instance = Instance(
+        'fruit-7', 'diseased_fruit', 0.937,
+        10.4, 20.6, 30.4, 40.6, 20.0, 30.0)
+    assert TwoStageYolo._label(instance) == (
+        'fruit-7 diseased_fruit 0.94')
 
 
 def test_fruit_visualization_draws_boxes_labels_and_only_diseased_aim_points(monkeypatch):
@@ -179,20 +289,46 @@ def test_fruit_visualization_draws_boxes_labels_and_only_diseased_aim_points(mon
                         lambda *_args: calls['labels'].append(_args[1:]))
     monkeypatch.setattr('wvcsc_rgb_vision.two_stage_yolo.cv2.circle',
                         lambda *_args: calls['circles'].append(_args[1:]))
-    healthy = Instance('', 'healthy_fruit', 0.9, 1, 2, 11, 12, 6, 7)
-    diseased = Instance('', 'diseased_fruit', 0.8, 20, 21, 40, 41, 30, 31)
+    healthy = Instance(
+        'fruit-1', 'healthy_fruit', 0.9, 1, 2, 11, 12, 6, 7)
+    diseased = Instance(
+        'fruit-2', 'diseased_fruit', 0.8, 20, 21, 40, 41, 30, 31)
 
     rendered = TwoStageYolo._annotated_image(
         np.zeros((64, 64, 3), dtype=np.uint8), [healthy, diseased],
         draw_diseased_aim_point=True)
 
     assert rendered.shape == (64, 64, 3)
-    assert [entry[0:2] for entry in calls['rectangles']] == [((1, 2), (11, 12)), ((20, 21), (40, 41))]
+    assert [entry[0:2] for entry in calls['rectangles']] == [
+        ((1, 2), (11, 12)), ((20, 21), (40, 41))]
     assert [entry[0] for entry in calls['labels']] == [
-        'healthy_fruit conf=0.90 xyxy=(1,2,11,12)',
-        'diseased_fruit conf=0.80 xyxy=(20,21,40,41)',
+        'fruit-1 healthy_fruit 0.90',
+        'fruit-2 diseased_fruit 0.80',
     ]
     assert [entry[0] for entry in calls['circles']] == [(30, 31)]
+
+
+def test_selected_target_has_a_separate_visual_highlight(monkeypatch):
+    rectangles = []
+    circles = []
+    monkeypatch.setattr(
+        'wvcsc_rgb_vision.two_stage_yolo.cv2.rectangle',
+        lambda *_args: rectangles.append(_args[1:]))
+    monkeypatch.setattr(
+        'wvcsc_rgb_vision.two_stage_yolo.cv2.putText',
+        lambda *_args: None)
+    monkeypatch.setattr(
+        'wvcsc_rgb_vision.two_stage_yolo.cv2.circle',
+        lambda *_args: circles.append(_args[1:]))
+    selected = Instance(
+        'fruit-2', 'diseased_fruit', 0.8, 20, 21, 40, 41, 30, 31)
+
+    TwoStageYolo._annotated_image(
+        np.zeros((64, 64, 3), dtype=np.uint8), [selected],
+        draw_diseased_aim_point=True, selected_target_id='fruit-2')
+
+    assert rectangles[0][-1] == 4
+    assert circles[0][1] == 5
 
 
 def test_visualization_images_keep_the_camera_header():
@@ -229,7 +365,9 @@ def test_stage_visualizations_follow_the_inference_mode():
     fruit = Instance('fruit-1', 'diseased_fruit', 0.8, 10, 12, 20, 24, 15, 18)
     node = object.__new__(TwoStageYolo)
     node._tree_id = 'tree_01'
-    node._bridge = SimpleNamespace(imgmsg_to_cv2=lambda *_args, **_kwargs: np.zeros((64, 64, 3), dtype=np.uint8))
+    node._bridge = SimpleNamespace(
+        imgmsg_to_cv2=lambda *_args, **_kwargs: np.zeros(
+            (64, 64, 3), dtype=np.uint8))
     node._tree_pub = Publisher()
     node._fruit_pub = Publisher()
     node._best_tree = lambda _image: tree

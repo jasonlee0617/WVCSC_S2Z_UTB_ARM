@@ -17,7 +17,8 @@ from wvcsc_interfaces.action import AlignTarget
 from wvcsc_interfaces.msg import Target2D
 
 from .controllers.pid_controller import PIDController3D, ServoControlConfig
-from .servo.command_limiter import limit_xy_norm, slew
+from .servo.alignment_progress import AlignmentProgress
+from .servo.command_limiter import bounded_control_dt, limit_xy_norm, slew
 from .servo.debug_snapshot import debug_json, debug_publish_due
 from .servo.servo_status_policy import ServoStatusAction, ServoStatusPolicy
 from .servo.target_estimator import SimpleTargetPredictor2D
@@ -47,6 +48,12 @@ class VisualServo(Node):
             self.get_parameter('servo_status_halt_codes').value,
             self.get_parameter('servo_status_passthrough_codes').value)
         self._predictor = SimpleTargetPredictor2D()
+        self._progress = AlignmentProgress(
+            self._config.fine_tolerance_px,
+            self._config.stable_duration_sec,
+            self._config.progress_window_sec,
+            self._config.min_progress_px,
+        )
         self._group = ReentrantCallbackGroup()
         self._lock = threading.Lock()
         self._busy = False
@@ -54,6 +61,8 @@ class VisualServo(Node):
         self._active_tree = ''
         self._active_target = ''
         self._latest = None
+        self._last_valid_target = None
+        self._target_unavailable_since = None
         self._initial_error_px = None
         self._camera = None
         self._stable_frames = 0
@@ -116,30 +125,33 @@ class VisualServo(Node):
             'start_servo_service': '/servo_node/start_servo',
             'stop_servo_service': '/servo_node/stop_servo',
             'command_frame': 'camera_color_optical_frame',
-            'control_rate_hz': 10.0,
+            'control_rate_hz': 20.0,
             'default_timeout_sec': 8.0,
             'min_goal_timeout_sec': 0.5,
             'max_goal_timeout_sec': 30.0,
-            'target_stale_timeout_sec': 2.0,
+            'target_stale_timeout_sec': 0.75,
             'target_invalid_hold_sec': 0.25,
             'min_confidence': 0.10,
             'coarse_tolerance_px': 20.0,
-            'fine_tolerance_px': 8.0,
+            'fine_tolerance_px': 4.0,
             'stable_frames': 10,
+            'stable_duration_sec': 0.50,
+            'progress_window_sec': 4.0,
+            'min_progress_px': 1.0,
             'desired_offset_u_px': 0.0,
             'desired_offset_v_px': 28.0,
             'fallback_fx': 507.872735,
             'fallback_fy': 507.872735,
             'require_camera_info': True,
-            'pid_kp_xy': 0.10,
+            'pid_kp_xy': 1.00,
             'pid_ki_xy': 0.0,
-            'pid_kd_xy': 0.01,
+            'pid_kd_xy': 0.005,
             'pid_d_ema_alpha': 0.65,
             'derivative_clip_xy': 2.0,
             'integral_limit_xy': 0.10,
-            'max_linear_speed': 0.04,
-            'max_linear_acceleration': 0.25,
-            'near_target_speed_scale': 0.35,
+            'max_linear_speed': 0.08,
+            'max_linear_acceleration': 0.60,
+            'near_target_speed_scale': 1.0,
             'warning_speed_scale': 0.35,
             'command_sign_x': 1.0,
             'command_sign_y': 1.0,
@@ -201,12 +213,16 @@ class VisualServo(Node):
                 and message.confidence >= self._config.min_confidence
                 and message.image_width > 0 and message.image_height > 0)
             if not valid:
+                if self._target_unavailable_since is None:
+                    self._target_unavailable_since = now
+                    self._predictor.reset()
                 latest = self._latest
                 if (latest is not None and latest.get('valid') and
                         now - latest['received'] <= self._config.invalid_target_hold_sec):
                     # A single ambiguous/low-confidence segmentation frame must
                     # stop motion, but it must not erase a fresh target lock.
                     self._stable_frames = 0
+                    self._progress.reset_stable()
                     self._latest = {
                         **latest,
                         'hold': True,
@@ -215,13 +231,16 @@ class VisualServo(Node):
                     self._publish_zero()
                     return
                 self._stable_frames = 0
+                self._progress.reset_stable()
                 self._latest = {
                     'valid': False,
                     'received': now,
                     'confidence': float(message.confidence),
+                    'hold': False,
                 }
-                self._predictor.reset()
                 return
+            reacquired = self._target_unavailable_since is not None
+            self._target_unavailable_since = None
             desired_u = (
                 message.image_width / 2.0 + self._config.desired_offset_u_px)
             desired_v = (
@@ -237,7 +256,8 @@ class VisualServo(Node):
                 fy = float(self.get_parameter('fallback_fy').value)
             error = np.array([error_u / fx, error_v / fy], dtype=float)
             velocity = np.zeros(2, dtype=float)
-            if self._latest is not None and self._latest.get('valid'):
+            if (not reacquired and self._latest is not None
+                    and self._latest.get('valid')):
                 dt = now - self._latest['received']
                 if 1e-3 < dt < 0.5:
                     velocity = (error - self._latest['error']) / dt
@@ -247,6 +267,9 @@ class VisualServo(Node):
                 self._stable_frames += 1
             else:
                 self._stable_frames = 0
+            if reacquired:
+                self._progress.restart_progress(error_u, error_v, now)
+            self._progress.update(error_u, error_v, now)
             self._latest = {
                 'valid': True,
                 'received': now,
@@ -257,6 +280,7 @@ class VisualServo(Node):
                 'stable_frames': self._stable_frames,
                 'hold': False,
             }
+            self._last_valid_target = dict(self._latest)
 
     def _on_joint_state(self, message):
         with self._lock:
@@ -292,6 +316,8 @@ class VisualServo(Node):
             self._active_tree = request.tree_id
             self._active_target = request.target_id
             self._latest = None
+            self._last_valid_target = None
+            self._target_unavailable_since = started
             self._initial_error_px = None
             self._stable_frames = 0
             self._last_command = (0.0, 0.0)
@@ -305,21 +331,36 @@ class VisualServo(Node):
             self._last_debug_publish = None
             self._predictor.reset()
             self._controller.reset()
+            self._progress.reset()
         servo_started = False
+        stop_attempted = False
+        stop_result = (True, '')
         result = AlignTarget.Result()
 
-        def stop_servo():
-            nonlocal servo_started
+        def stop_servo(reason):
+            nonlocal servo_started, stop_attempted, stop_result
+            if stop_attempted:
+                return stop_result
             self._publish_zero_count()
             if not servo_started:
                 return True, ''
-            stopped, stop_message = self._call_trigger(self._stop_client)
+            stop_attempted = True
+            stop_started = time.monotonic()
+            stop_result = self._call_trigger(self._stop_client)
+            stopped, stop_message = stop_result
+            stop_elapsed = time.monotonic() - stop_started
+            log = self.get_logger().info if stopped else self.get_logger().error
+            log(
+                f'[VISUAL_SERVO] stop reason={reason} success={stopped} '
+                f'elapsed={stop_elapsed:.3f}s message={stop_message}')
             if stopped:
                 servo_started = False
-            return stopped, stop_message
+            return stop_result
 
         def abort_with_stop(code, message, latest=None):
-            stopped, stop_message = stop_servo()
+            self.get_logger().warn(
+                f'[VISUAL_SERVO] alignment_result code={code} message={message}')
+            stopped, stop_message = stop_servo('alignment_abort')
             if not stopped:
                 code = AlignTarget.Result.SERVO_SAFETY_STOP
                 message = f'MoveIt Servo stop failed: {stop_message}'
@@ -343,7 +384,7 @@ class VisualServo(Node):
             last_control_tick = time.monotonic()
             while rclpy.ok():
                 if goal_handle.is_cancel_requested:
-                    stopped, stop_message = stop_servo()
+                    stopped, stop_message = stop_servo('goal_canceled')
                     if not stopped:
                         return self._abort(
                             goal_handle, result,
@@ -364,9 +405,11 @@ class VisualServo(Node):
                     stop_message = self._stop_message
                     camera_ready = self._camera is not None
                     status = self._servo_status
+                    unavailable_since = self._target_unavailable_since
                 if stop_code is not None:
                     return abort_with_stop(
-                        stop_code, stop_message, latest)
+                        stop_code, stop_message,
+                        self._terminal_target_snapshot(now, latest))
                 if now - started >= timeout:
                     code = (
                         AlignTarget.Result.TARGET_STALE
@@ -375,23 +418,50 @@ class VisualServo(Node):
                     return abort_with_stop(
                         code,
                         'target unavailable/stale' if code == AlignTarget.Result.TARGET_STALE
-                        else 'visual alignment timed out', latest)
-                fresh = (
+                        else 'visual alignment timed out',
+                        self._terminal_target_snapshot(now, latest))
+                target_fresh = (
                     latest is not None and latest.get('valid')
                     and not latest.get('hold')
-                    and now - latest['received'] <= self._config.stale_timeout_sec
-                    and (camera_ready or not bool(
-                        self.get_parameter('require_camera_info').value)))
-                if not fresh:
+                    and now - latest['received'] <= self._config.stale_timeout_sec)
+                if not target_fresh:
+                    if unavailable_since is None:
+                        unavailable_since = (
+                            started if latest is None
+                            else float(latest.get('received', now)))
+                        with self._lock:
+                            if self._target_unavailable_since is None:
+                                self._target_unavailable_since = unavailable_since
+                    unavailable_duration = max(0.0, now - unavailable_since)
                     self._publish_zero()
                     self._publish_feedback(goal_handle, latest)
                     self._publish_debug(
                         'target_hold' if latest is not None and latest.get('hold')
                         else 'waiting_target')
+                    if unavailable_duration >= self._config.stale_timeout_sec:
+                        return abort_with_stop(
+                            AlignTarget.Result.TARGET_STALE,
+                            'target continuously unavailable for '
+                            f'{unavailable_duration:.2f}s',
+                            self._terminal_target_snapshot(now, latest))
                     time.sleep(period)
                     continue
-                if latest['stable_frames'] >= self._config.stable_frames:
-                    stopped, stop_message = stop_servo()
+                if not (
+                        camera_ready or not bool(
+                            self.get_parameter('require_camera_info').value)):
+                    self._publish_zero()
+                    self._publish_feedback(goal_handle, latest)
+                    self._publish_debug('waiting_camera_info')
+                    time.sleep(period)
+                    continue
+                with self._lock:
+                    aligned = self._progress.aligned
+                    stalled = self._progress.stalled(now)
+                if aligned:
+                    self.get_logger().info(
+                        '[VISUAL_SERVO] alignment_result '
+                        f'code={AlignTarget.Result.OK} message=target aligned')
+                    stopped, stop_message = stop_servo('target_aligned')
                     if not stopped:
                         return self._abort(
                             goal_handle, result,
@@ -408,9 +478,15 @@ class VisualServo(Node):
                         'aligned', result_code=result.error_code,
                         message=result.message, force=True)
                     return result
+                if stalled:
+                    return abort_with_stop(
+                        AlignTarget.Result.TIMEOUT,
+                        'visual alignment stalled',
+                        self._terminal_target_snapshot(now, latest))
                 control_now = time.monotonic()
                 control_dt = max(0.0, control_now - last_control_tick)
-                dt = max(1e-3, min(0.05, control_dt))
+                dt = bounded_control_dt(
+                    control_dt, self._config.control_rate_hz)
                 last_control_tick = control_now
                 self._last_control_dt = control_dt
                 self._control_cycles += 1
@@ -447,11 +523,12 @@ class VisualServo(Node):
                 time.sleep(period)
             return abort_with_stop(
                 AlignTarget.Result.CANCELED,
-                'ROS shutdown during visual alignment')
+                'ROS shutdown during visual alignment',
+                self._terminal_target_snapshot(self._now()))
         finally:
-            self._publish_zero_count()
-            if servo_started:
-                stopped, stop_message = self._call_trigger(self._stop_client)
+            self._publish_zero()
+            if servo_started and not stop_attempted:
+                stopped, stop_message = stop_servo('execute_cleanup')
                 if not stopped:
                     self.get_logger().error(
                         f'[VISUAL_SERVO] final stop failed: {stop_message}')
@@ -461,6 +538,8 @@ class VisualServo(Node):
                 self._active_tree = ''
                 self._active_target = ''
                 self._latest = None
+                self._last_valid_target = None
+                self._target_unavailable_since = None
                 self._alignment_started = None
 
     def _publish_feedback(self, goal_handle, latest):
@@ -475,7 +554,9 @@ class VisualServo(Node):
         goal_handle.publish_feedback(feedback)
 
     def _abort(self, goal_handle, result, code, message, latest=None):
-        self._publish_zero_count()
+        self._publish_zero()
+        if latest is None:
+            latest = self._terminal_target_snapshot(self._now())
         result.success = False
         result.error_code = code
         result.message = message
@@ -492,8 +573,11 @@ class VisualServo(Node):
         }.get(code, 'aborted')
         age = -1.0 if latest is None else max(
             0.0, self._now() - float(latest.get('received', self._now())))
+        unavailable = 0.0 if latest is None else float(
+            latest.get('target_unavailable_sec', 0.0))
         self.get_logger().warn(
             f'[VISUAL_SERVO] {event} code={code} target_age={age:.2f}s '
+            f'target_unavailable={unavailable:.2f}s '
             f'initial_error_px={self._initial_error_px} '
             f'error_px=({result.final_error_u:.1f},{result.final_error_v:.1f}) '
             f'stable_frames={0 if latest is None else latest.get("stable_frames", 0)} '
@@ -504,8 +588,32 @@ class VisualServo(Node):
             f'control_cycles={self._control_cycles} control_dt={self._last_control_dt:.3f}s '
             f'servo_status={self._servo_status} message={message}')
         self._publish_debug(
-            event, result_code=code, message=message, force=True)
+            event, result_code=code, message=message, force=True,
+            target_snapshot=latest)
         return result
+
+    def _terminal_target_snapshot(self, now, latest=None):
+        """Freeze the last useful target before the stop burst can age it."""
+        with self._lock:
+            current = (
+                dict(self._latest) if latest is None and self._latest is not None
+                else (dict(latest) if latest is not None else None))
+            last_valid = (
+                dict(self._last_valid_target)
+                if self._last_valid_target is not None else None)
+            unavailable_since = self._target_unavailable_since
+        snapshot = current if current is not None and current.get('valid') else last_valid
+        if snapshot is None:
+            snapshot = current
+        if snapshot is not None:
+            snapshot = dict(snapshot)
+            snapshot['terminal_target_valid'] = bool(
+                current is not None and current.get('valid')
+                and not current.get('hold'))
+            snapshot['target_unavailable_sec'] = (
+                0.0 if unavailable_since is None
+                else max(0.0, float(now) - float(unavailable_since)))
+        return snapshot
 
     def _call_trigger(self, client):
         timeout = float(self.get_parameter('service_timeout_sec').value)
@@ -536,11 +644,14 @@ class VisualServo(Node):
         self._publish_twist(0.0, 0.0)
 
     def _publish_zero_count(self):
+        period = 1.0 / self._config.control_rate_hz
         for _index in range(int(self.get_parameter('zero_command_count').value)):
             self._publish_zero()
-            time.sleep(0.005)
+            time.sleep(period)
 
-    def _publish_debug(self, event, result_code=-1, message='', force=False):
+    def _publish_debug(
+            self, event, result_code=-1, message='', force=False,
+            target_snapshot=None):
         wall_now = time.monotonic()
         rate = float(self.get_parameter('debug_rate_hz').value)
         with self._lock:
@@ -549,12 +660,24 @@ class VisualServo(Node):
                 return
             self._last_debug_publish = wall_now
             now = self._now()
-            latest = dict(self._latest) if self._latest is not None else None
+            latest = (
+                dict(target_snapshot) if target_snapshot is not None
+                else (dict(self._latest) if self._latest is not None else None))
+            last_valid = (
+                dict(target_snapshot) if target_snapshot is not None
+                else (
+                    dict(self._last_valid_target)
+                    if self._last_valid_target is not None else None))
+            unavailable_since = self._target_unavailable_since
             started = self._alignment_started
             command = self._last_command
             status = self._servo_status
             confidence = 0.0 if latest is None else float(
                 latest.get('confidence', 0.0))
+            stable_duration = self._progress.stable_duration
+            progress_stalled = bool(
+                latest is not None and latest.get('valid')
+                and not latest.get('hold') and self._progress.stalled(now))
             if not math.isfinite(confidence):
                 confidence = 0.0
             payload = debug_json(
@@ -564,17 +687,33 @@ class VisualServo(Node):
                 target_id=self._active_target,
                 elapsed_sec=0.0 if started is None else max(0.0, now - started),
                 camera_ready=self._camera is not None,
-                target_valid=bool(latest is not None and latest.get('valid')),
+                target_valid=bool(
+                    latest is not None and latest.get(
+                        'terminal_target_valid', latest.get('valid'))),
                 target_age_sec=(
                     -1.0 if latest is None else
                     max(0.0, now - float(latest['received']))),
+                target_unavailable_sec=(
+                    float(latest.get('target_unavailable_sec', 0.0))
+                    if target_snapshot is not None and latest is not None
+                    else (
+                        0.0 if unavailable_since is None else
+                        max(0.0, now - float(unavailable_since)))),
                 confidence=confidence,
                 error_u_px=(
                     0.0 if latest is None else float(latest.get('error_u', 0.0))),
                 error_v_px=(
                     0.0 if latest is None else float(latest.get('error_v', 0.0))),
+                last_valid_error_u_px=(
+                    0.0 if last_valid is None
+                    else float(last_valid.get('error_u', 0.0))),
+                last_valid_error_v_px=(
+                    0.0 if last_valid is None
+                    else float(last_valid.get('error_v', 0.0))),
                 stable_frames=(
                     0 if latest is None else int(latest.get('stable_frames', 0))),
+                stable_duration_sec=float(stable_duration),
+                progress_stalled=bool(progress_stalled),
                 command_x_mps=float(command[0]),
                 command_y_mps=float(command[1]),
                 control_dt_sec=float(self._last_control_dt),

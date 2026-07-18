@@ -26,7 +26,8 @@ from launch.substitutions import (
     LaunchConfiguration,
     PythonExpression,
 )
-from launch_ros.actions import Node
+from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.descriptions import ComposableNode
 from launch_ros.parameter_descriptions import ParameterValue
 from wvcsc_simulation.orchard_assets import generate_orchard_assets
 
@@ -60,11 +61,8 @@ def ensure_fresh_gazebo_master(_context):
     return []
 
 
-def ensure_yolo_runtime(context):
-    """Fail before Gazebo starts when the selected YOLO interpreter is unusable."""
-    if LaunchConfiguration('perception_mode').perform(context) != 'yolo':
-        return []
-
+def check_yolo_runtime(context):
+    """Fail before Gazebo starts when the YOLO interpreter is unusable."""
     interpreter = LaunchConfiguration('yolo_python_executable').perform(context)
     if not os.path.isfile(interpreter) or not os.access(interpreter, os.X_OK):
         raise RuntimeError(
@@ -125,7 +123,6 @@ def generate_launch_description():
     use_replay_uav = LaunchConfiguration('use_replay_uav')
     use_mission_manager = LaunchConfiguration('use_mission_manager')
     use_web_ui = LaunchConfiguration('use_web_ui')
-    perception_mode = LaunchConfiguration('perception_mode')
     yolo_python_executable = LaunchConfiguration('yolo_python_executable')
     auto_start_mission = LaunchConfiguration('auto_start_mission')
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
@@ -240,6 +237,15 @@ def generate_launch_description():
             'publish_transforms_updates': True,
         },
     ]
+    # MoveGroup keeps KDL for global planning.  MoveIt Servo deliberately does
+    # not receive robot_description_kinematics, so Humble uses its fast inverse
+    # Jacobian path instead of running a numerical IK search every control tick.
+    servo_moveit = [
+        robot_description,
+        robot_description_semantic,
+        robot_description_planning,
+        {'use_sim_time': True},
+    ]
     servo_parameters = load_yaml(
         'wvcsc_visual_servo', 'config/moveit_servo.yaml')
 
@@ -341,11 +347,28 @@ def generate_launch_description():
         ],
         condition=IfCondition(enable_arm_control), output='screen',
     )
-    moveit_servo = Node(
-        package='moveit_servo', executable='servo_node_main',
-        name='servo_node',
-        parameters=[*common_moveit, {'moveit_servo': servo_parameters}],
-        condition=IfCondition(enable_arm_control), output='screen',
+    # Keep Servo composable and API-compatible. Humble still puts its internal
+    # callbacks in one mutually-exclusive group, so the Gazebo profile disables
+    # the blocking online collision timer in moveit_servo.yaml.
+    moveit_servo = ComposableNodeContainer(
+        name='moveit_servo_container',
+        namespace='',
+        package='rclcpp_components',
+        executable='component_container_mt',
+        composable_node_descriptions=[
+            ComposableNode(
+                package='moveit_servo',
+                plugin='moveit_servo::ServoNode',
+                name='servo_node',
+                parameters=[
+                    *servo_moveit,
+                    {'moveit_servo': servo_parameters},
+                    {'butterworth_filter_coeff': 1.05},
+                ],
+            ),
+        ],
+        condition=IfCondition(enable_arm_control),
+        output='screen',
     )
     visual_servo = Node(
         package='wvcsc_visual_servo', executable='visual_servo',
@@ -487,18 +510,8 @@ def generate_launch_description():
             os.path.join(vision_share, 'config', 'vision_sim.yaml'),
             {'use_sim_time': True},
         ],
-        condition=IfCondition(PythonExpression([
-            "'", perception_mode, "' == 'yolo'",
-        ])),
         on_exit=[Shutdown(reason='YOLO perception node exited')],
         output='screen',
-    )
-    mock_vision = Node(
-        package='wvcsc_simulation', executable='mock_vision.py',
-        parameters=[{'use_sim_time': True}],
-        condition=IfCondition(PythonExpression([
-            "'", perception_mode, "' == 'mock'",
-        ])), output='screen',
     )
     rviz = Node(
         package='rviz2', executable='rviz2',
@@ -518,7 +531,7 @@ def generate_launch_description():
         on_exit=[
             unpause,
             TimerAction(period=0.5, actions=[vehicle_sim]),
-            TimerAction(period=0.75, actions=[yolo_vision, mock_vision]),
+            TimerAction(period=0.75, actions=[yolo_vision]),
             TimerAction(period=1.0, actions=[joint_state_controller]),
             TimerAction(period=2.0, actions=[map_server, map_lifecycle]),
             TimerAction(period=3.0, actions=[nav2]),
@@ -543,9 +556,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
         DeclareLaunchArgument('use_web_ui', default_value='false'),
         DeclareLaunchArgument(
-            'perception_mode', default_value='yolo', choices=['mock', 'yolo']),
-        DeclareLaunchArgument(
-            'yolo_python_executable', default_value='/usr/bin/python3'),
+            'yolo_python_executable', default_value='/home/robot/venvs/wvcsc_yolo_ros/bin/python'),
         DeclareLaunchArgument('auto_start_mission', default_value='true'),
         DeclareLaunchArgument('return_home_after_finish', default_value='false'),
         DeclareLaunchArgument(
@@ -559,7 +570,7 @@ def generate_launch_description():
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),
         OpaqueFunction(function=ensure_fresh_gazebo_master),
-        OpaqueFunction(function=ensure_yolo_runtime),
+        OpaqueFunction(function=check_yolo_runtime),
         OpaqueFunction(
             function=prepare_orchard,
             args=[simulation_share, gazebo_model_path],

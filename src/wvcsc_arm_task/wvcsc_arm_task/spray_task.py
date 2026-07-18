@@ -1,6 +1,6 @@
 """One-tree MoveIt observation, RGB alignment and spray coordinator."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 import threading
@@ -18,11 +18,13 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection2DArray
 from wvcsc_interfaces.action import AlignTarget, ExecuteSpray, Spray
+from wvcsc_interfaces.msg import Target2D
 
 from .motion_state import MotionControlState
 from .node_parameters import create_alicia_moveit
-from .observation_optimizer import ObservationOptimizer
-from .observation_pose import transform_point
+from .observation_optimizer import ObservationCandidate, ObservationOptimizer
+from .observation_pose import (
+    recenter_camera_pose, tool_pose_from_camera_pose, transform_point)
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,7 @@ class FruitTarget:
 class TargetAttempt:
     target: FruitTarget
     count: int = 0
+    recentered_observation_indices: set = field(default_factory=set)
 
 
 def detection_candidates(message, class_name, min_confidence):
@@ -80,10 +83,69 @@ def detection_candidates(message, class_name, min_confidence):
     return sorted(candidates, key=lambda item: item.confidence, reverse=True)
 
 
-def spray_summary(detected, sprayed, unresolved, alignment_failures):
+def deduplicate_candidates(
+        candidates, iou_threshold=0.35, center_distance_px=10.0):
+    """Keep only the strongest task candidate for one physical fruit."""
+    unique = []
+    for candidate in sorted(
+            candidates, key=lambda item: item.confidence, reverse=True):
+        if any(
+                candidate.iou(previous) >= iou_threshold or
+                candidate.distance_to(previous) <= center_distance_px
+                for previous in unique):
+            continue
+        unique.append(candidate)
+    return unique
+
+
+def spray_summary(
+        detected, sprayed, unresolved, alignment_failures, recenter_attempts,
+        recenter_failures, alignment_attempts):
     return (
         f'detected={detected} sprayed={sprayed} unresolved={unresolved} '
-        f'alignment_failures={alignment_failures}')
+        f'alignment_failures={alignment_failures} '
+        f'recenter_attempts={recenter_attempts} '
+        f'recenter_failures={recenter_failures} '
+        f'alignment_attempts={alignment_attempts}')
+
+
+def final_spray_outcome(sprayed, unresolved, saw_disease, summary):
+    if sprayed and unresolved:
+        return ExecuteSpray.Result.PARTIAL_SUCCESS, summary
+    if sprayed:
+        return ExecuteSpray.Result.OK, summary
+    if saw_disease:
+        return ExecuteSpray.Result.VISION_FAILED, summary
+    return (
+        ExecuteSpray.Result.INSPECTED_NO_DISEASE,
+        f'{summary}; tree inspected; no diseased fruit detected')
+
+
+def completion_feedback_allowed(result_code):
+    return result_code in {
+        ExecuteSpray.Result.OK,
+        ExecuteSpray.Result.PARTIAL_SUCCESS,
+        ExecuteSpray.Result.INSPECTED_NO_DISEASE,
+    }
+
+
+def target_pixel_error(
+        center_u, center_v, image_width, image_height, desired_offset_u_px,
+        desired_offset_v_px):
+    desired_u = float(image_width) / 2.0 + float(desired_offset_u_px)
+    desired_v = float(image_height) / 2.0 + float(desired_offset_v_px)
+    return float(center_u) - desired_u, float(center_v) - desired_v
+
+
+def target_requires_recenter(
+        center_u, center_v, image_width, image_height, desired_offset_u_px,
+        desired_offset_v_px, maximum_error_px):
+    """Return whether either image axis is outside the servo fine-workspace."""
+    error_u, error_v = target_pixel_error(
+        center_u, center_v, image_width, image_height, desired_offset_u_px,
+        desired_offset_v_px)
+    return (abs(error_u) > float(maximum_error_px) or
+            abs(error_v) > float(maximum_error_px))
 
 
 class SprayTask(Node):
@@ -104,6 +166,7 @@ class SprayTask(Node):
         self._camera_frame = str(self.get_parameter('camera_frame').value)
         self._base_frame = str(self.get_parameter('base_frame').value)
         self._observation_config = self._observation_parameters()
+        self._recenter_config = self._target_recenter_parameters()
         self._observation_optimizer = ObservationOptimizer(
             self.get_parameter('robot_description').value,
             self._base_frame,
@@ -147,6 +210,9 @@ class SprayTask(Node):
             Detection2DArray, str(self.get_parameter('fruit_detection_topic').value),
             self._on_fruit_detections, 10, callback_group=self._callback_group)
         self.create_subscription(
+            Target2D, str(self.get_parameter('vision_target_topic').value),
+            self._on_selected_target, 10, callback_group=self._callback_group)
+        self.create_subscription(
             CameraInfo, str(self.get_parameter('camera_info_topic').value),
             self._on_camera_info, qos_profile_sensor_data,
             callback_group=self._callback_group)
@@ -170,6 +236,12 @@ class SprayTask(Node):
         self._fruit_frames = 0
         self._fruit_counts = {}
         self._fruit_latest = {}
+        self._target_confirmation_id = ''
+        self._target_valid_frames = 0
+        self._target_confirmation_frames = 0
+        self._target_workspace_stable_since = None
+        self._target_workspace_last_seen = None
+        self._latest_selected_target = None
         self._observation_pose = None
         self._observation_candidates = []
         self._observation_candidate_index = -1
@@ -192,23 +264,31 @@ class SprayTask(Node):
             'min_spray_duration': 0.2,
             'max_spray_duration': 10.0,
             'vision_action_name': '/vision/align_target',
-            'vision_timeout_sec': 25.0,
+            'vision_timeout_sec': 8.0,
             'spray_action_name': '/spray/execute',
             'downstream_server_timeout_sec': 2.0,
             'downstream_result_margin_sec': 2.0,
             'tree_detection_topic': '/vision/tree_detections',
             'fruit_detection_topic': '/vision/fruit_detections',
+            'vision_target_topic': '/vision/target',
             'selected_target_topic': '/vision/selected_target_id',
             'inference_mode_topic': '/vision/inference_mode',
             'motion_locked_topic': '/motion_control/locked',
             'tree_confidence': 0.10,
-            'fruit_confidence': 0.10,
+            'fruit_confidence': 0.30,
             'confirmation_frames': 3,
             # Real tree YOLO needs several frames to satisfy confirmation_frames.
             # One second can expire before its first complete inference.
             'scan_pose_detection_timeout_sec': 5.0,
             'detection_timeout_sec': 2.0,
             'max_alignment_attempts': 2,
+            'target_recenter_trigger_px': 48.0,
+            'target_recenter_max_angle_deg': 18.0,
+            # Must match wvcsc_visual_servo/config/visual_servo.yaml.
+            'target_recenter_desired_offset_u_px': 0.0,
+            'target_recenter_desired_offset_v_px': 28.0,
+            'target_post_recenter_stable_sec': 0.50,
+            'target_post_recenter_min_confidence': 0.30,
             'processed_iou_threshold': 0.30,
             'processed_center_distance_px': 40.0,
             'image_width': 1280,
@@ -267,7 +347,8 @@ class SprayTask(Node):
                 self.get_parameter('camera_height_max_m').value),
             'camera_height_step_m': float(
                 self.get_parameter('camera_height_step_m').value),
-            'azimuth_offsets_deg': tuple(float(value) for value in
+            'azimuth_offsets_deg': tuple(
+                float(value) for value in
                 self.get_parameter('observation_azimuth_offsets_deg').value),
             'image_margin_ratio': float(
                 self.get_parameter('observation_image_margin_ratio').value),
@@ -291,6 +372,28 @@ class SprayTask(Node):
                 not values['azimuth_offsets_deg'] or
                 not 0.0 <= values['image_margin_ratio'] < 0.5):
             raise ValueError('observation search parameters are invalid')
+        return values
+
+    def _target_recenter_parameters(self):
+        values = {
+            'trigger_px': float(self.get_parameter('target_recenter_trigger_px').value),
+            'max_angle_deg': float(self.get_parameter('target_recenter_max_angle_deg').value),
+            'desired_offset_u_px': float(
+                self.get_parameter('target_recenter_desired_offset_u_px').value),
+            'desired_offset_v_px': float(
+                self.get_parameter('target_recenter_desired_offset_v_px').value),
+            'post_stable_sec': float(
+                self.get_parameter('target_post_recenter_stable_sec').value),
+            'post_min_confidence': float(
+                self.get_parameter(
+                    'target_post_recenter_min_confidence').value),
+        }
+        if (not all(math.isfinite(value) for value in values.values()) or
+                values['trigger_px'] <= 0.0 or values['max_angle_deg'] <= 0.0 or
+                values['max_angle_deg'] > 180.0 or
+                values['post_stable_sec'] <= 0.0 or
+                not 0.0 <= values['post_min_confidence'] <= 1.0):
+            raise ValueError('target recenter parameters are invalid')
         return values
 
     def _on_motion_locked(self, message):
@@ -321,6 +424,47 @@ class SprayTask(Node):
                 for target_id in set(self._fruit_counts) | set(current)
             }
             self._fruit_latest = current
+
+    def _on_selected_target(self, message):
+        with self._vision_mutex:
+            if not (
+                    message.valid and
+                    message.target_id == self._target_confirmation_id and
+                    message.image_width > 0 and message.image_height > 0):
+                self._target_valid_frames = 0
+                self._target_confirmation_frames = 0
+                self._target_workspace_stable_since = None
+                self._target_workspace_last_seen = None
+                return
+            self._latest_selected_target = FruitTarget(
+                message.target_id,
+                float(message.confidence),
+                float(message.center_u),
+                float(message.center_v),
+                float(message.width),
+                float(message.height),
+            )
+            self._target_valid_frames += 1
+            reliable_in_workspace = (
+                math.isfinite(message.confidence)
+                and float(message.confidence) >=
+                self._recenter_config['post_min_confidence']
+                and not target_requires_recenter(
+                    message.center_u, message.center_v, message.image_width,
+                    message.image_height,
+                    self._recenter_config['desired_offset_u_px'],
+                    self._recenter_config['desired_offset_v_px'],
+                    self._recenter_config['trigger_px']))
+            if reliable_in_workspace:
+                now = time.monotonic()
+                if self._target_workspace_stable_since is None:
+                    self._target_workspace_stable_since = now
+                self._target_workspace_last_seen = now
+                self._target_confirmation_frames += 1
+            else:
+                self._target_confirmation_frames = 0
+                self._target_workspace_stable_since = None
+                self._target_workspace_last_seen = None
 
     def _on_camera_info(self, message):
         if message.width <= 0 or message.height <= 0:
@@ -430,6 +574,9 @@ class SprayTask(Node):
         saw_disease = False
         detected = 0
         alignment_failures = 0
+        recenter_attempts = 0
+        recenter_failures = 0
+        alignment_attempts = 0
         while True:
             self._set_inference_mode('fruits')
             feedback(ExecuteSpray.Feedback.DETECTING_FRUITS, 0.25, 'DETECTING_FRUITS')
@@ -476,9 +623,47 @@ class SprayTask(Node):
                 if attempt is None:
                     attempt = TargetAttempt(target)
                     attempts.append(attempt)
+            feedback(ExecuteSpray.Feedback.ALIGNING, 0.40, 'LOCKING_TARGET')
+            locked_target = self._lock_target(target.target_id, cancel_requested)
+            recenter_attempts += 1
+            if locked_target is None:
+                recentered = False
+                recenter_message = 'target was not locked before recenter'
+            else:
+                feedback(ExecuteSpray.Feedback.ALIGNING, 0.42, 'RECENTERING_TARGET')
+                recentered, recenter_message = self._recenter_target(
+                    locked_target, attempt, cancel_requested)
+            if not recentered:
+                recenter_failures += 1
+                if self._aborted(cancel_requested):
+                    return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
+                self._select_target('')
+                self._set_inference_mode('idle')
+                self.get_logger().warn(
+                    f'[ARM][RECENTER] target={target.target_id} {recenter_message}; '
+                    'trying the next observation candidate')
+                recovered, moved = self._recover_to_next_observation(
+                    cancel_requested, feedback)
+                if recovered:
+                    pending_attempt = attempt
+                    self._reset_fruit_tracking()
+                    continue
+                if moved:
+                    return self._alignment_recovery_failure(
+                        f'target recenter failed: {recenter_message}; '
+                        'tree reconfirmation failed after observation recovery',
+                        cancel_requested)
+                self._mark_unresolved(attempt.target, exhausted)
+                feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
+                         'RETURNING_TO_OBSERVE')
+                if not self._return_to_observation():
+                    return self._alignment_recovery_failure(
+                        f'target recenter failed: {recenter_message}; '
+                        'observation recovery failed', cancel_requested)
+                self._reset_fruit_tracking()
+                continue
             attempt.count += 1
-            self._select_target(target.target_id)
-            self._set_inference_mode('target')
+            alignment_attempts += 1
             feedback(ExecuteSpray.Feedback.ALIGNING, 0.45, 'ALIGNING')
             self.get_logger().info(
                 f'[ARM][ALIGN] start target={target.target_id} '
@@ -574,21 +759,18 @@ class SprayTask(Node):
             return (ExecuteSpray.Result.CANCELED, 'spray goal canceled') if self._aborted(
                 cancel_requested) else (ExecuteSpray.Result.HOME_FAILED, 'HOME motion failed')
         self.get_logger().info(f'[ARM][{tree}] HOME reached')
-        feedback(ExecuteSpray.Feedback.COMPLETED, 1.0, 'COMPLETED')
         summary = spray_summary(
-            detected, sprayed, len(exhausted), alignment_failures)
+            detected, sprayed, len(exhausted), alignment_failures,
+            recenter_attempts, recenter_failures, alignment_attempts)
         self.get_logger().info(
             f'[ARM][{tree}] ═══ SUMMARY ═══ '
             f'side={request.spray_side} distance={self._observation_distance}m '
             f'{summary}')
-        if sprayed and exhausted:
-            return ExecuteSpray.Result.PARTIAL_SUCCESS, summary
-        if sprayed:
-            return ExecuteSpray.Result.OK, summary
-        if saw_disease:
-            return ExecuteSpray.Result.VISION_FAILED, summary
-        return (ExecuteSpray.Result.INSPECTED_NO_DISEASE,
-                f'{summary}; tree inspected; no diseased fruit detected')
+        code, message = final_spray_outcome(
+            sprayed, len(exhausted), saw_disease, summary)
+        if completion_feedback_allowed(code):
+            feedback(ExecuteSpray.Feedback.COMPLETED, 1.0, 'COMPLETED')
+        return code, message
 
     def _observe_failure(self, cancel_requested):
         if self._aborted(cancel_requested):
@@ -695,6 +877,205 @@ class SprayTask(Node):
         with self._vision_mutex:
             return [] if self._fruit_frames else None
 
+    def _reset_target_confirmation(self, target_id, *, clear_latest=True):
+        with self._vision_mutex:
+            self._target_confirmation_id = target_id
+            self._target_valid_frames = 0
+            self._target_confirmation_frames = 0
+            self._target_workspace_stable_since = None
+            self._target_workspace_last_seen = None
+            if clear_latest:
+                self._latest_selected_target = None
+
+    def _latest_target(self):
+        with self._vision_mutex:
+            return self._latest_selected_target
+
+    def _wait_for_target_confirmation(
+            self, target_id, cancel_requested, *, require_workspace):
+        required = int(self.get_parameter('confirmation_frames').value)
+        deadline = time.monotonic() + float(
+            self.get_parameter('detection_timeout_sec').value)
+        while time.monotonic() < deadline:
+            if self._aborted(cancel_requested):
+                return False
+            with self._vision_mutex:
+                if target_id != self._target_confirmation_id:
+                    return False
+                frames = (
+                    self._target_confirmation_frames if require_workspace
+                    else self._target_valid_frames)
+                stable_duration = (
+                    0.0 if self._target_workspace_stable_since is None or
+                    self._target_workspace_last_seen is None
+                    else max(
+                        0.0,
+                        self._target_workspace_last_seen -
+                        self._target_workspace_stable_since))
+                stable_enough = (
+                    not require_workspace or
+                    stable_duration >= self._recenter_config['post_stable_sec'])
+                if frames >= required and stable_enough:
+                    return True
+            time.sleep(0.02)
+        return False
+
+    def _lock_target(self, target_id, cancel_requested):
+        """Capture a geometric reference before any camera recenter motion."""
+        self._reset_target_confirmation(target_id)
+        self._select_target(target_id)
+        self._set_inference_mode('target')
+        if not self._wait_for_target_confirmation(
+                target_id, cancel_requested, require_workspace=False):
+            return None
+        return self._latest_target()
+
+    def _recenter_target(self, target, attempt, cancel_requested):
+        """Move once to a safe camera attitude using the locked mask aim point."""
+        inputs = self._wait_for_observation_inputs()
+        if inputs is None:
+            return False, 'camera or joint state unavailable for target recenter'
+        camera, current_joints = inputs
+        pre_error_u, pre_error_v = target_pixel_error(
+            target.center_u, target.center_v, camera[4], camera[5],
+            self._recenter_config['desired_offset_u_px'],
+            self._recenter_config['desired_offset_v_px'])
+        if not target_requires_recenter(
+                target.center_u, target.center_v, camera[4], camera[5],
+                self._recenter_config['desired_offset_u_px'],
+                self._recenter_config['desired_offset_v_px'],
+                self._recenter_config['trigger_px']):
+            if not self._wait_for_target_confirmation(
+                    target.target_id, cancel_requested, require_workspace=True):
+                return False, (
+                    'target did not remain reliable inside fine-servo workspace')
+            confirmed = self._latest_target()
+            post_error_u, post_error_v = target_pixel_error(
+                confirmed.center_u, confirmed.center_v, camera[4], camera[5],
+                self._recenter_config['desired_offset_u_px'],
+                self._recenter_config['desired_offset_v_px'])
+            self._publish_observation_debug(
+                'target_recenter_not_required',
+                target_id=target.target_id,
+                pre_error_u_px=pre_error_u,
+                pre_error_v_px=pre_error_v,
+                post_error_u_px=post_error_u,
+                post_error_v_px=post_error_v,
+                planned_angle_deg=0.0)
+            return True, 'target already inside fine-servo workspace'
+        index = self._observation_candidate_index
+        if index < 0 or index >= len(self._observation_candidates):
+            return False, 'no active observation candidate for target recenter'
+        if index in attempt.recentered_observation_indices:
+            return False, 'target recenter already used at this observation'
+        attempt.recentered_observation_indices.add(index)
+        observation = self._observation_candidates[index]
+        try:
+            camera_position, camera_quat, angle_deg = recenter_camera_pose(
+                observation.camera_position, observation.camera_quat, camera,
+                target.center_u, target.center_v,
+                self._recenter_config['desired_offset_u_px'],
+                self._recenter_config['desired_offset_v_px'],
+                self._recenter_config['max_angle_deg'])
+            tool_position, tool_quat = tool_pose_from_camera_pose(
+                camera_position, camera_quat,
+                self._camera_mount[0], self._camera_mount[1])
+        except (TypeError, ValueError) as error:
+            return False, f'target recenter rejected: {error}'
+        candidate = ObservationCandidate(
+            candidate_id=f'{observation.candidate_id}_target_{target.target_id}',
+            distance_m=observation.distance_m,
+            camera_height_m=observation.camera_height_m,
+            azimuth_deg=observation.azimuth_deg,
+            camera_position=camera_position,
+            camera_quat=camera_quat,
+            tool_position=tool_position,
+            tool_quat=tool_quat,
+            visible=True,
+            visible_margin_px=math.inf,
+        )
+        if not self._move_to_recentered_pose(candidate, current_joints):
+            return False, f'target recenter rejected: {candidate.rejection_reason}'
+        if self._aborted(cancel_requested):
+            return False, 'spray goal canceled'
+        self._reset_target_confirmation(target.target_id)
+        if not self._wait_for_target_confirmation(
+                target.target_id, cancel_requested, require_workspace=True):
+            self._publish_observation_debug(
+                'target_recenter_failed', candidate,
+                target_id=target.target_id,
+                pre_error_u_px=pre_error_u,
+                pre_error_v_px=pre_error_v,
+                planned_angle_deg=angle_deg,
+                rejection_reason='target_not_reconfirmed')
+            return False, 'target was not reconfirmed after recenter'
+        confirmed = self._latest_target()
+        post_error_u, post_error_v = target_pixel_error(
+            confirmed.center_u, confirmed.center_v, camera[4], camera[5],
+            self._recenter_config['desired_offset_u_px'],
+            self._recenter_config['desired_offset_v_px'])
+        self._publish_observation_debug(
+            'target_recenter_confirmed', candidate,
+            target_id=target.target_id,
+            pre_error_u_px=pre_error_u,
+            pre_error_v_px=pre_error_v,
+            post_error_u_px=post_error_u,
+            post_error_v_px=post_error_v,
+            planned_angle_deg=angle_deg)
+        self.get_logger().info(
+            f'[ARM][RECENTER] target={target.target_id} angle={angle_deg:.1f}deg '
+            f'error=({pre_error_u:.1f},{pre_error_v:.1f})px'
+            f'→({post_error_u:.1f},{post_error_v:.1f})px '
+            f'condition={candidate.condition_number:.2f} '
+            f'joint_margin={candidate.min_joint_margin_rad:.2f}')
+        return True, 'target reconfirmed after recenter'
+
+    def _move_to_recentered_pose(self, candidate, current_joints):
+        """Apply the normal collision IK, singularity and joint-margin gates."""
+        ik = self.arm.compute_ik(
+            candidate.tool_position, candidate.tool_quat, current_joints)
+        if ik is None:
+            candidate.rejection_reason = 'collision_ik_failed'
+            self._publish_observation_debug('candidate_rejected', candidate)
+            return False
+        try:
+            self._observation_optimizer.evaluate_ik(
+                candidate, dict(zip(ik.name, ik.position)), current_joints)
+        except (KeyError, TypeError, ValueError):
+            candidate.rejection_reason = 'incomplete_ik_state'
+        if candidate.rejection_reason:
+            self._publish_observation_debug('candidate_rejected', candidate)
+            return False
+        trajectory = self.arm.plan_pose(
+            candidate.tool_position, candidate.tool_quat, frame_id=self._base_frame,
+            tolerance_position=self._OBSERVATION_POSITION_TOLERANCE,
+            tolerance_orientation=self._OBSERVATION_ORIENTATION_TOLERANCE)
+        planned = self.arm.trajectory_final_positions(
+            trajectory, self.arm_joint_names) if trajectory is not None else None
+        if planned is None:
+            candidate.rejection_reason = 'moveit_plan_failed'
+            self._publish_observation_debug('candidate_rejected', candidate)
+            return False
+        self._observation_optimizer.evaluate_ik(candidate, planned, planned)
+        if candidate.rejection_reason:
+            self._publish_observation_debug('candidate_rejected', candidate)
+            return False
+        with self._state_mutex:
+            joint_state_sequence = self._joint_state_sequence
+        if not self.arm.execute_trajectory(trajectory):
+            candidate.rejection_reason = 'moveit_execution_failed'
+            self._publish_observation_debug('candidate_rejected', candidate)
+            return False
+        actual = self._wait_for_joint_state(joint_state_sequence)
+        if actual is None:
+            candidate.rejection_reason = 'joint_state_unavailable_after_motion'
+        else:
+            self._observation_optimizer.evaluate_ik(candidate, actual, actual)
+        if candidate.rejection_reason:
+            self._publish_observation_debug('candidate_rejected', candidate)
+            return False
+        return True
+
     def _queue(self, candidates, excluded):
         iou_threshold = float(self.get_parameter('processed_iou_threshold').value)
         distance_threshold = float(
@@ -707,7 +1088,7 @@ class SprayTask(Node):
                 for previous in excluded)
         ]
         return sorted(
-            kept,
+            deduplicate_candidates(kept),
             key=lambda item: (
                 math.hypot(
                     item.center_u - float(self.get_parameter('image_width').value) / 2.0,
@@ -749,6 +1130,12 @@ class SprayTask(Node):
             self._fruit_frames = 0
             self._fruit_counts = {}
             self._fruit_latest = {}
+            self._target_confirmation_id = ''
+            self._target_valid_frames = 0
+            self._target_confirmation_frames = 0
+            self._target_workspace_stable_since = None
+            self._target_workspace_last_seen = None
+            self._latest_selected_target = None
 
     def _align_target(self, mission_id, tree_id, target_id, cancel_requested):
         goal = AlignTarget.Goal()
@@ -1009,7 +1396,10 @@ class SprayTask(Node):
             time.sleep(0.02)
         return None
 
-    def _publish_observation_debug(self, event, candidate=None, rejection_reason=''):
+    def _publish_observation_debug(
+            self, event, candidate=None, rejection_reason='', *, target_id='',
+            pre_error_u_px=None, pre_error_v_px=None, post_error_u_px=None,
+            post_error_v_px=None, planned_angle_deg=None):
         if candidate is None:
             candidate_id = ''
             distance = camera_height = azimuth = 0.0
@@ -1043,6 +1433,12 @@ class SprayTask(Node):
             'joint_motion_norm': motion,
             'rejection_reason': rejection_reason,
             'selected': selected,
+            'target_id': target_id,
+            'pre_error_u_px': pre_error_u_px,
+            'pre_error_v_px': pre_error_v_px,
+            'post_error_u_px': post_error_u_px,
+            'post_error_v_px': post_error_v_px,
+            'planned_angle_deg': planned_angle_deg,
         }
         self._observation_debug_pub.publish(String(data=json.dumps(
             payload, sort_keys=True, separators=(',', ':'))))

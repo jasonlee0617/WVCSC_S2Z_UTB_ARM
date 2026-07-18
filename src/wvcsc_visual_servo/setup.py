@@ -14,6 +14,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml', 'THIRD_PARTY.md']),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'scripts'), glob('scripts/*.sh')),
     ],
     install_requires=['setuptools'],
     tests_require=['pytest'],

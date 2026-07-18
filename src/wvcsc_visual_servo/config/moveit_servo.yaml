@@ -1,18 +1,20 @@
 # Passed under the `moveit_servo` parameter namespace by system_sim.launch.py.
-use_gazebo: true
+# gazebo_ros2_control accepts the normal one-point Servo trajectory.  The
+# legacy Gazebo workaround expands every command to 30 points (1.5 seconds at
+# 20 Hz), which hides the real controller cadence and delays visual feedback.
+use_gazebo: false
 command_in_type: speed_units
 scale:
   linear: 0.10
   rotational: 0.20
   joint: 0.50
-# Gazebo measures a stable ~0.10 s Servo iteration.  For speed_units, this
-# period is part of the velocity-to-position increment, so it must match the
-# real cadence rather than the previously requested 0.02 s cadence.
-publish_period: 0.10
+# Publish at a fixed 20 Hz rather than only on input callbacks.
+publish_period: 0.05
 low_latency_mode: false
 command_out_type: trajectory_msgs/JointTrajectory
 publish_joint_positions: true
-publish_joint_velocities: true
+# arm_controller exposes a position command interface only.
+publish_joint_velocities: false
 publish_joint_accelerations: false
 smoothing_filter_plugin_name: online_signal_smoothing::ButterworthFilterPlugin
 is_primary_planning_scene_monitor: false
@@ -31,7 +33,10 @@ joint_command_in_topic: /servo_node/delta_joint_cmds
 joint_topic: /joint_states
 status_topic: /servo_node/status
 command_out_topic: /arm_controller/joint_trajectory
-check_collisions: true
-collision_check_rate: 20.0
+# Gazebo-only profile: Humble's synchronous Servo collision callback blocks
+# Twist processing for ~0.5 s in this scene. Observation/recenter IK and MoveIt
+# trajectories still use collision checking. Re-enable and retune for hardware.
+check_collisions: false
+collision_check_rate: 10.0
 self_collision_proximity_threshold: 0.01
 scene_collision_proximity_threshold: 0.02

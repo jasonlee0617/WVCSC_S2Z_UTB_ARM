@@ -73,6 +73,55 @@ class Track:
     missed_frames: int = 0
 
 
+def deduplicate_instances(
+        instances, iou_threshold=0.35, center_distance_px=10.0,
+        class_confidence_margin=0.10):
+    """Collapse duplicate fruit masks and reject ambiguous class conflicts."""
+    instances = list(instances)
+    parents = list(range(len(instances)))
+
+    def root(index):
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def join(left, right):
+        left_root, right_root = root(left), root(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    for left in range(len(instances)):
+        for right in range(left + 1, len(instances)):
+            if (instances[left].iou(instances[right]) >= iou_threshold or
+                    instances[left].distance_to(instances[right]) <=
+                    center_distance_px):
+                join(left, right)
+
+    groups = {}
+    for index, instance in enumerate(instances):
+        groups.setdefault(root(index), []).append(instance)
+
+    kept = []
+    for group in groups.values():
+        ranked = sorted(
+            group,
+            key=lambda item: (
+                -item.confidence, item.class_name, item.left, item.top))
+        best = ranked[0]
+        best_other_class = next(
+            (item for item in ranked if item.class_name != best.class_name), None)
+        if (best_other_class is not None and
+                best.confidence - best_other_class.confidence <
+                class_confidence_margin):
+            continue
+        kept.append(best)
+    return sorted(
+        kept,
+        key=lambda item: (
+            -item.confidence, item.class_name, item.left, item.top))
+
+
 def track_matches(instances, tracks, iou_threshold, center_distance_px):
     """Return a deterministic one-to-one instance-to-track association."""
     candidates = []
@@ -164,6 +213,7 @@ PERCEPTION_DEBUG_DEFAULTS = {
     'diseased_count': 0,
     'active_track_ids': [],
     'selected_target_id': '',
+    'candidate_target_id': '',
     'selected_target_found': False,
     'target_valid': False,
     'invalid_reason': 'not_target_mode',
@@ -315,7 +365,12 @@ class TwoStageYolo(Node):
             self._selected_target_reference = None
 
     def _on_selected_target(self, message):
-        self._selected_target_id = message.data.strip()
+        selected_target_id = message.data.strip()
+        if (selected_target_id and
+                selected_target_id == self._selected_target_id and
+                self._selected_target_reference is not None):
+            return
+        self._selected_target_id = selected_target_id
         self._selected_target_reference = next(
             (track.instance for track in self._tracks
              if track.instance.target_id == self._selected_target_id), None)
@@ -393,8 +448,10 @@ class TwoStageYolo(Node):
             return []
         result = self._fruit_model(
             image[y0:y1, x0:x1], verbose=False,
-            conf=float(self.get_parameter('fruit_confidence').value))[0]
-        return self._seg_instances(result, x0, y0, FRUIT_CLASS_NAMES)
+            conf=float(self.get_parameter('fruit_confidence').value),
+            iou=0.45)[0]
+        return deduplicate_instances(
+            self._seg_instances(result, x0, y0, FRUIT_CLASS_NAMES))
 
     @staticmethod
     def _box_instances(result, class_names):
@@ -590,6 +647,7 @@ class TwoStageYolo(Node):
             active_track_ids=sorted(
                 track.instance.target_id for track in self._tracks),
             selected_target_id=self._selected_target_id,
+            candidate_target_id='' if target is None else target.target_id,
             selected_target_found=target is not None,
             target_valid=target is not None,
             invalid_reason=invalid_reason,
@@ -600,27 +658,34 @@ class TwoStageYolo(Node):
 
     @staticmethod
     def _label(instance):
-        return (
-            f'{instance.class_name} conf={instance.confidence:.2f} '
-            f'xyxy=({round(instance.left)},{round(instance.top)},'
-            f'{round(instance.right)},{round(instance.bottom)})')
+        prefix = (
+            f'{instance.target_id} ' if instance.target_id else '')
+        return f'{prefix}{instance.class_name} {instance.confidence:.2f}'
 
     @staticmethod
-    def _annotated_image(image, instances, *, draw_diseased_aim_point=False):
+    def _annotated_image(
+            image, instances, *, draw_diseased_aim_point=False,
+            selected_target_id=''):
         annotated = image.copy()
         for instance in instances:
-            color = ((0, 255, 0) if instance.class_name == 'tree' else
+            selected = bool(
+                selected_target_id and
+                instance.target_id == selected_target_id)
+            color = ((255, 255, 0) if selected else
+                     (0, 255, 0) if instance.class_name == 'tree' else
                      (0, 0, 255) if instance.class_name == 'healthy_fruit' else
                      (0, 255, 255))
+            thickness = 4 if selected else 2
             left, top = round(instance.left), round(instance.top)
             cv2.rectangle(annotated, (left, top),
-                          (round(instance.right), round(instance.bottom)), color, 2)
+                          (round(instance.right), round(instance.bottom)),
+                          color, thickness)
             cv2.putText(annotated, TwoStageYolo._label(instance),
                         (left, max(16, top - 5)), cv2.FONT_HERSHEY_SIMPLEX,
                         0.45, color, 1, cv2.LINE_AA)
             if draw_diseased_aim_point and instance.class_name == 'diseased_fruit':
                 cv2.circle(annotated, (round(instance.aim_u), round(instance.aim_v)),
-                           3, color, -1)
+                           5 if selected else 3, color, -1)
         return annotated
 
     def _publish_visualization(self, publisher, image_message, image):
@@ -636,7 +701,9 @@ class TwoStageYolo(Node):
     def _publish_fruit_visualization(self, image_message, image, fruits):
         self._publish_visualization(
             self._fruit_visualization_pub, image_message,
-            self._annotated_image(image, fruits, draw_diseased_aim_point=True))
+            self._annotated_image(
+                image, fruits, draw_diseased_aim_point=True,
+                selected_target_id=self._selected_target_id))
 
 
 def main():

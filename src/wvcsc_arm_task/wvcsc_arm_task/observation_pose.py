@@ -100,6 +100,59 @@ def tool_pose_from_camera_pose(
         camera_quat_xyzw, camera_to_tool_quat)
 
 
+def recenter_camera_pose(
+        camera_position, camera_quat_xyzw, camera_model, center_u, center_v,
+        desired_offset_u_px, desired_offset_v_px, max_angle_degrees):
+    """Keep camera position fixed and rotate a detected pixel to the spray pixel."""
+    camera_position = tuple(float(value) for value in camera_position)
+    fx, fy, cx, cy, width, height = camera_model
+    values = (*camera_position, fx, fy, cx, cy, center_u, center_v,
+              desired_offset_u_px, desired_offset_v_px, max_angle_degrees)
+    if (not all(math.isfinite(float(value)) for value in values) or
+            fx <= 0.0 or fy <= 0.0 or width <= 0 or height <= 0 or
+            max_angle_degrees <= 0.0):
+        raise ValueError('target recenter inputs are invalid')
+    current_ray = _unit_vector(((float(center_u) - float(cx)) / float(fx),
+                                (float(center_v) - float(cy)) / float(fy), 1.0))
+    desired_ray = _unit_vector((
+        ((float(width) / 2.0 + float(desired_offset_u_px)) - float(cx)) / float(fx),
+        ((float(height) / 2.0 + float(desired_offset_v_px)) - float(cy)) / float(fy),
+        1.0,
+    ))
+    angle = math.degrees(math.acos(max(-1.0, min(1.0, sum(
+        left * right for left, right in zip(current_ray, desired_ray))))))
+    if angle > float(max_angle_degrees) + 1e-9:
+        raise ValueError('target recenter angle exceeds limit')
+    camera_quat_xyzw = normalize_quaternion(camera_quat_xyzw)
+    world_rotation = _quaternion_between_vectors(
+        rotate_vector(desired_ray, camera_quat_xyzw),
+        rotate_vector(current_ray, camera_quat_xyzw))
+    return camera_position, quaternion_multiply(world_rotation, camera_quat_xyzw), angle
+
+
+def _unit_vector(vector):
+    values = tuple(float(value) for value in vector)
+    norm = math.sqrt(sum(value * value for value in values))
+    if norm < 1e-9:
+        raise ValueError('vector is invalid')
+    return tuple(value / norm for value in values)
+
+
+def _quaternion_between_vectors(source, target):
+    source = _unit_vector(source)
+    target = _unit_vector(target)
+    dot = max(-1.0, min(1.0, sum(left * right for left, right in zip(source, target))))
+    if dot < -1.0 + 1e-9:
+        axis = _unit_vector((0.0, -source[2], source[1]))
+        return axis[0], axis[1], axis[2], 0.0
+    cross = (
+        source[1] * target[2] - source[2] * target[1],
+        source[2] * target[0] - source[0] * target[2],
+        source[0] * target[1] - source[1] * target[0],
+    )
+    return normalize_quaternion((*cross, 1.0 + dot))
+
+
 def normalize_quaternion(quat_xyzw):
     values = tuple(float(value) for value in quat_xyzw)
     if not all(math.isfinite(value) for value in values):

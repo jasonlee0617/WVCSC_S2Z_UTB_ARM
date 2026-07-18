@@ -26,23 +26,32 @@ wvcsc_spray_task:
     min_spray_duration: 2.0
     max_spray_duration: 10.0
     vision_action_name: /vision/align_target
-    # At the measured 10 Hz Servo cadence, edge targets need more than 15 s
-    # to traverse the camera field at the retained 0.04 m/s safety limit.
-    vision_timeout_sec: 25.0
+    # Performance-first simulation deadline; hardware requires retuning.
+    vision_timeout_sec: 8.0
     spray_action_name: /spray/execute
     downstream_server_timeout_sec: 2.0
     downstream_result_margin_sec: 2.0
     tree_detection_topic: /vision/tree_detections
     fruit_detection_topic: /vision/fruit_detections
+    vision_target_topic: /vision/target
     selected_target_topic: /vision/selected_target_id
     motion_locked_topic: /motion_control/locked
     tree_confidence: 0.10
-    fruit_confidence: 0.10
+    # Task admission threshold; YOLO still publishes tracking data from 0.10.
+    fruit_confidence: 0.30
     confirmation_frames: 3
     # Three consecutive real-YOLO detections need more than one inference period.
     scan_pose_detection_timeout_sec: 5.0
     detection_timeout_sec: 5.0
     max_alignment_attempts: 2
+    # Reorient once before fine visual servo when a fruit is outside its
+    # ±48 px micro-adjustment workspace. Values mirror visual_servo.yaml.
+    target_recenter_trigger_px: 48.0
+    target_recenter_max_angle_deg: 18.0
+    target_recenter_desired_offset_u_px: 0.0
+    target_recenter_desired_offset_v_px: 28.0
+    target_post_recenter_stable_sec: 0.50
+    target_post_recenter_min_confidence: 0.30
     processed_iou_threshold: 0.30
     processed_center_distance_px: 40.0
     image_width: 1280

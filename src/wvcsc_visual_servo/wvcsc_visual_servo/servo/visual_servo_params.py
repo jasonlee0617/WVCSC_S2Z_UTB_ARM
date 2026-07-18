@@ -15,6 +15,9 @@ class ServoRuntimeConfig:
     coarse_tolerance_px: float
     fine_tolerance_px: float
     stable_frames: int
+    stable_duration_sec: float
+    progress_window_sec: float
+    min_progress_px: float
     desired_offset_u_px: float
     desired_offset_v_px: float
     max_linear_speed: float
@@ -37,6 +40,9 @@ class ServoRuntimeConfig:
             coarse_tolerance_px=float(_value(node, 'coarse_tolerance_px')),
             fine_tolerance_px=float(_value(node, 'fine_tolerance_px')),
             stable_frames=int(_value(node, 'stable_frames')),
+            stable_duration_sec=float(_value(node, 'stable_duration_sec')),
+            progress_window_sec=float(_value(node, 'progress_window_sec')),
+            min_progress_px=float(_value(node, 'min_progress_px')),
             desired_offset_u_px=float(_value(node, 'desired_offset_u_px')),
             desired_offset_v_px=float(_value(node, 'desired_offset_v_px')),
             max_linear_speed=float(_value(node, 'max_linear_speed')),
@@ -49,10 +55,13 @@ class ServoRuntimeConfig:
             max_predict_horizon_sec=float(_value(node, 'max_predict_horizon_sec')),
         )
         if (config.control_rate_hz <= 0.0 or config.stable_frames <= 0 or
+                config.stable_duration_sec <= 0.0 or
+                config.progress_window_sec <= 0.0 or
+                config.min_progress_px <= 0.0 or
                 config.stale_timeout_sec <= 0.0 or
                 not 0.0 <= config.invalid_target_hold_sec <= config.stale_timeout_sec):
             raise ValueError(
-                'control_rate_hz, stable_frames and stale target timing are invalid')
+                'control, convergence, progress or stale target timing is invalid')
         if not 0.0 < config.near_target_speed_scale <= 1.0:
             raise ValueError('near_target_speed_scale must be in (0, 1]')
         return config

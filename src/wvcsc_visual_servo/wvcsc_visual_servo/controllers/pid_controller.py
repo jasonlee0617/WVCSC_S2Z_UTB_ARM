@@ -26,7 +26,7 @@ class PIDController3D:
         self._integral = np.zeros(3, dtype=float)
 
     def step(self, error, dt):
-        dt = float(np.clip(dt, 1e-3, 5e-2))
+        dt = max(1e-3, float(dt))
         error = np.asarray(error, dtype=float).reshape(3,)
         raw = (
             np.zeros(3, dtype=float)

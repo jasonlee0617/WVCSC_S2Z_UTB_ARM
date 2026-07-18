@@ -1,8 +1,8 @@
 # WVCSC ARMSpray 视觉喷洒闭环实施方案
 
-> 更新日期：2026-07-17
-> 当前阶段：两级 YOLO 作业链路已编码完成，mock 模式状态机通过；下一步目标是在真实 YOLO 权重训练完成后完成完整 ARM_SPRAYING 七阶段闭环验收。
-> 验证结果：16 个相关包构建通过，74 项针对性测试通过。动态观察位姿、扇形扫描、病果队列、对准重试和观察距离恢复均已实现。
+> 更新日期：2026-07-18
+> 当前阶段：两级 YOLO、动态观察/重心、20 Hz MoveIt Servo 和病果逐个喷洒链路均已接通；最新 `wvcsc_servo_20260718_1421` 尚未完成喷洒，本轮已实施增益补偿、连续目标失效判定和重心后可靠性门控，等待 Gazebo 复验。
+> 验证结果：本轮 `wvcsc_visual_servo`、`wvcsc_arm_task` 隔离构建通过，93 项相关测试通过。动态观察位姿、目标重心、检测去重、对准恢复和人工安全复位均已实现。
 
 ## 1. 目标与边界
 
@@ -15,7 +15,7 @@ MOVING_TO_OBSERVE → SCANNING_TREE → DETECTING_FRUITS → QUEUING
     → ALIGNING → SPRAYING → RETURNING_TO_OBSERVE → 复检直到队列为空 → HOME
 ```
 
-Mock 模式下已完成状态机验证。真实权重就绪后的验收目标是：四棵树全部按上述链路完成，每棵树最少喷洒 1 个病果，连续运行三轮无安全锁定。
+Mock 模式已于 2026-07-17 移除，`perception_mode` 参数和 `mock_vision` 节点已删除。验收目标：四棵树全部按上述七阶段链路完成，每棵树最少喷洒 1 个病果，连续运行三轮无安全锁定。
 
 ### 1.2 明确不纳入本次的范围
 
@@ -111,7 +111,7 @@ tree 确认后
     ↓
 发布 /vision/inference_mode = "fruits"
     ↓
-YOLOv8s-seg 推理 (tree + healthy_fruit + diseased_fruit)
+YOLOv8n-seg 推理 (tree + healthy_fruit + diseased_fruit)
     ↓
 spray_task._wait_for_fruits():
     1. 等待 fruit_detections 连续 confirmation_frames=3 帧
@@ -124,16 +124,18 @@ spray_task._wait_for_fruits():
 **参数**：
 
 ```yaml
-detection_timeout_sec: 2.0     # 最多等 2 秒
-fruit_confidence: 0.50         # 病果检测置信度阈值
+detection_timeout_sec: 5.0                  # 最多等 5 秒
+fruit_confidence: 0.30                      # 任务队列准入阈值
+target_post_recenter_min_confidence: 0.30   # 重心后 Servo 准入阈值
+target_post_recenter_stable_sec: 0.50       # 连续可靠时长
 ```
 
 **两类 YOLO 模型的职责分工**：
 
 | 模型 | 任务 | 输入 | 输出 |
 |------|------|------|------|
-| `wvcsc_tree_yolov8s.pt` | 目标检测 (Detect) | 完整 1280×720 图像 | `tree` bbox |
-| `wvcsc_fruit_yolov8s_seg.pt` | 实例分割 (Seg) | 完整图像（tree ROI 由下游过滤） | `healthy_fruit` mask + `diseased_fruit` mask |
+| `wvcsc_tree_yolov8n.pt` | 目标检测 (Detect) | 完整 1280×720 图像 | `tree` bbox |
+| `wvcsc_fruit_yolov8n_seg.pt` | 实例分割 (Seg) | 完整图像（tree ROI 由下游过滤） | `healthy_fruit` mask + `diseased_fruit` mask |
 
 ### 2.5 [4] QUEUING — 病果队列
 
@@ -144,8 +146,11 @@ spray_task._queue():
     1. 过滤已处理 (processed) 和已耗尽 (exhausted) 的目标
        - IoU ≥ processed_iou_threshold (0.30) → 已处理
        - 中心距离 ≤ processed_center_distance_px (40px) → 已处理
-    2. 按距离图像中心的远近排序 (近的优先)
-    3. 同距离按下置信度降序
+    2. 帧内防御性去重
+       - IoU ≥ 0.35 或中心距离 ≤ 10px → 同一物理果实
+       - 只保留置信度最高的实例
+    3. 按距离图像中心的远近排序 (近的优先)
+    4. 同距离按置信度降序
     ↓
 返回排序后的待喷洒队列
 ```
@@ -317,26 +322,21 @@ colcon build --symlink-install --packages-up-to wvcsc_simulation
 source install/setup.bash
 ```
 
-### 5.2 Mock 模式启动（无 YOLO 权重回归）
-
-```bash
-ros2 launch wvcsc_simulation system_sim.launch.py \
-  use_nav2:=true use_rviz:=false \
-  use_mock_uav:=true use_replay_uav:=false \
-  use_mission_manager:=true auto_start_mission:=true \
-  use_web_ui:=false perception_mode:=mock
-```
-
-### 5.3 YOLO 模式启动（需权重文件就绪）
+### 5.2 仿真启动（YOLO 模式，权重已就绪）
 
 ```bash
 ./run_system_sim.sh
-# 或手动指定
+# 脚本内容：
+#   source install/setup.bash
+#   ros2 launch wvcsc_simulation system_sim.launch.py
+
+# 或手动指定参数：
 ros2 launch wvcsc_simulation system_sim.launch.py \
-  perception_mode:=yolo \
   yolo_python_executable:=/home/robot/venvs/wvcsc_yolo_ros/bin/python \
   auto_start_mission:=false
 ```
+
+> `perception_mode` 参数已移除（2026-07-17），`mock_vision` 节点已删除。YOLOv8n 树检测权重已部署为唯一感知模式。
 
 ### 5.4 监控
 
@@ -358,30 +358,19 @@ ros2 topic hz /odom
 
 ## 6. 验收标准
 
-### 6.1 Mock 模式（当前可验收）
+### 6.1 仿真验收（YOLO 模式）
 
-- [ ] `/mission/plan` 四个作业位姿依次为 `(3,0.5)` `(5,-0.5)` `(11,0.5)` `(13,-0.5)`
-- [ ] Nav2 按输入顺序到达四棵树
-- [ ] 每次导航成功后 `/odom` 连续停稳 1 秒才启动机械臂
-- [ ] 每棵树的 `tree_hint` 由 TF 动态转换为 `alicia_base_link` 坐标
-- [ ] 动态观察位姿规划成功且避免碰撞
-- [ ] Mock 模式确认 tree、生成病果队列、完成对准+喷洒+复检
-- [ ] 每棵树完成后机械臂回到 HOME
-- [ ] 任一故障不进入下一目标
-- [ ] 最终 `MISSION_COMPLETED`，`completed_targets=4`
-- [ ] 同一启动方式连续完成 3 轮
-
-### 6.2 YOLO 模式（权重就绪后）
-
-- [ ] `perception_mode:=yolo` 启动不报错
-- [ ] SCANNING_TREE 阶段真实 YOLO 检测到 tree（conf ≥ 0.50）
-- [ ] DETECTING_FRUITS 阶段真实 YOLO Seg 检测到 diseased_fruit
+- [x] `yolo_python_executable` 默认指向 venv，启动不报错
+- [x] SCANNING_TREE 阶段 YOLOv8n 检测到 tree（mAP50=0.995）
+- [ ] DETECTING_FRUITS 阶段 YOLOv8n-seg 检测到 diseased_fruit（待果实分割权重训练）
 - [ ] 病果队列按距离排序正确
-- [ ] 每个病果的 IBVS 在 8s 内对准（fine_tolerance_px=8, stable_frames=10）
+- [ ] 每个病果的 IBVS 在 8s 内对准（双轴误差 ≤4px 且连续保持 ≥0.5s）
 - [ ] Spray Action 调用成功，sprayed 计数正确
 - [ ] 复检逻辑正确（喷洒后回到观察姿态重新检测）
 - [ ] 无 Servo 安全锁定或碰撞
-- [ ] 最终 `/mission/status` 显示 `MISSION_COMPLETED`
+- [ ] `/mission/plan` 四个作业位姿正确
+- [ ] Nav2 按输入顺序到达四棵树，每次到站后 `/odom` 停稳 1 秒
+- [ ] 最终 `MISSION_COMPLETED`，`completed_targets=4`
 - [ ] 连续三轮无异常
 
 ---
@@ -430,8 +419,8 @@ ros2 topic hz /odom
 
 | 级 | 任务 | 模型 | 类别 |
 |----|------|------|------|
-| 第一级 | 果树检测 | YOLOv8s Detect | `tree` (0) |
-| 第二级 | 果实实例分割 | YOLOv8s-seg Seg | `healthy_fruit` (1), `diseased_fruit` (2) |
+| 第一级 | 果树检测 | YOLOv8n Detect | `tree` (0) |
+| 第二级 | 果实实例分割 | YOLOv8n-seg Seg | `healthy_fruit` (1), `diseased_fruit` (2) |
 
 分离的理由：
 - tree Detect：快速判断果树是否在视野中（不需要 mask）
@@ -447,24 +436,30 @@ ros2 topic hz /odom
 
 ## 9. 数据集与模型
 
-### 9.1 数据采集
+### 9.1 数据采集与训练状态
 
-已于 2026-07-16 重新采集 30 张无标注 C10 模拟图像：
+已于 2026-07-16 采集 30 张 C10 模拟图像（1280×720 PNG）：
 
-- 6 个视角 × 5 个 seed = 30 张，`1280×720` PNG
-- 训练集：seed 50-53 (24 张)，验证集：seed 54 (6 张)
-- 每个视角来自 `camera_look_at_pose` 的真实观察位姿
-- 同名 PNG 的 SHA256 在两个数据集之间逐张一致
-- 标签目录已创建但为空（待人工标注）
+- **树检测** (wvcsc_tree_detect)：24 train / 6 val，Labelme 手动标注完成。YOLOv8n 训练完成（epochs=20, lr0=0.001），验证集 mAP50=0.995, mAP50-95=0.941。权重已部署至 `wvcsc_rgb_vision/models/wvcsc_tree_yolov8n.pt`。
+- **果实分割** (wvcsc_fruit_seg)：24 train / 6 val，图像已采集，`labels/` 目录为空，待人工标注。训练脚本 `train_seg.py` 已优化为 YOLOv8n-seg（epochs=20, lr0=0.001, 含数据增强）。
+
+同名 PNG 的 SHA256 在两个数据集之间逐张一致（树检测图像为果实分割图像的全图副本）。
 
 ### 9.2 已部署权重
 
-| 文件 | SHA256 |
-|------|--------|
-| `wvcsc_tree_yolov8s.pt` | `71396df53b2ba831ac8380e70c64593967c18736efd63c3bfd8dbd6c39c9c6af` |
-| `wvcsc_fruit_yolov8s_seg.pt` | `1eb52a516227a74f4be59f7352e701ae3f6510a86891428907c24d8506d8503a` |
+| 文件 | 模型 | 大小 | 状态 |
+|------|------|------|------|
+| `wvcsc_tree_yolov8n.pt` | YOLOv8n Detect | 6.0 MB | ✅ 已训练，已部署 |
+| `wvcsc_fruit_yolov8n_seg.pt` | YOLOv8n-seg Seg | — | ❌ 待标注后训练 |
 
-### 9.3 YOLO 运行时
+### 9.3 模型路径解析
+
+推理时 `two_stage_yolo` 通过 `resolve_yolo_model_path()` 加载模型：
+- 相对路径（如 `wvcsc_tree_yolov8n.pt`）→ 解析到 `<wvcsc_rgb_vision share>/models/` 下
+- 绝对路径直接使用
+- 配置位于 `wvcsc_rgb_vision/config/vision_sim.yaml` 的 `tree_model_path` / `fruit_model_path`
+
+### 9.4 YOLO 运行时
 
 ```bash
 # 创建隔离 venv（不修改系统 Python）
@@ -485,3 +480,188 @@ PYTHONNOUSERSITE=1 /home/robot/venvs/wvcsc_yolo_ros/bin/python -m pip install \
 - Alicia-M 关节速度、加速度和扫描范围确认
 - 底盘停车误差和树行地图误差统计
 - 喷洒互锁、急停、药液状态和人员安全区
+
+---
+
+## 11. 视觉伺服诊断与分析（2026-07-17）
+
+### 11.1 当前问题
+
+最新 rosbag `wvcsc_servo_20260717_2241` 表明视觉控制器已经按约 20 Hz
+发布 Twist，但 MoveIt Servo 的 JointTrajectory 只有约 1 Hz：
+
+| 目标 | 对准时间 | 像素误差范数 | Twist | JointTrajectory | 结果 |
+|------|----------|--------------|-------|-----------------|------|
+| `fruit-1` | 8.05 s | 93.36 → 86.58 px | 19.34 Hz | 1.01 Hz | stalled |
+| `fruit-35` | 4.98 s | 175.62 → 173.24 px | 17.94 Hz | 1.02 Hz | stalled |
+
+两个目标均未进入双轴 `±8 px` 稳定区，最终 `sprayed=0`。命令速度积分
+只有约 14.6% 转化为相机实际路径，主瓶颈是 MoveIt Servo 输出链，不是
+PID 输出方向或视觉目标有效性。
+
+处理方式：
+
+1. MoveGroup 保留 KDL，用于全局规划；
+2. Servo 节点不加载 `robot_description_kinematics`，改用逆雅可比；
+3. `use_gazebo=false`，取消每条命令 30 点、1.5 秒的旧 Gazebo 兼容轨迹；
+4. `publish_joint_velocities=false`，匹配位置型 `arm_controller`；
+5. PID、速度、碰撞和奇异点参数暂不继续放大。
+
+### 11.2 已有调试能力
+
+| 通道 | 说明 |
+|------|------|
+| `/vision/visual_servo_debug` (5 Hz JSON) | 误差、命令速度、伺服状态、关节角度 |
+| `/vision/debug_image` | 树/果检测框 + 瞄准点标注 |
+| `/vision/target` (Target2D) | 当前选中目标的像素坐标和置信度 |
+| `/servo_node/delta_twist_cmds` | MoveIt Servo 实际执行的 twist |
+| `/servo_node/status` | MoveIt Servo 状态码 |
+| ROS 日志 WARN | `_abort()` 时输出完整终止诊断 |
+
+### 11.3 rosbag 录制
+
+只使用独立脚本手动录制，不接入 launch，也不恢复离线 CSV/报告工具：
+
+```bash
+cd /home/robot/WVCSC_S2Z_UTB_ARM
+bash src/wvcsc_visual_servo/scripts/record_servo_bag.sh
+```
+
+任务完成后按 `Ctrl+C` 停止。脚本自动 source ROS 和工作区，默认写入
+`~/bags/wvcsc/wvcsc_servo_YYYYMMDD_HHMM`。可通过 `WVCSC_BAG_DIR` 修改输出目录。
+
+`/vision/visual_servo_debug` 是 JSON 格式的 `std_msgs/String`。PlotJuggler
+不能直接把 JSON 字段拆成数值曲线，显示为乱码不代表 bag 损坏；后续将 bag
+交给 Codex 直接反序列化分析。
+
+### 11.4 Fairino 视觉伺服参考边界
+
+可参考 `/home/robot/fairino_robotarm/src/visual_servo` 中的真实控制周期、目标
+过期零速度、短时预测、跳变限制、速度/加速度限制、Servo 状态策略和稳定
+handoff。当前 WVCSC 已采用其中大部分基础思想。
+
+现阶段不移植 LADRC、NLADRC、MPC、Adaptive PID、三维深度控制、Fairino
+专用 DH 模型、250 Hz 参数或其面向硬件的安全配置。Fairino 使用带深度的
+基坐标系三维误差，WVCSC 当前只做固定喷洒距离下的图像平面 XY 对准，参数
+不能直接照搬。本轮关闭 Servo 在线碰撞检查仅是 Gazebo 吞吐修复，不是
+Fairino 参数移植，真实机械臂必须重新启用并验证。
+
+只有在 JointTrajectory 达到 `≥18 Hz` 后仍存在振荡、噪声或明显延迟，才
+根据新 rosbag 选择性增加目标跳变限制、延迟补偿或前馈。
+
+### 11.5 验收门槛
+
+- `/servo_node/delta_twist_cmds` 和 `/arm_controller/joint_trajectory` 均 `≥18 Hz`
+- 每条 JointTrajectory 只有一个 `time_from_start=0.05 s` 的目标点
+- 相机实际路径/命令积分比例 `≥60%`
+- 双轴误差均 `≤4 px` 且连续保持 `≥0.5 s`
+- 中位收敛时间 `≤5 s`，最大 `≤8 s`
+- 连续三轮满足 `detected == sprayed`、`unresolved=0`、`alignment_failures=0`
+
+### 11.6 2026-07-18 吞吐、检测去重与人工复位修复
+
+`wvcsc_servo_20260718_1344` 中视觉输入稳定，但非零 Twist 共 77 条时
+JointTrajectory 只有 5 条。Servo 状态始终为 0，碰撞缩放始终为 1.0，
+而碰撞检查实际仅约 2.18 Hz，说明 Humble Servo 的同步碰撞回调长期占用
+默认互斥回调组，阻塞了 Twist 和 stop 服务。
+
+本轮已实施：
+
+- Gazebo 配置将 Servo 内部 `check_collisions` 设为 `false`；观察位姿、
+  重心位姿的碰撞 IK、MoveIt 轨迹碰撞规划、关节限位和奇异点保护仍保留。
+  该配置不得直接用于真实机械臂。
+- 对齐结束先按 20 Hz 连续发布 0.25 秒零 Twist，再且仅调用一次 stop 服务；
+  日志分别记录原始对齐结果、stop 往返时间和最新目标年龄。
+- 最终容差改为双轴 `≤4 px` 并保持 `≥0.5 s`，近目标速度缩放改为 `1.0`，
+  对齐超时统一为 8 秒。
+- 果实模型显式使用 `iou=0.45`；跟踪前按 `IoU≥0.35` 或中心距离 `≤10 px`
+  去重。同位置跨类别且置信度差 `<0.10` 的结果视为歧义，不进入喷洒队列。
+- 调试标签简化为 `目标ID + 类别 + 置信度`，选中目标单独高亮；任务侧再次
+  防御性去重，避免一颗病果进入队列多次。
+
+机械臂因安全故障进入 stop 锁定后，只允许人工确认恢复：
+
+```bash
+ros2 topic pub --once /motion_control/command \
+  std_msgs/msg/String "{data: reset}"
+```
+
+必须等待：
+
+```text
+Reset reached HOME; send resume to unlock motion
+```
+
+再依次执行：
+
+```bash
+ros2 topic pub --once /motion_control/command \
+  std_msgs/msg/String "{data: resume}"
+
+ros2 service call /mission/reset std_srvs/srv/Trigger "{}"
+ros2 service call /mission/start std_srvs/srv/Trigger "{}"
+```
+
+若 HOME 复位失败，保持锁定，禁止发送 `resume` 或重新启动任务。下一轮仍用
+`record_servo_bag.sh` 手动录包；只有 JointTrajectory 与非零 Twist 均达到
+`≥18 Hz` 后，才根据数据决定是否继续整定 PID。
+
+### 11.7 2026-07-18 增益补偿与目标可靠性修复
+
+基线 `wvcsc_servo_20260718_1421` 仍未完成喷洒：
+
+| 目标 | 有效视觉帧 | 误差范数 | 结果 |
+|------|-------------|----------|------|
+| `fruit-1` | 100% | 18.17 → 5.61 px | 7.69 s 后停滞 |
+| `fruit-14` | 100% | 33.20 → 11.31 px | 8.28 s 超时 |
+| `fruit-42` | 7.7% | 40.65 → 40.79 px | 持续丢失后失败 |
+
+本轮代码变更：
+
+- Gazebo 视觉伺服 `Kp` 从 `0.45` 提高到 `1.00`，`Kd=0.005`、速度
+  `0.08 m/s`、加速度 `0.60 m/s²` 和 20 Hz 周期保持不变；停滞有效改善量
+  从 4 px 调整为 1 px。
+- 连续目标失效门槛改为 `0.75 s`。无效期间立即发零速、不累计停滞时间；
+  目标恢复后重新开始进展窗口，并清空旧预测速度。
+- 超时、停滞和目标丢失均冻结 stop 前最后有效目标，Action 结果和 debug
+  保留最后有效像素误差、连续不可用时长，不再被 stop 阶段的消息覆盖。
+- YOLO 推理阈值继续保持 `0.10`，供跟踪使用；任务队列和重心后 Servo
+  准入阈值提高到 `0.30`。
+- 重心后必须连续 `0.50 s` 同时满足 `Target2D.valid=true`、置信度
+  `≥0.30`、双轴误差 `≤48 px`，才允许发送 Align Goal。门控失败直接切换
+  下一观察位，不消耗视觉对准尝试。
+
+代码侧验证：
+
+```text
+93 passed
+wvcsc_visual_servo: build passed
+wvcsc_arm_task: build passed
+git diff --check: passed
+```
+
+Gazebo 尚未复验，因此不能把本轮标记为“快速收敛已完成”。下一轮执行：
+
+```bash
+cd ~/WVCSC_S2Z_UTB_ARM
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install \
+  --packages-select wvcsc_visual_servo wvcsc_arm_task
+source install/setup.bash
+
+# 另开终端手动录包
+bash src/wvcsc_visual_servo/scripts/record_servo_bag.sh
+```
+
+复验必须同时满足 11.5 节门槛，并重点确认：
+
+- 低置信度目标不再进入 Align Action；
+- 进入 Align 的目标有效率 `≥95%`，连续丢失不超过 `0.25 s`；
+- `fruit-1`、`fruit-14` 双轴均进入 `±4 px` 并保持 `≥0.5 s`；
+- 没有因 `min_progress_px=1.0` 产生虚假停滞；
+- `sprayed == unique_diseased_fruits`、`unresolved=0`。
+
+若控制链达标但重心后识别率仍不足，应优先补充“果实由画面上方移动到中心”
+的 orchard seed 隔离数据并重训，而不是继续提高 PID。新权重启用门槛为：
+重心后目标有效率 `≥95%`、病果置信度中位数 `≥0.30`、未见 seed 病果
+recall `≥0.90`。

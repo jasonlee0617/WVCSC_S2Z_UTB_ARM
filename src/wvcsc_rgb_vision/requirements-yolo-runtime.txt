@@ -1,6 +1,16 @@
+公司电脑：
 --extra-index-url https://download.pytorch.org/whl/cu130
 torch==2.13.0+cu130
 torchvision==0.28.0+cu130
+numpy==1.26.4
+opencv-python==4.11.0.86
+ultralytics==8.3.217
+
+
+实验室电脑：
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
 numpy==1.26.4
 opencv-python==4.11.0.86
 ultralytics==8.3.217

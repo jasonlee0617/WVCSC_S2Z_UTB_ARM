@@ -11,33 +11,36 @@ wvcsc_visual_servo:
     start_servo_service: /servo_node/start_servo
     stop_servo_service: /servo_node/stop_servo
     command_frame: camera_color_optical_frame
-    # Gazebo + MoveIt Servo execute one Cartesian update every ~0.10 s here.
-    # Keep IBVS integration on that measured cadence.
-    control_rate_hz: 10.0
+    # Performance-first Gazebo profile; retune conservatively before hardware.
+    control_rate_hz: 20.0
     default_timeout_sec: 8.0
     min_goal_timeout_sec: 0.5
     max_goal_timeout_sec: 30.0
-    target_stale_timeout_sec: 2.0
+    target_stale_timeout_sec: 0.75
     target_invalid_hold_sec: 0.25
     min_confidence: 0.10
     coarse_tolerance_px: 20.0
-    fine_tolerance_px: 8.0
+    fine_tolerance_px: 4.0
+    # stable_frames remains feedback telemetry; elapsed time decides success.
     stable_frames: 10
+    stable_duration_sec: 0.50
+    progress_window_sec: 4.0
+    min_progress_px: 1.0
     desired_offset_u_px: 0.0
     # Camera is about 55 mm from the tool0 axis: fy * 0.055 / 1.0 m.
     desired_offset_v_px: 28.0
     fallback_fx: 507.872735
     fallback_fy: 507.872735
     require_camera_info: true
-    pid_kp_xy: 0.10
+    pid_kp_xy: 1.00
     pid_ki_xy: 0.0
-    pid_kd_xy: 0.01
+    pid_kd_xy: 0.005
     pid_d_ema_alpha: 0.65
     derivative_clip_xy: 2.0
     integral_limit_xy: 0.10
-    max_linear_speed: 0.04
-    max_linear_acceleration: 0.25
-    near_target_speed_scale: 0.35
+    max_linear_speed: 0.08
+    max_linear_acceleration: 0.60
+    near_target_speed_scale: 1.0
     warning_speed_scale: 0.35
     command_sign_x: 1.0
     command_sign_y: 1.0
