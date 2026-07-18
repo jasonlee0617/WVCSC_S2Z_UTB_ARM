@@ -38,10 +38,6 @@ install(TARGETS retime_server
 install(DIRECTORY include/
   DESTINATION include
 )
-install(DIRECTORY launch
-  DESTINATION share/${PROJECT_NAME}
-)
-
 ament_export_dependencies(rosidl_default_runtime)
 
 if(BUILD_TESTING)

@@ -72,6 +72,8 @@ class SpraySimulator(Node):
         started = time.monotonic()
         duration = float(goal_handle.request.duration)
         self._set_active(True)
+        self.get_logger().info(
+            f'[SPRAY] 喷洒动作进行中......duration={duration:.1f}s')
         try:
             while True:
                 elapsed = time.monotonic() - started
@@ -90,6 +92,7 @@ class SpraySimulator(Node):
                     result.error_code = Spray.Result.OK
                     result.message = 'simulated spray completed'
                     goal_handle.succeed()
+                    self.get_logger().info('[SPRAY] 喷洒动作成功执行')
                     break
                 feedback = Spray.Feedback()
                 feedback.phase = Spray.Feedback.ACTIVE
@@ -97,11 +100,11 @@ class SpraySimulator(Node):
                 feedback.progress = min(1.0, elapsed / duration)
                 goal_handle.publish_feedback(feedback)
                 time.sleep(min(0.02, duration - elapsed))
-            result.actual_duration = time.monotonic() - started
-            return result
         finally:
             self._set_active(False)
             self._interlock.release()
+        result.actual_duration = time.monotonic() - started
+        return result
 
     def _on_emergency_stop(self, message):
         self._interlock.set_emergency_stop(message.data)

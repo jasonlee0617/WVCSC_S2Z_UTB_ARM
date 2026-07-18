@@ -21,6 +21,8 @@ def create_alicia_moveit(node, state):
         velocity_scaling=float(_parameter(node, 'velocity_scaling', 0.1)),
         acceleration_scaling=float(
             _parameter(node, 'acceleration_scaling', 0.1)),
+        retime_service_name=str(_parameter(
+            node, 'retime_service_name', '/retime_trajectory')),
         retime_timeout=float(_parameter(node, 'retime_timeout', 5.0)),
         execution_timeout=float(_parameter(node, 'execution_timeout', 60.0)),
         planning_time=float(_parameter(node, 'planning_time', 2.0)),

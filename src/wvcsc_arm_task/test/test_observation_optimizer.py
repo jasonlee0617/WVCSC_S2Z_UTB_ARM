@@ -34,6 +34,7 @@ def _optimizer(**overrides):
         'image_margin_ratio': 0.08,
         'max_condition_number': 12.0,
         'min_joint_margin_rad': 0.15,
+        'preferred_joint_margin_rad': 0.35,
     }
     config.update(overrides)
     return ObservationOptimizer(
@@ -75,3 +76,18 @@ def test_singular_kinematics_are_never_ranked():
 
     assert math.isinf(candidate.condition_number) or candidate.condition_number >= 12.0
     assert optimizer.rank([candidate]) == []
+
+
+def test_rank_prefers_servo_joint_reserve_before_condition_number():
+    optimizer = _optimizer(max_condition_number=math.inf)
+    low_margin, reserved = _candidates(optimizer)[:2]
+    low_margin.visible = True
+    low_margin.rejection_reason = ''
+    low_margin.condition_number = 5.0
+    low_margin.min_joint_margin_rad = 0.20
+    reserved.visible = True
+    reserved.rejection_reason = ''
+    reserved.condition_number = 8.0
+    reserved.min_joint_margin_rad = 0.50
+
+    assert optimizer.rank([low_margin, reserved]) == [reserved, low_margin]

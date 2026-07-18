@@ -1,6 +1,7 @@
 import os
 import socket
 import subprocess
+from functools import partial
 from urllib.parse import urlparse
 
 import yaml
@@ -17,7 +18,7 @@ from launch.actions import (
     Shutdown,
     TimerAction,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
@@ -36,6 +37,28 @@ def load_yaml(package, relative_path):
     path = os.path.join(get_package_share_directory(package), relative_path)
     with open(path, encoding='utf-8') as stream:
         return yaml.safe_load(stream)
+
+
+def process_exit_actions(
+        event, _context, *, process_name, success_actions):
+    """Continue a startup chain only after a process exits successfully."""
+    if event.returncode == 0:
+        return list(success_actions)
+    return [Shutdown(
+        reason=f'{process_name} exited with code {event.returncode}')]
+
+
+def validate_arm_scaling(context):
+    """Reject unsafe or malformed launch overrides before Gazebo starts."""
+    for name in ('arm_velocity_scaling', 'arm_acceleration_scaling'):
+        raw_value = LaunchConfiguration(name).perform(context)
+        try:
+            value = float(raw_value)
+        except ValueError as error:
+            raise RuntimeError(f'{name} must be a number in (0, 1]') from error
+        if not 0.0 < value <= 1.0:
+            raise RuntimeError(f'{name} must be in (0, 1], got {raw_value}')
+    return []
 
 
 def ensure_fresh_gazebo_master(_context):
@@ -122,20 +145,18 @@ def generate_launch_description():
     use_mock_uav = LaunchConfiguration('use_mock_uav')
     use_replay_uav = LaunchConfiguration('use_replay_uav')
     use_mission_manager = LaunchConfiguration('use_mission_manager')
-    use_web_ui = LaunchConfiguration('use_web_ui')
+    arm_velocity_scaling = LaunchConfiguration('arm_velocity_scaling')
+    arm_acceleration_scaling = LaunchConfiguration('arm_acceleration_scaling')
     yolo_python_executable = LaunchConfiguration('yolo_python_executable')
     auto_start_mission = LaunchConfiguration('auto_start_mission')
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
     mock_target_config = LaunchConfiguration('mock_target_config')
     replay_target_config = LaunchConfiguration('replay_target_config')
-    web_host = LaunchConfiguration('web_host')
-    web_port = LaunchConfiguration('web_port')
     description_share = get_package_share_directory('wvcsc_description')
     simulation_share = get_package_share_directory('wvcsc_simulation')
     arm_task_share = get_package_share_directory('wvcsc_arm_task')
     mission_share = get_package_share_directory('wvcsc_mission_manager')
     uav_share = get_package_share_directory('wvcsc_uav_gateway')
-    web_share = get_package_share_directory('wvcsc_web_ui')
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
     visual_servo_share = get_package_share_directory('wvcsc_visual_servo')
     spray_share = get_package_share_directory('wvcsc_spray_controller')
@@ -268,9 +289,31 @@ def generate_launch_description():
                    '-x', '0', '-y', '0', '-z', '0'],
         output='screen',
     )
-    unpause = ExecuteProcess(
+    zero_gravity = ExecuteProcess(
+        cmd=[
+            'gz', 'topic', '-p', '/gazebo/orchard/physics',
+            '-m', 'gravity { x: 0 y: 0 z: 0 }',
+        ],
+        output='log',
+        condition=IfCondition(enable_arm_control),
+    )
+    unpause_with_zero_gravity = ExecuteProcess(
         cmd=['gz', 'topic', '-p', '/gazebo/orchard/world_control', '-m', 'pause: false'],
         output='log',
+        condition=IfCondition(enable_arm_control),
+    )
+    restore_gravity = ExecuteProcess(
+        cmd=[
+            'gz', 'topic', '-p', '/gazebo/orchard/physics',
+            '-m', 'gravity { x: 0 y: 0 z: -9.8 }',
+        ],
+        output='log',
+        condition=IfCondition(enable_arm_control),
+    )
+    unpause_without_arm = ExecuteProcess(
+        cmd=['gz', 'topic', '-p', '/gazebo/orchard/world_control', '-m', 'pause: false'],
+        output='log',
+        condition=UnlessCondition(enable_arm_control),
     )
     vehicle_sim = Node(
         package='wvcsc_simulation', executable='ackermann_sim.py',
@@ -302,8 +345,11 @@ def generate_launch_description():
         'base_frame': 'alicia_base_link',
         'group_name': 'arm',
         'tool_link': 'tool0',
-        'velocity_scaling': 0.2,
-        'acceleration_scaling': 0.2,
+        'velocity_scaling': ParameterValue(
+            arm_velocity_scaling, value_type=float),
+        'acceleration_scaling': ParameterValue(
+            arm_acceleration_scaling, value_type=float),
+        'retime_service_name': '/retime_trajectory',
         'retime_timeout': 5.0,
         'execution_timeout': 60.0,
         'planning_time': 2.0,
@@ -322,6 +368,7 @@ def generate_launch_description():
         '--controller-manager', '/controller_manager',
         '--controller-manager-timeout', '30.0',
         '--switch-timeout', '30.0',
+        '--service-call-timeout', '30.0',
     ]
     joint_state_controller = Node(
         package='controller_manager', executable='spawner',
@@ -380,15 +427,31 @@ def generate_launch_description():
     )
     start_arm_controller = RegisterEventHandler(OnProcessExit(
         target_action=joint_state_controller,
-        on_exit=[arm_controller],
+        on_exit=partial(
+            process_exit_actions,
+            process_name='joint_state_broadcaster spawner',
+            success_actions=[arm_controller]),
+    ))
+    start_zero_gravity_physics = RegisterEventHandler(OnProcessExit(
+        target_action=zero_gravity,
+        on_exit=[unpause_with_zero_gravity],
     ))
     start_gripper_controller = RegisterEventHandler(OnProcessExit(
         target_action=arm_controller,
-        on_exit=[gripper_controller],
+        on_exit=partial(
+            process_exit_actions,
+            process_name='arm_controller spawner',
+            success_actions=[gripper_controller]),
     ))
     start_spray_task = RegisterEventHandler(OnProcessExit(
         target_action=gripper_controller,
-        on_exit=[spray_task],
+        # Controller switching requires Gazebo's update loop. Physics therefore
+        # runs with zero gravity during startup, then normal gravity is restored
+        # only after every arm controller has been spawned.
+        on_exit=partial(
+            process_exit_actions,
+            process_name='gripper_controller spawner',
+            success_actions=[restore_gravity, spray_task]),
     ))
     world_map = Node(
         package='tf2_ros', executable='static_transform_publisher',
@@ -479,18 +542,6 @@ def generate_launch_description():
             use_nav2_qt, "' != 'true'",
         ])), output='screen',
     )
-    web_ui = Node(
-        package='wvcsc_web_ui', executable='web_server',
-        parameters=[
-            os.path.join(web_share, 'config', 'web_ui.yaml'),
-            {
-                'host': web_host,
-                'port': ParameterValue(web_port, value_type=int),
-                'use_sim_time': True,
-            },
-        ],
-        condition=IfCondition(use_web_ui), output='screen',
-    )
     spray_simulator = Node(
         package='wvcsc_spray_controller', executable='spray_simulator',
         parameters=[
@@ -529,10 +580,11 @@ def generate_launch_description():
     post_spawn = RegisterEventHandler(OnProcessExit(
         target_action=spawn,
         on_exit=[
-            unpause,
+            zero_gravity,
+            unpause_without_arm,
             TimerAction(period=0.5, actions=[vehicle_sim]),
             TimerAction(period=0.75, actions=[yolo_vision]),
-            TimerAction(period=1.0, actions=[joint_state_controller]),
+            TimerAction(period=1.5, actions=[joint_state_controller]),
             TimerAction(period=2.0, actions=[map_server, map_lifecycle]),
             TimerAction(period=3.0, actions=[nav2]),
             TimerAction(
@@ -554,7 +606,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_mock_uav', default_value='true'),
         DeclareLaunchArgument('use_replay_uav', default_value='false'),
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
-        DeclareLaunchArgument('use_web_ui', default_value='false'),
+        DeclareLaunchArgument('arm_velocity_scaling', default_value='0.40'),
+        DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.50'),
         DeclareLaunchArgument(
             'yolo_python_executable', default_value='/home/robot/venvs/wvcsc_yolo_ros/bin/python'),
         DeclareLaunchArgument('auto_start_mission', default_value='true'),
@@ -565,10 +618,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'replay_target_config',
             default_value=os.path.join(uav_share, 'config', 'replay_targets.yaml')),
-        DeclareLaunchArgument('web_host', default_value='127.0.0.1'),
-        DeclareLaunchArgument('web_port', default_value='8080'),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),
+        OpaqueFunction(function=validate_arm_scaling),
         OpaqueFunction(function=ensure_fresh_gazebo_master),
         OpaqueFunction(function=check_yolo_runtime),
         OpaqueFunction(
@@ -581,14 +633,14 @@ def generate_launch_description():
         map_odom,
         spawn,
         post_spawn,
+        start_zero_gravity_physics,
         move_group,
-        moveit_servo,
         retime_server,
+        moveit_servo,
         motion_control,
         start_arm_controller,
         start_gripper_controller,
         start_spray_task,
-        web_ui,
         spray_simulator,
         visual_servo,
         rviz,

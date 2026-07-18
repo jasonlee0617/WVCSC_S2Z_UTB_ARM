@@ -1,6 +1,6 @@
 """Two-stage C10 perception: tree detection followed by fruit segmentation."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 from pathlib import Path
@@ -71,6 +71,83 @@ class Instance:
 class Track:
     instance: Instance
     missed_frames: int = 0
+
+
+@dataclass(frozen=True)
+class TargetTemplate:
+    patch: np.ndarray
+    bbox_left: float
+    bbox_top: float
+    bbox_right: float
+    bbox_bottom: float
+    aim_u: float
+    aim_v: float
+    confidence: float
+
+
+def capture_target_template(
+        image, target, padding_ratio=0.50, min_padding_px=6.0):
+    """Capture a local appearance template after a YOLO target lock."""
+    height, width = image.shape[:2]
+    pad_x = max(float(min_padding_px), target.width * float(padding_ratio))
+    pad_y = max(float(min_padding_px), target.height * float(padding_ratio))
+    left = max(0, int(math.floor(target.left - pad_x)))
+    top = max(0, int(math.floor(target.top - pad_y)))
+    right = min(width, int(math.ceil(target.right + pad_x)))
+    bottom = min(height, int(math.ceil(target.bottom + pad_y)))
+    if right - left < 3 or bottom - top < 3:
+        return None
+    patch = image[top:bottom, left:right].copy()
+    if patch.size == 0 or float(np.std(patch)) < 1.0:
+        return None
+    return TargetTemplate(
+        patch,
+        target.left - left, target.top - top,
+        target.right - left, target.bottom - top,
+        target.aim_u - left, target.aim_v - top,
+        target.confidence,
+    )
+
+
+def match_target_template(
+        image, template, reference, search_radius_px=80.0,
+        min_score=0.55):
+    """Track a locked target through a short YOLO dropout."""
+    image_height, image_width = image.shape[:2]
+    template_height, template_width = template.patch.shape[:2]
+    previous_left = reference.left - template.bbox_left
+    previous_top = reference.top - template.bbox_top
+    radius = max(0.0, float(search_radius_px))
+    search_left = max(0, int(math.floor(previous_left - radius)))
+    search_top = max(0, int(math.floor(previous_top - radius)))
+    search_right = min(
+        image_width,
+        int(math.ceil(previous_left + template_width + radius)))
+    search_bottom = min(
+        image_height,
+        int(math.ceil(previous_top + template_height + radius)))
+    search = image[search_top:search_bottom, search_left:search_right]
+    if (search.shape[0] < template_height or
+            search.shape[1] < template_width):
+        return None
+    scores = cv2.matchTemplate(
+        search, template.patch, cv2.TM_CCOEFF_NORMED)
+    _, score, _, location = cv2.minMaxLoc(scores)
+    if not math.isfinite(score) or score < float(min_score):
+        return None
+    patch_left = search_left + location[0]
+    patch_top = search_top + location[1]
+    return Instance(
+        reference.target_id,
+        reference.class_name,
+        min(float(template.confidence), float(score)),
+        patch_left + template.bbox_left,
+        patch_top + template.bbox_top,
+        patch_left + template.bbox_right,
+        patch_top + template.bbox_bottom,
+        patch_left + template.aim_u,
+        patch_top + template.aim_v,
+    )
 
 
 def deduplicate_instances(
@@ -264,6 +341,7 @@ class TwoStageYolo(Node):
         self._tree_id = ''
         self._selected_target_id = ''
         self._selected_target_reference = None
+        self._selected_target_template = None
         self._inference_mode = 'idle'
         self._next_target_number = 1
         self._tracks = []
@@ -312,19 +390,25 @@ class TwoStageYolo(Node):
             'fruit_visualization_topic': '/vision/fruit_debug_image',
             'perception_debug_topic': '/vision/perception_debug',
             'perception_debug_rate_hz': 5.0,
-            'tree_model_path': 'wvcsc_tree_yolov8s1.pt',
-            'fruit_model_path': 'wvcsc_fruit_yolov8s_seg1.pt',
+            'tree_model_path': 'wvcsc_tree_yolov8s.pt',
+            'fruit_model_path': 'wvcsc_fruit_yolov8s_seg.pt',
             'inference_mode_topic': '/vision/inference_mode',
             'tree_confidence': 0.10,
             'fruit_confidence': 0.10,
             'roi_padding': 0.10,
-            'track_iou_threshold': 0.30,
-            'track_center_distance_px': 40.0,
-            'track_max_missed_frames': 3,
+            'track_iou_threshold': 0.20,
+            'track_center_distance_px': 50.0,
+            'track_max_missed_frames': 5,
             'target_reassociation_iou_margin': 0.10,
             'target_reassociation_distance_margin_px': 8.0,
             'target_equivalent_aim_distance_px': 8.0,
-            'target_lock_ema_alpha': 0.35,
+            'target_lock_ema_alpha': 0.50,
+            'target_template_tracking_enabled': True,
+            'target_template_update_min_confidence': 0.30,
+            'target_template_padding_ratio': 0.50,
+            'target_template_min_padding_px': 6.0,
+            'target_template_search_radius_px': 80.0,
+            'target_template_min_score': 0.55,
             'tree_lock_iou_threshold': 0.20,
             'publish_visualization': True,
         }
@@ -363,6 +447,7 @@ class TwoStageYolo(Node):
         if not active:
             self._selected_target_id = ''
             self._selected_target_reference = None
+            self._selected_target_template = None
 
     def _on_selected_target(self, message):
         selected_target_id = message.data.strip()
@@ -374,6 +459,7 @@ class TwoStageYolo(Node):
         self._selected_target_reference = next(
             (track.instance for track in self._tracks
              if track.instance.target_id == self._selected_target_id), None)
+        self._selected_target_template = None
         self._last_target_state = None
 
     def _on_inference_mode(self, message):
@@ -409,7 +495,8 @@ class TwoStageYolo(Node):
         invalid_reason = 'not_target_mode'
         event = 'frame'
         if self._inference_mode == 'target':
-            target, invalid_reason, event = self._publish_selected_target(message, fruits)
+            target, invalid_reason, event = self._publish_selected_target(
+                message, fruits, image)
         elif tree is None:
             invalid_reason = 'no_tree'
         elif self._inference_mode == 'fruits' and not any(
@@ -522,6 +609,7 @@ class TwoStageYolo(Node):
         self._tracks = []
         self._locked_tree = None
         self._selected_target_reference = None
+        self._selected_target_template = None
 
     @staticmethod
     def _array(image, instances):
@@ -579,8 +667,65 @@ class TwoStageYolo(Node):
             return target, 'none', event
         return None, reason, 'target_invalid'
 
-    def _publish_selected_target(self, image, instances):
+    def _resolve_or_track_selected_target(self, image, instances):
         target, invalid_reason, event = self._resolve_selected_target(instances)
+        tracking_enabled = (
+            image is not None and
+            bool(self.get_parameter(
+                'target_template_tracking_enabled').value))
+        update_min_confidence = (
+            float(self.get_parameter(
+                'target_template_update_min_confidence').value)
+            if image is not None else 1.0)
+        template = getattr(self, '_selected_target_template', None)
+        if (
+                target is not None and tracking_enabled and
+                target.confidence < update_min_confidence and
+                template is not None):
+            tracked = match_target_template(
+                image, template, self._selected_target_reference,
+                self.get_parameter('target_template_search_radius_px').value,
+                self.get_parameter('target_template_min_score').value)
+            if tracked is not None:
+                self._selected_target_reference = tracked
+                return tracked, 'none', 'target_template_tracked'
+        if target is not None:
+            if (
+                    image is not None and
+                    target.confidence >= update_min_confidence):
+                captured = capture_target_template(
+                    image, target,
+                    self.get_parameter(
+                        'target_template_padding_ratio').value,
+                    self.get_parameter(
+                        'target_template_min_padding_px').value)
+                if captured is not None:
+                    if template is not None:
+                        captured = replace(
+                            captured,
+                            confidence=max(
+                                template.confidence, captured.confidence))
+                    self._selected_target_template = captured
+            return target, invalid_reason, event
+        if (
+                not tracking_enabled or
+                self._selected_target_reference is None or
+                template is None):
+            return target, invalid_reason, event
+        tracked = match_target_template(
+            image,
+            template,
+            self._selected_target_reference,
+            self.get_parameter('target_template_search_radius_px').value,
+            self.get_parameter('target_template_min_score').value)
+        if tracked is None:
+            return target, invalid_reason, event
+        self._selected_target_reference = tracked
+        return tracked, 'none', 'target_template_tracked'
+
+    def _publish_selected_target(self, image, instances, cv_image=None):
+        target, invalid_reason, event = self._resolve_or_track_selected_target(
+            cv_image, instances)
         if not self._selected_target_id:
             return target, invalid_reason, event
         message = Target2D()

@@ -14,9 +14,6 @@
   <depend>moveit_ros_planning</depend>
   <depend>rclcpp</depend>
   <depend>trajectory_msgs</depend>
-  <exec_depend>launch</exec_depend>
-  <exec_depend>launch_ros</exec_depend>
-  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>

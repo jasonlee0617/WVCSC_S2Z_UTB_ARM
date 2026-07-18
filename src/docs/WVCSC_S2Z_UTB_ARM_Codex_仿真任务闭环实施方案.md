@@ -1,8 +1,24 @@
 # WVCSC ARMSpray 视觉喷洒闭环实施方案
 
 > 更新日期：2026-07-18
-> 当前阶段：两级 YOLO、动态观察/重心、20 Hz MoveIt Servo 和病果逐个喷洒链路均已接通；最新 `wvcsc_servo_20260718_1421` 尚未完成喷洒，本轮已实施增益补偿、连续目标失效判定和重心后可靠性门控，等待 Gazebo 复验。
-> 验证结果：本轮 `wvcsc_visual_servo`、`wvcsc_arm_task` 隔离构建通过，93 项相关测试通过。动态观察位姿、目标重心、检测去重、对准恢复和人工安全复位均已实现。
+> 当前阶段：四树基线已完成 `4/4`，7 次视觉对准和喷洒全部成功；对准中位时间 `1.4 s`、最大 `2.0 s`，最终单轴误差不超过 `2 px`。本轮已实施仿真机械臂平衡加速、控制器启动 fail-fast 和严格病果目标核算，等待相同 seed 连续三轮 Gazebo 性能验收。
+> 验证结果：全部 WVCSC Python 测试 `185/185` 通过；本轮变更包隔离构建通过，`colcon test-result` 为 `79 tests, 0 errors, 0 failures`。动态观察位姿、目标重心、检测去重、对准恢复、人工安全复位和轨迹性能日志均已实现。
+
+## 0. 2026-07-18 工作区收敛记录
+
+本轮在不修改硬件/上游包、不改变闭环 ROS 接口、不删除任何 YOLO 权重的边界内完成代码收敛：
+
+- ROS 包由 26 个收敛为 25 个，删除默认关闭且与 Nav2 Qt 功能重叠的 `wvcsc_web_ui`。
+- 支持入口集中到 `wvcsc_simulation/system_sim.launch.py`、C10 launch 和各节点 `ros2 run`；删除 7 个无调用方的独立 launch。
+- `trajectory_retime_server` 核心服务继续保留给未修改的 `alicia_m_bringup`，但 `wvcsc_arm_task` 和仿真主入口不再依赖它。
+- 删除未使用的 `AliciaMoveIt.move_cartesian()`、内部 retime 适配、`close_gripper()` 和对应失效测试。
+- 视觉 PID 从带永久零 Z 轴的 NumPy 三维实现收敛为标准库二维实现；Servo 状态、目标预测、稳定判定和安全语义不变。
+- fruit/tree 双数据集共享 split 验证逻辑，外部数据集和训练脚本不改动。
+- Mission Manager 的默认停靠横向偏移统一由 `DEFAULT_DOCKING_LATERAL_OFFSET=0.2` 定义。
+
+代码重构不替代 Gazebo 性能验收。单轮四树已达到视觉伺服
+“2 px/轴、稳定 0.5 s、中位 1.4 s、最大 2.0 s”；当前未完成 Gate
+仅剩相同 seed 下连续三轮四树成功，以及提速后的轨迹和总耗时指标。
 
 ## 1. 目标与边界
 
@@ -665,3 +681,36 @@ bash src/wvcsc_visual_servo/scripts/record_servo_bag.sh
 的 orchard seed 隔离数据并重训，而不是继续提高 PID。新权重启用门槛为：
 重心后目标有效率 `≥95%`、病果置信度中位数 `≥0.30`、未见 seed 病果
 recall `≥0.90`。
+
+### 11.8 2026-07-18 四树质量修复与机械臂平衡加速
+
+最新四树基线已证明视觉伺服达到快速、高精度对准：7 次对准全部
+成功，中位时间 `1.4 s`、最大 `2.0 s`，最终单轴误差 `≤2 px`。
+因此本轮不再修改 PID、Servo 周期或速度上限，只处理全局轨迹耗时、
+启动竞争和目标统计闭环。
+
+已实施：
+
+- `system_sim.launch.py` 新增 `arm_velocity_scaling:=0.40` 和
+  `arm_acceleration_scaling:=0.50`，同时传给 `motion_control` 和 `spray_task`；
+  非数字或不在 `(0,1]` 的值会在 Gazebo 启动前被拒绝。
+- AliciaMoveIt 启动时输出最终缩放值，每条已执行轨迹输出
+  `planned_duration`、`actual_duration`、速度/加速度缩放和结果。
+- 所有 controller spawner 的服务调用超时扩展到 `30 s`；只有前一个
+  spawner 返回 `0` 才启动下一个，否则立即关闭 launch。
+- 树级目标台账使用现有 `IoU≥0.30` 或中心距离 `≤40 px` 合并重关联
+  目标；消失的 `PENDING` 目标必须转为 `UNRESOLVED`，并强制验证
+  `detected == sprayed + unresolved`。
+
+性能验收仍需用相同 orchard seed 连续运行三轮。目标是 26 条机械臂轨迹
+累计 `≤65 s`、P90 `≤4.5 s`、四树总时间 `≤195 s`，同时保持全部轨迹
+成功、关节跟踪误差 P95 `≤0.01 rad`、`unresolved=0`。若提速后出现轨迹
+起点容差或限位告警，可立即回退：
+
+```bash
+ros2 launch wvcsc_simulation system_sim.launch.py \
+  arm_velocity_scaling:=0.20 \
+  arm_acceleration_scaling:=0.20
+```
+
+上述 `0.40/0.50` 只用于 Gazebo，不得直接移植到真实 Alicia-M。

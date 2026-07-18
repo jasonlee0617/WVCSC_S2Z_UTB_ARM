@@ -20,6 +20,7 @@ from wvcsc_interfaces.msg import (
 from wvcsc_interfaces.srv import LoadManualMission
 
 from .core import (
+    DEFAULT_DOCKING_LATERAL_OFFSET,
     MissionCore,
     MissionState,
     StopDetector,
@@ -118,7 +119,7 @@ class MissionManager(Node):
             'spray_action_name': '/arm/execute_spray',
             'road_center_y': 0.0,
             'road_yaw': 0.0,
-            'docking_lateral_offset': 0.2,
+            'docking_lateral_offset': DEFAULT_DOCKING_LATERAL_OFFSET,
             'manual_tree_standoff': 1.5,
             'manual_tree_base_z': 0.0,
             'nav_goal_timeout_sec': 120.0,

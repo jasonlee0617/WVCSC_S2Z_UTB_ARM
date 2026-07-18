@@ -102,21 +102,35 @@ def tool_pose_from_camera_pose(
 
 def recenter_camera_pose(
         camera_position, camera_quat_xyzw, camera_model, center_u, center_v,
-        desired_offset_u_px, desired_offset_v_px, max_angle_degrees):
-    """Keep camera position fixed and rotate a detected pixel to the spray pixel."""
+        desired_offset_u_px, desired_offset_v_px, max_angle_degrees,
+        residual_error_px=0.0):
+    """Rotate toward the spray pixel while optionally leaving IBVS residual."""
     camera_position = tuple(float(value) for value in camera_position)
     fx, fy, cx, cy, width, height = camera_model
     values = (*camera_position, fx, fy, cx, cy, center_u, center_v,
-              desired_offset_u_px, desired_offset_v_px, max_angle_degrees)
+              desired_offset_u_px, desired_offset_v_px, max_angle_degrees,
+              residual_error_px)
     if (not all(math.isfinite(float(value)) for value in values) or
             fx <= 0.0 or fy <= 0.0 or width <= 0 or height <= 0 or
-            max_angle_degrees <= 0.0):
+            max_angle_degrees <= 0.0 or residual_error_px < 0.0):
         raise ValueError('target recenter inputs are invalid')
-    current_ray = _unit_vector(((float(center_u) - float(cx)) / float(fx),
-                                (float(center_v) - float(cy)) / float(fy), 1.0))
+    desired_u = float(width) / 2.0 + float(desired_offset_u_px)
+    desired_v = float(height) / 2.0 + float(desired_offset_v_px)
+    error_u = float(center_u) - desired_u
+    error_v = float(center_v) - desired_v
+    maximum_error = max(abs(error_u), abs(error_v))
+    if residual_error_px > 0.0 and maximum_error > residual_error_px:
+        residual_scale = float(residual_error_px) / maximum_error
+        desired_u += residual_scale * error_u
+        desired_v += residual_scale * error_v
+    current_ray = _unit_vector((
+        (float(center_u) - float(cx)) / float(fx),
+        (float(center_v) - float(cy)) / float(fy),
+        1.0,
+    ))
     desired_ray = _unit_vector((
-        ((float(width) / 2.0 + float(desired_offset_u_px)) - float(cx)) / float(fx),
-        ((float(height) / 2.0 + float(desired_offset_v_px)) - float(cy)) / float(fy),
+        (desired_u - float(cx)) / float(fx),
+        (desired_v - float(cy)) / float(fy),
         1.0,
     ))
     angle = math.degrees(math.acos(max(-1.0, min(1.0, sum(
@@ -127,7 +141,11 @@ def recenter_camera_pose(
     world_rotation = _quaternion_between_vectors(
         rotate_vector(desired_ray, camera_quat_xyzw),
         rotate_vector(current_ray, camera_quat_xyzw))
-    return camera_position, quaternion_multiply(world_rotation, camera_quat_xyzw), angle
+    return (
+        camera_position,
+        quaternion_multiply(world_rotation, camera_quat_xyzw),
+        angle,
+    )
 
 
 def _unit_vector(vector):

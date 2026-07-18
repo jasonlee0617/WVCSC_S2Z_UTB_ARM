@@ -1,5 +1,10 @@
 wvcsc_spray_task:
   ros__parameters:
+    retime_service_name: /retime_trajectory
+    retime_timeout: 5.0
+    gripper_open_position: 0.0
+    gripper_closed_position: -0.05
+    gripper_max_effort: 5.0
     home_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     # Physical fruit envelope, searched online with CameraInfo, collision IK,
     # Jacobian condition number and joint-limit margin. These are not poses.
@@ -14,10 +19,16 @@ wvcsc_spray_task:
     camera_height_step_m: 0.10
     observation_azimuth_offsets_deg: [0.0, -12.0, 12.0]
     observation_image_margin_ratio: 0.07
-    # Below MoveIt Servo's 17.0 singularity slowdown threshold; admits a
-    # separate recovery viewpoint instead of leaving only one safe candidate.
-    observation_max_condition_number: 14.0
-    observation_min_joint_margin_rad: 0.15
+    # Below MoveIt Servo's 17.0 singularity slowdown threshold.
+    observation_max_condition_number: 16.5
+    # Hard rejection threshold and preferred reserve are separate: candidates
+    # below 0.35 rad remain available only as recovery views.
+    observation_min_joint_margin_rad: 0.22
+    observation_preferred_joint_margin_rad: 0.35
+    # 0.05 rad allowed roughly 25 px of orientation endpoint error at fx=508.
+    # Tighten the MoveIt endpoint so recenter, not IBVS, removes the large error.
+    observation_position_tolerance_m: 0.01
+    observation_orientation_tolerance_rad: 0.01
     observation_input_timeout_sec: 2.0
     observation_search_timeout_sec: 8.0
     observation_max_plans: 8
@@ -38,16 +49,24 @@ wvcsc_spray_task:
     motion_locked_topic: /motion_control/locked
     tree_confidence: 0.10
     # Task admission threshold; YOLO still publishes tracking data from 0.10.
-    fruit_confidence: 0.30
+    fruit_confidence: 0.20
     confirmation_frames: 3
     # Three consecutive real-YOLO detections need more than one inference period.
     scan_pose_detection_timeout_sec: 5.0
     detection_timeout_sec: 5.0
+    # Once one disease target is stable, keep collecting briefly so a lower
+    # confidence fruit is not discarded merely because it stabilized later.
+    fruit_collection_settle_sec: 1.00
     max_alignment_attempts: 2
     # Reorient once before fine visual servo when a fruit is outside its
     # ±48 px micro-adjustment workspace. Values mirror visual_servo.yaml.
     target_recenter_trigger_px: 48.0
-    target_recenter_max_angle_deg: 18.0
+    target_recenter_max_angle_deg: 20.0
+    target_recenter_refine_goal_px: 8.0
+    target_recenter_max_iterations: 2
+    # Try full centering first, then preserve progressively more joint margin.
+    # Every candidate remains inside the ±48 px fine-Servo workspace.
+    target_recenter_residual_candidates_px: [0.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0]
     target_recenter_desired_offset_u_px: 0.0
     target_recenter_desired_offset_v_px: 28.0
     target_post_recenter_stable_sec: 0.50

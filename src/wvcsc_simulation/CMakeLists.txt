@@ -29,6 +29,10 @@ if(BUILD_TESTING)
     ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
     APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}"
   )
+  ament_add_pytest_test(
+    test_system_sim_launch test/test_system_sim_launch.py
+    ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
 endif()
 
 ament_package()

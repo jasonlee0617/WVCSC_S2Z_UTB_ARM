@@ -1,14 +1,15 @@
 import math
 import threading
+import time
 from types import SimpleNamespace
 
 from action_msgs.msg import GoalStatus
-from wvcsc_interfaces.action import AlignTarget
+from wvcsc_interfaces.action import AlignTarget, ExecuteSpray
 
 from wvcsc_arm_task.spray_task import (
     FruitTarget, SprayTask, TargetAttempt, completion_feedback_allowed,
     deduplicate_candidates, detection_candidates, final_spray_outcome,
-    spray_summary, target_requires_recenter)
+    spray_summary, target_accounting_is_complete, target_requires_recenter)
 from wvcsc_arm_task.observation_optimizer import ObservationCandidate
 
 
@@ -18,6 +19,9 @@ def _target(target_id, center_u, center_v, confidence=0.9):
 
 class _QueueHarness:
     _queue = SprayTask._queue
+    _remember_targets = SprayTask._remember_targets
+    _replace_known_target = SprayTask._replace_known_target
+    _pending_targets = SprayTask._pending_targets
     _attempt_for = SprayTask._attempt_for
     _same_target = SprayTask._same_target
     _mark_unresolved = SprayTask._mark_unresolved
@@ -56,6 +60,56 @@ def test_queue_keeps_only_the_highest_confidence_duplicate():
     assert task._queue([weaker, stronger], []) == [stronger]
 
 
+def test_target_ledger_merges_reidentified_fruit_by_geometry():
+    task = _QueueHarness()
+    known = []
+    task._remember_targets(known, [
+        _target('fruit-1', 640.0, 360.0),
+        _target('fruit-2', 800.0, 360.0),
+    ])
+    task._remember_targets(known, [
+        _target('fruit-9', 650.0, 360.0, confidence=0.95),
+    ])
+
+    assert len(known) == 2
+    assert known[0].target_id == 'fruit-9'
+
+
+def test_recovery_reassociation_replaces_the_previous_ledger_target():
+    task = _QueueHarness()
+    previous = _target('fruit-1', 200.0, 200.0)
+    known = [previous, _target('fruit-2', 900.0, 500.0)]
+    reassociated = _target('fruit-10', 700.0, 360.0)
+
+    task._replace_known_target(known, previous, reassociated)
+
+    assert [target.target_id for target in known] == ['fruit-10', 'fruit-2']
+
+
+def test_disappeared_pending_target_is_not_silently_completed():
+    task = _QueueHarness()
+    treated = _target('fruit-1', 640.0, 360.0)
+    missing = _target('fruit-2', 800.0, 360.0)
+    known = [treated, missing]
+    processed = [treated]
+    exhausted = []
+
+    for target in task._pending_targets(known, processed, exhausted):
+        task._mark_unresolved(target, exhausted)
+
+    assert [target.target_id for target in exhausted] == ['fruit-2']
+    assert len(known) == len(processed) + len(exhausted)
+    code, _message = final_spray_outcome(
+        len(processed), len(exhausted), True,
+        spray_summary(len(known), len(processed), len(exhausted), 0, 1, 0, 1))
+    assert code == ExecuteSpray.Result.PARTIAL_SUCCESS
+
+
+def test_target_accounting_requires_every_detection_to_be_resolved():
+    assert target_accounting_is_complete(2, 1, 1)
+    assert not target_accounting_is_complete(2, 1, 0)
+
+
 def test_iou_is_zero_for_disjoint_targets():
     assert _target('a', 100.0, 100.0).iou(_target('b', 300.0, 300.0)) == 0.0
 
@@ -75,6 +129,48 @@ def test_diseased_fruit_below_point_one_never_enters_the_queue():
         SimpleNamespace(detections=[detection(0.099)]), 'diseased_fruit', 0.10) == []
     assert len(detection_candidates(
         SimpleNamespace(detections=[detection(0.10)]), 'diseased_fruit', 0.10)) == 1
+
+
+class _FruitCollectionHarness:
+    _wait_for_fruits = SprayTask._wait_for_fruits
+
+    def __init__(self):
+        first = _target('fruit-1', 640.0, 360.0)
+        self._vision_mutex = threading.Lock()
+        self._fruit_frames = 3
+        self._fruit_counts = {'fruit-1': 3}
+        self._fruit_latest = {'fruit-1': first}
+
+    @staticmethod
+    def _aborted(_cancel_requested):
+        return False
+
+    @staticmethod
+    def get_parameter(name):
+        return SimpleNamespace(value={
+            'detection_timeout_sec': 0.20,
+            'fruit_collection_settle_sec': 0.06,
+            'confirmation_frames': 3,
+        }[name])
+
+
+def test_fruit_collection_waits_for_a_later_stable_target():
+    task = _FruitCollectionHarness()
+
+    def add_second_target():
+        time.sleep(0.02)
+        second = _target('fruit-2', 800.0, 220.0)
+        with task._vision_mutex:
+            task._fruit_counts['fruit-2'] = 3
+            task._fruit_latest['fruit-2'] = second
+
+    worker = threading.Thread(target=add_second_target)
+    worker.start()
+    candidates = task._wait_for_fruits(lambda: False)
+    worker.join()
+
+    assert {candidate.target_id for candidate in candidates} == {
+        'fruit-1', 'fruit-2'}
 
 
 def test_retry_matches_the_same_fruit_after_tracker_id_changes():
@@ -108,8 +204,6 @@ def test_vision_failure_never_publishes_completed_feedback():
 
 class _ObservationHarness:
     _move_to_next_observation = SprayTask._move_to_next_observation
-    _OBSERVATION_POSITION_TOLERANCE = SprayTask._OBSERVATION_POSITION_TOLERANCE
-    _OBSERVATION_ORIENTATION_TOLERANCE = SprayTask._OBSERVATION_ORIENTATION_TOLERANCE
 
     def __init__(self):
         self._observation_candidates = [
@@ -135,6 +229,10 @@ class _ObservationHarness:
         self._joint_state_sequence = 0
         self._observation_distance = None
         self._observation_pose = None
+        self._observation_config = {
+            'position_tolerance_m': 0.01,
+            'orientation_tolerance_rad': 0.01,
+        }
         self.moves = []
         self._base_frame = 'base'
         self.arm_joint_names = ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6')
@@ -344,6 +442,7 @@ def test_target_recenter_rejects_collision_ik_before_planning_or_servo():
 
 class _RecenterAttemptHarness:
     _recenter_target = SprayTask._recenter_target
+    _move_recenter_step = SprayTask._move_recenter_step
 
     def __init__(self):
         self._observation_candidate_index = 0
@@ -354,6 +453,9 @@ class _RecenterAttemptHarness:
         self._camera_mount = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
         self._recenter_config = {
             'trigger_px': 48.0, 'max_angle_deg': 18.0,
+            'refine_goal_px': 8.0, 'max_iterations': 1,
+            'residual_candidates_px': (
+                0.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0),
             'desired_offset_u_px': 0.0, 'desired_offset_v_px': 28.0,
         }
 
@@ -374,8 +476,102 @@ def test_recenter_angle_rejection_is_recoverable_and_not_retried_at_same_view():
     assert message == 'target recenter already used at this observation'
 
 
+class _PartialRecenterHarness(_RecenterAttemptHarness):
+    def __init__(self):
+        super().__init__()
+        self.trials = []
+        self.debug_events = []
+
+    def _move_to_recentered_pose(self, candidate, _joints):
+        self.trials.append(candidate.candidate_id)
+        candidate.condition_number = 10.0
+        candidate.min_joint_margin_rad = 0.20
+        if candidate.candidate_id.endswith('_r32'):
+            return True
+        candidate.rejection_reason = 'joint_limit_margin'
+        return False
+
+    @staticmethod
+    def _aborted(_cancel_requested):
+        return False
+
+    @staticmethod
+    def _reset_target_confirmation(_target_id):
+        pass
+
+    @staticmethod
+    def _wait_for_target_confirmation(
+            _target_id, _cancel_requested, *, require_workspace):
+        assert require_workspace
+        return True
+
+    @staticmethod
+    def _latest_target():
+        return _target('fruit-1', 650.0, 390.0)
+
+    def _publish_observation_debug(self, event, *_args, **_kwargs):
+        self.debug_events.append(event)
+
+    @staticmethod
+    def get_logger():
+        return SimpleNamespace(info=lambda *_args: None)
+
+
+def test_recenter_uses_a_larger_residual_when_precise_rotation_lacks_margin():
+    task = _PartialRecenterHarness()
+    attempt = TargetAttempt(_target('fruit-1', 740.0, 360.0))
+
+    ok, message = task._recenter_target(
+        attempt.target, attempt, lambda: False)
+
+    assert ok
+    assert message == 'target reconfirmed after recenter'
+    assert task.trials == [
+        'observe_target_fruit-1_r0',
+        'observe_target_fruit-1_r8',
+        'observe_target_fruit-1_r12',
+        'observe_target_fruit-1_r16',
+        'observe_target_fruit-1_r24',
+        'observe_target_fruit-1_r32',
+    ]
+    assert task.debug_events == ['target_recenter_confirmed']
+
+
+class _IterativeRecenterHarness(_PartialRecenterHarness):
+    def __init__(self):
+        super().__init__()
+        self._recenter_config['max_iterations'] = 2
+        self._latest_targets = iter([
+            _target('fruit-1', 660.0, 388.0),
+            _target('fruit-1', 645.0, 388.0),
+        ])
+
+    def _move_to_recentered_pose(self, candidate, _joints):
+        self.trials.append(candidate.candidate_id)
+        candidate.condition_number = 10.0
+        candidate.min_joint_margin_rad = 0.50
+        return True
+
+    def _latest_target(self):
+        return next(self._latest_targets)
+
+
+def test_recenter_refines_again_when_mask_aim_moves_after_first_motion():
+    task = _IterativeRecenterHarness()
+    attempt = TargetAttempt(_target('fruit-1', 740.0, 360.0))
+
+    ok, _message = task._recenter_target(
+        attempt.target, attempt, lambda: False)
+
+    assert ok
+    assert len(task.trials) == 2
+    assert task.trials[0].endswith('_r0')
+    assert task.trials[1].endswith('_r0_refine1')
+
+
 class _PostRecenterHarness:
     _recenter_target = SprayTask._recenter_target
+    _move_recenter_step = SprayTask._move_recenter_step
 
     def __init__(self):
         self._observation_candidate_index = 0
@@ -387,6 +583,9 @@ class _PostRecenterHarness:
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
         self._recenter_config = {
             'trigger_px': 48.0, 'max_angle_deg': 18.0,
+            'refine_goal_px': 8.0, 'max_iterations': 1,
+            'residual_candidates_px': (
+                0.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0),
             'desired_offset_u_px': 0.0, 'desired_offset_v_px': 28.0,
         }
         self.debug_events = []
@@ -451,3 +650,14 @@ def test_alignment_result_code_and_message_are_not_replaced_by_canceled_text():
     assert not canceled
     assert code == AlignTarget.Result.SERVO_SINGULARITY
     assert message == 'MoveIt Servo recoverable status 2'
+
+
+def test_new_target_can_wrap_to_an_untried_earlier_observation():
+    task = SimpleNamespace(
+        _observation_candidate_index=1,
+        _observation_candidates=[object(), object()])
+    attempt = SimpleNamespace(recentered_observation_indices={1})
+
+    SprayTask._rewind_for_untried_observation(task, attempt)
+
+    assert task._observation_candidate_index == -1

@@ -1,5 +1,6 @@
 """Small project-owned adapter around the upstream pymoveit2 API."""
 
+import math
 import threading
 import time
 
@@ -13,12 +14,36 @@ from rclpy.qos import qos_profile_action_status_default
 from std_msgs.msg import String
 
 from .motion_state import MotionControlState
-from .trajectory_validation import valid_retimed_trajectory
 
 try:
     from trajectory_retime_server.srv import RetimeTrajectory
-except ImportError:  # Allows source-only unit tests before ROS interfaces are built.
+except ImportError:  # Allows source-only tests before generated interfaces exist.
     RetimeTrajectory = None
+
+
+def _valid_retimed_trajectory(trajectory):
+    """Reject malformed retime replies before they reach the controller."""
+    joint_names = tuple(getattr(trajectory, 'joint_names', ()))
+    points = tuple(getattr(trajectory, 'points', ()))
+    if not joint_names or len(points) < 2:
+        return False
+
+    previous_time = -1
+    for point in points:
+        positions = tuple(getattr(point, 'positions', ()))
+        if len(positions) != len(joint_names):
+            return False
+        try:
+            if not all(math.isfinite(float(value)) for value in positions):
+                return False
+            stamp = point.time_from_start
+            timestamp = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        if timestamp < 0 or timestamp <= previous_time:
+            return False
+        previous_time = timestamp
+    return True
 
 
 class _GripperClient:
@@ -141,24 +166,30 @@ class AliciaMoveIt:
     def __init__(
             self, node, base_frame='alicia_base_link', group_name='arm',
             tool_link='tool0', velocity_scaling=0.1, acceleration_scaling=0.1,
-            retime_timeout=5.0, execution_timeout=60.0, planning_time=2.0,
+            retime_service_name='/retime_trajectory', retime_timeout=5.0,
+            execution_timeout=60.0, planning_time=2.0,
             gripper_action='/gripper_controller/gripper_cmd',
             gripper_open_position=0.0, gripper_closed_position=-0.05,
             gripper_max_effort=5.0, callback_group=None,
-            state=None, moveit=None, retime_client=None, gripper=None,
-            retime_request_factory=None, arm_activity=None,
+            state=None, moveit=None, retime_client=None,
+            retime_request_factory=None, gripper=None, arm_activity=None,
             gripper_activity=None):
         if not 0.0 < float(velocity_scaling) <= 1.0:
             raise ValueError('velocity_scaling must be in (0, 1]')
         if not 0.0 < float(acceleration_scaling) <= 1.0:
             raise ValueError('acceleration_scaling must be in (0, 1]')
+        if not str(retime_service_name).strip():
+            raise ValueError('retime_service_name must not be empty')
+        if float(retime_timeout) <= 0.0:
+            raise ValueError('retime_timeout must be positive')
         if float(planning_time) <= 0.0:
             raise ValueError('planning_time must be positive')
 
         self._node = node
-        self._group_name = group_name
+        self._group_name = str(group_name)
         self._velocity_scaling = float(velocity_scaling)
         self._acceleration_scaling = float(acceleration_scaling)
+        self._retime_service_name = str(retime_service_name)
         self._retime_timeout = float(retime_timeout)
         self._execution_timeout = float(execution_timeout)
         self._planning_time = float(planning_time)
@@ -168,6 +199,7 @@ class AliciaMoveIt:
         self.state = state or MotionControlState()
         self._cancel_mutex = threading.Lock()
         self._cancel_epoch = 0
+        self._planning_mutex = threading.Lock()
 
         self._moveit = moveit or MoveIt2(
             node=node,
@@ -181,17 +213,23 @@ class AliciaMoveIt:
         self._moveit.max_velocity = self._velocity_scaling
         self._moveit.max_acceleration = self._acceleration_scaling
         self._moveit.allowed_planning_time = self._planning_time
+        self._node.get_logger().info(
+            '[ARM][MOTION] configuration '
+            f'velocity_scaling={self._velocity_scaling:.2f} '
+            f'acceleration_scaling={self._acceleration_scaling:.2f}')
         self._trajectory_event_pub = node.create_publisher(
             String, '/trajectory_execution_event', 1)
 
-        if retime_client is None:
-            if RetimeTrajectory is None:
-                raise RuntimeError('trajectory_retime_server interfaces are unavailable')
+        if retime_client is None and RetimeTrajectory is not None:
             retime_client = node.create_client(
-                RetimeTrajectory, '/retime_trajectory', callback_group=callback_group)
+                RetimeTrajectory,
+                self._retime_service_name,
+                callback_group=callback_group,
+            )
         self._retime_client = retime_client
-        self._retime_request_factory = (
-            retime_request_factory or RetimeTrajectory.Request)
+        self._retime_request_factory = retime_request_factory or (
+            RetimeTrajectory.Request if RetimeTrajectory is not None else None)
+
         self._gripper = gripper or _GripperClient(
             node, gripper_action, callback_group=callback_group)
         self._arm_activity = arm_activity or _ActionStatusTracker(
@@ -228,9 +266,83 @@ class AliciaMoveIt:
             cartesian_fraction_threshold=cartesian_fraction_threshold,
         )
 
-    def _execute(self, trajectory, epoch, allow_locked):
+    @staticmethod
+    def _scaling(value, fallback, name):
+        value = fallback if value is None else float(value)
+        if not math.isfinite(value) or not 0.0 < value <= 1.0:
+            raise ValueError(f'{name} must be finite and in (0, 1]')
+        return value
+
+    def _plan_with_scaling(
+            self, *, max_velocity=None, max_acceleration=None,
+            cartesian=False, **kwargs):
+        velocity = self._scaling(
+            max_velocity, self._velocity_scaling, 'max_velocity')
+        acceleration = self._scaling(
+            max_acceleration, self._acceleration_scaling, 'max_acceleration')
+        with self._planning_mutex:
+            previous_velocity = self._moveit.max_velocity
+            previous_acceleration = self._moveit.max_acceleration
+            try:
+                self._moveit.max_velocity = velocity
+                self._moveit.max_acceleration = acceleration
+                trajectory = self._plan(cartesian=bool(cartesian), **kwargs)
+                if trajectory is not None and cartesian:
+                    trajectory = self._retime(trajectory, velocity, acceleration)
+                return trajectory, velocity, acceleration
+            finally:
+                self._moveit.max_velocity = previous_velocity
+                self._moveit.max_acceleration = previous_acceleration
+
+    def _retime(self, trajectory, velocity_scaling, acceleration_scaling):
+        if self._retime_client is None or self._retime_request_factory is None:
+            self._node.get_logger().error(
+                'Cartesian motion requires trajectory_retime_server interfaces')
+            return None
+        if not self._retime_client.wait_for_service(timeout_sec=self._retime_timeout):
+            self._node.get_logger().error(
+                f'Cartesian motion requires retime service '
+                f'{self._retime_service_name!r}')
+            return None
+
+        request = self._retime_request_factory()
+        request.trajectory = trajectory
+        request.group_name = self._group_name
+        request.velocity_scaling = float(velocity_scaling)
+        request.acceleration_scaling = float(acceleration_scaling)
+        future = self._retime_client.call_async(request)
+        if not self._wait_future(future, self._retime_timeout):
+            self._node.get_logger().error('Cartesian trajectory retiming timed out')
+            return None
+        try:
+            response = future.result()
+        except Exception as error:  # Service transport exceptions are fail-closed.
+            self._node.get_logger().error(
+                f'Cartesian trajectory retiming failed: {error}')
+            return None
+        if response is None or not response.success:
+            message = '' if response is None else str(response.message)
+            self._node.get_logger().error(
+                f'Cartesian trajectory retiming rejected: {message or "unknown"}')
+            return None
+        if not _valid_retimed_trajectory(response.retimed):
+            self._node.get_logger().error(
+                'Cartesian trajectory retiming returned an invalid trajectory')
+            return None
+        return response.retimed
+
+    def _execute(
+            self, trajectory, epoch, allow_locked, velocity_scaling=None,
+            acceleration_scaling=None):
         if trajectory is None or not self._allowed(epoch, allow_locked):
             return False
+        velocity_scaling = self._velocity_scaling if velocity_scaling is None else float(
+            velocity_scaling)
+        acceleration_scaling = (
+            self._acceleration_scaling if acceleration_scaling is None
+            else float(acceleration_scaling))
+        planned_duration = self.trajectory_duration(trajectory)
+        started = time.monotonic()
         self._moveit.execute(trajectory)
         deadline = time.monotonic() + self._execution_timeout
         acceptance_deadline = time.monotonic() + min(5.0, self._execution_timeout)
@@ -241,14 +353,41 @@ class AliciaMoveIt:
                 saw_motion = True
             elif saw_motion:
                 error = self._moveit.get_last_execution_error_code()
-                return error is not None and error.val == MoveItErrorCodes.SUCCESS
+                success = error is not None and error.val == MoveItErrorCodes.SUCCESS
+                result = 'SUCCEEDED' if success else 'FAILED'
+                return self._motion_result(
+                    planned_duration, started, result, success,
+                    velocity_scaling, acceleration_scaling)
             if not saw_motion and time.monotonic() >= acceptance_deadline:
-                return False
+                return self._motion_result(
+                    planned_duration, started, 'NOT_STARTED', False,
+                    velocity_scaling, acceleration_scaling)
             if not self._allowed(epoch, allow_locked):
-                return False
+                return self._motion_result(
+                    planned_duration, started, 'CANCELED', False,
+                    velocity_scaling, acceleration_scaling)
             time.sleep(0.01)
+        if not saw_motion:
+            return self._motion_result(
+                planned_duration, started, 'NOT_STARTED', False,
+                velocity_scaling, acceleration_scaling)
         self.cancel()
-        return False
+        return self._motion_result(
+            planned_duration, started, 'TIMEOUT', False,
+            velocity_scaling, acceleration_scaling)
+
+    def _motion_result(
+            self, planned_duration, started, result, success,
+            velocity_scaling, acceleration_scaling):
+        actual_duration = max(0.0, time.monotonic() - started)
+        self._node.get_logger().info(
+            '[ARM][MOTION] '
+            f'planned_duration={planned_duration:.3f}s '
+            f'actual_duration={actual_duration:.3f}s '
+            f'velocity_scaling={velocity_scaling:.2f} '
+            f'acceleration_scaling={acceleration_scaling:.2f} '
+            f'result={result}')
+        return success
 
     def move_joints(self, positions, allow_locked=False):
         if len(positions) != len(self.JOINT_NAMES):
@@ -256,27 +395,44 @@ class AliciaMoveIt:
         epoch = self._epoch()
         if not self._allowed(epoch, allow_locked):
             return False
-        trajectory = self._plan(
+        trajectory, velocity, acceleration = self._plan_with_scaling(
             joint_positions=[float(value) for value in positions],
             joint_names=self.JOINT_NAMES,
         )
-        return self._execute(trajectory, epoch, allow_locked)
+        return self._execute(
+            trajectory, epoch, allow_locked, velocity, acceleration)
 
     def move_pose(
             self, position, quat_xyzw, frame_id=None, allow_locked=False,
-            tolerance_position=0.001, tolerance_orientation=0.001):
+            tolerance_position=0.001, tolerance_orientation=0.001,
+            max_velocity=None, max_acceleration=None, cartesian=False,
+            cartesian_max_step=0.0025, cartesian_fraction_threshold=1.0):
+        cartesian_max_step = float(cartesian_max_step)
+        cartesian_fraction_threshold = float(cartesian_fraction_threshold)
+        if not math.isfinite(cartesian_max_step) or cartesian_max_step <= 0.0:
+            raise ValueError('cartesian_max_step must be finite and positive')
+        if (not math.isfinite(cartesian_fraction_threshold) or
+                not 0.0 < cartesian_fraction_threshold <= 1.0):
+            raise ValueError(
+                'cartesian_fraction_threshold must be finite and in (0, 1]')
         epoch = self._epoch()
         if not self._allowed(epoch, allow_locked):
             return False
-        trajectory = self._plan(
+        trajectory, velocity, acceleration = self._plan_with_scaling(
+            max_velocity=max_velocity,
+            max_acceleration=max_acceleration,
+            cartesian=bool(cartesian),
             position=position,
             quat_xyzw=quat_xyzw,
             frame_id=frame_id,
             target_link=self._moveit.end_effector_name,
             tolerance_position=float(tolerance_position),
             tolerance_orientation=float(tolerance_orientation),
+            max_step=cartesian_max_step,
+            cartesian_fraction_threshold=cartesian_fraction_threshold,
         )
-        return self._execute(trajectory, epoch, allow_locked)
+        return self._execute(
+            trajectory, epoch, allow_locked, velocity, acceleration)
 
     def plan_pose(
             self, position, quat_xyzw, frame_id=None, allow_locked=False,
@@ -284,7 +440,7 @@ class AliciaMoveIt:
         """Plan a pose without executing it so task code can inspect the endpoint."""
         if self.state.locked and not allow_locked:
             return None
-        return self._plan(
+        trajectory, _velocity, _acceleration = self._plan_with_scaling(
             position=position,
             quat_xyzw=quat_xyzw,
             frame_id=frame_id,
@@ -292,6 +448,7 @@ class AliciaMoveIt:
             tolerance_position=float(tolerance_position),
             tolerance_orientation=float(tolerance_orientation),
         )
+        return trajectory
 
     def execute_trajectory(self, trajectory, allow_locked=False):
         """Execute a trajectory returned by :meth:`plan_pose`."""
@@ -333,52 +490,31 @@ class AliciaMoveIt:
         except KeyError:
             return None
 
-    def move_cartesian(
-            self, position, quat_xyzw, frame_id=None, max_step=0.0025,
-            fraction_threshold=1.0, allow_locked=False):
-        """Plan, retime exactly once, validate, then execute."""
-        epoch = self._epoch()
-        if not self._allowed(epoch, allow_locked):
-            return False
-        planned = self._plan(
-            position=position,
-            quat_xyzw=quat_xyzw,
-            frame_id=frame_id,
-            target_link=self._moveit.end_effector_name,
-            cartesian=True,
-            max_step=float(max_step),
-            cartesian_fraction_threshold=float(fraction_threshold),
-        )
-        if planned is None or not self._allowed(epoch, allow_locked):
-            return False
-        retimed = self._retime(planned)
-        if not valid_retimed_trajectory(retimed):
-            self._node.get_logger().error(
-                'Retiming failed or returned an invalid trajectory; execution refused')
-            return False
-        return self._execute(retimed, epoch, allow_locked)
+    @staticmethod
+    def trajectory_duration(trajectory):
+        """Return the final trajectory timestamp in seconds."""
+        joint_trajectory = getattr(trajectory, 'joint_trajectory', trajectory)
+        points = getattr(joint_trajectory, 'points', ())
+        if not points:
+            return 0.0
+        stamp = points[-1].time_from_start
+        return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
-    def _retime(self, trajectory):
-        if not self._retime_client.wait_for_service(timeout_sec=self._retime_timeout):
-            return None
-        request = self._retime_request_factory()
-        request.trajectory = trajectory
-        request.group_name = self._group_name
-        request.velocity_scaling = self._velocity_scaling
-        request.acceleration_scaling = self._acceleration_scaling
-        future = self._retime_client.call_async(request)
-        if not self._wait_future(future, self._retime_timeout):
-            return None
-        response = future.result()
-        if response is None or not response.success:
-            return None
-        return response.retimed
+    def control_gripper(self, open_gripper=True, position=None, allow_locked=False):
+        if position is None:
+            position = (
+                self._gripper_open_position if open_gripper
+                else self._gripper_closed_position)
+        position = float(position)
+        if not math.isfinite(position):
+            raise ValueError('gripper position must be finite')
+        return self._move_gripper(position, allow_locked)
 
     def open_gripper(self, allow_locked=False):
-        return self._move_gripper(self._gripper_open_position, allow_locked)
+        return self.control_gripper(True, allow_locked=allow_locked)
 
     def close_gripper(self, allow_locked=False):
-        return self._move_gripper(self._gripper_closed_position, allow_locked)
+        return self.control_gripper(False, allow_locked=allow_locked)
 
     def _move_gripper(self, position, allow_locked):
         epoch = self._epoch()

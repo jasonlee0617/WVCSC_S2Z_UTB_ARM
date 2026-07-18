@@ -3,7 +3,6 @@ import threading
 import time
 
 from geometry_msgs.msg import TwistStamped
-import numpy as np
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -16,23 +15,25 @@ from std_srvs.srv import Trigger
 from wvcsc_interfaces.action import AlignTarget
 from wvcsc_interfaces.msg import Target2D
 
-from .controllers.pid_controller import PIDController3D, ServoControlConfig
 from .servo.alignment_progress import AlignmentProgress
 from .servo.command_limiter import bounded_control_dt, limit_xy_norm, slew
 from .servo.debug_snapshot import debug_json, debug_publish_due
 from .servo.servo_status_policy import ServoStatusAction, ServoStatusPolicy
 from .servo.target_estimator import SimpleTargetPredictor2D
+from .servo.pid_controller import PIDController2D, ServoControlConfig
 from .servo.visual_servo_params import ServoRuntimeConfig
 
 
 class VisualServo(Node):
+    _ARM_JOINT_NAMES = tuple(f'joint{index}' for index in range(1, 7))
+
     def __init__(self):
         super().__init__('wvcsc_visual_servo')
         self._declare_parameters()
         self._config = ServoRuntimeConfig.from_node(self)
         if float(self.get_parameter('debug_rate_hz').value) <= 0.0:
             raise ValueError('debug_rate_hz must be positive')
-        self._controller = PIDController3D(ServoControlConfig(
+        self._controller = PIDController2D(ServoControlConfig(
             kp_xy=float(self.get_parameter('pid_kp_xy').value),
             ki_xy=float(self.get_parameter('pid_ki_xy').value),
             kd_xy=float(self.get_parameter('pid_kd_xy').value),
@@ -133,7 +134,7 @@ class VisualServo(Node):
             'target_invalid_hold_sec': 0.25,
             'min_confidence': 0.10,
             'coarse_tolerance_px': 20.0,
-            'fine_tolerance_px': 4.0,
+            'fine_tolerance_px': 2.0,
             'stable_frames': 10,
             'stable_duration_sec': 0.50,
             'progress_window_sec': 4.0,
@@ -143,7 +144,7 @@ class VisualServo(Node):
             'fallback_fx': 507.872735,
             'fallback_fy': 507.872735,
             'require_camera_info': True,
-            'pid_kp_xy': 1.00,
+            'pid_kp_xy': 2.50,
             'pid_ki_xy': 0.0,
             'pid_kd_xy': 0.005,
             'pid_d_ema_alpha': 0.65,
@@ -152,7 +153,7 @@ class VisualServo(Node):
             'max_linear_speed': 0.08,
             'max_linear_acceleration': 0.60,
             'near_target_speed_scale': 1.0,
-            'warning_speed_scale': 0.35,
+            'warning_speed_scale': 1.0,
             'command_sign_x': 1.0,
             'command_sign_y': 1.0,
             'predict_lead_sec': 0.02,
@@ -254,13 +255,15 @@ class VisualServo(Node):
             else:
                 fx = float(self.get_parameter('fallback_fx').value)
                 fy = float(self.get_parameter('fallback_fy').value)
-            error = np.array([error_u / fx, error_v / fy], dtype=float)
-            velocity = np.zeros(2, dtype=float)
+            error = (error_u / fx, error_v / fy)
+            velocity = (0.0, 0.0)
             if (not reacquired and self._latest is not None
                     and self._latest.get('valid')):
                 dt = now - self._latest['received']
                 if 1e-3 < dt < 0.5:
-                    velocity = (error - self._latest['error']) / dt
+                    velocity = tuple(
+                        (value - previous) / dt
+                        for value, previous in zip(error, self._latest['error']))
             self._predictor.update(error, velocity, now)
             if (abs(error_u) <= self._config.fine_tolerance_px
                     and abs(error_v) <= self._config.fine_tolerance_px):
@@ -283,8 +286,14 @@ class VisualServo(Node):
             self._last_valid_target = dict(self._latest)
 
     def _on_joint_state(self, message):
+        positions = dict(zip(message.name, message.position))
+        try:
+            arm_positions = [
+                float(positions[name]) for name in self._ARM_JOINT_NAMES]
+        except KeyError:
+            return
         with self._lock:
-            self._joint_positions = [float(value) for value in message.position]
+            self._joint_positions = arm_positions
 
     def _on_servo_status(self, message):
         code = int(message.data)
@@ -457,10 +466,16 @@ class VisualServo(Node):
                 with self._lock:
                     aligned = self._progress.aligned
                     stalled = self._progress.stalled(now)
+                    stable_duration = self._progress.stable_duration
                 if aligned:
+                    elapsed = max(0.0, now - started)
                     self.get_logger().info(
                         '[VISUAL_SERVO] alignment_result '
-                        f'code={AlignTarget.Result.OK} message=target aligned')
+                        f'code={AlignTarget.Result.OK} message=target aligned '
+                        f'elapsed={elapsed:.3f}s '
+                        f'error_px=({latest["error_u"]:.2f},'
+                        f'{latest["error_v"]:.2f}) '
+                        f'stable_duration={stable_duration:.3f}s')
                     stopped, stop_message = stop_servo('target_aligned')
                     if not stopped:
                         return self._abort(
@@ -495,8 +510,7 @@ class VisualServo(Node):
                     self._config.max_predict_horizon_sec)
                 if predicted is None:
                     predicted = latest['error']
-                x, y, _z, _debug = self._controller.step(
-                    [predicted[0], predicted[1], 0.0], dt)
+                x, y, _debug = self._controller.step(predicted, dt)
                 x *= self._config.command_sign_x
                 y *= self._config.command_sign_y
                 scale = 1.0

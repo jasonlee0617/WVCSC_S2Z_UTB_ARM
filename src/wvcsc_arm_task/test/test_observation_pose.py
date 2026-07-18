@@ -80,6 +80,40 @@ def test_recenter_keeps_camera_position_and_maps_target_to_desired_spray_ray():
             tuple(value / source_norm for value in source_ray))
 
 
+def test_partial_recenter_leaves_a_configured_pixel_residual_for_ibvs():
+    camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
+    position, quat, angle = recenter_camera_pose(
+        (1.0, 2.0, 3.0), (0.0, 0.0, 0.0, 1.0), camera,
+        740.0, 360.0, 0.0, 28.0, 18.0, residual_error_px=40.0)
+    source_ray = (0.2, 0.0, 1.0)
+    # Original error is (+100, -28) px. Scaling its largest axis to 40 px
+    # leaves the intermediate aim at (680, 376.8).
+    partial_ray = (40.0 / 500.0, 16.8 / 500.0, 1.0)
+    source_norm = math.sqrt(sum(value * value for value in source_ray))
+    partial_norm = math.sqrt(sum(value * value for value in partial_ray))
+
+    assert position == pytest.approx((1.0, 2.0, 3.0))
+    assert angle < 18.0
+    rotated = rotate_vector(
+        tuple(value / partial_norm for value in partial_ray), quat)
+    assert rotated == pytest.approx(
+        tuple(value / source_norm for value in source_ray))
+
+
+def test_partial_recenter_can_fit_when_exact_recentering_exceeds_angle_limit():
+    camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
+    with pytest.raises(ValueError, match='angle exceeds limit'):
+        recenter_camera_pose(
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), camera,
+            820.0, 388.0, 0.0, 28.0, 18.0)
+
+    _position, _quat, angle = recenter_camera_pose(
+        (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), camera,
+        820.0, 388.0, 0.0, 28.0, 18.0, residual_error_px=40.0)
+
+    assert angle < 18.0
+
+
 def test_recenter_rejects_a_rotation_larger_than_the_safety_limit():
     with pytest.raises(ValueError, match='angle exceeds limit'):
         recenter_camera_pose(

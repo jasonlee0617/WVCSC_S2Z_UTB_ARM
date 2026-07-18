@@ -3,6 +3,9 @@ from enum import IntEnum
 import math
 
 
+DEFAULT_DOCKING_LATERAL_OFFSET = 0.2
+
+
 class MissionState(IntEnum):
     IDLE = 0
     WAITING_FOR_TASKS = 1
@@ -186,7 +189,7 @@ class MissionCore:
 
 def docking_pose(
         target, road_center_y=0.0, road_yaw=0.0,
-        lateral_offset=0.5):
+        lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET):
     values = (target.x, target.y, road_center_y, road_yaw, lateral_offset)
     if not all(math.isfinite(value) for value in values):
         raise ValueError(f'{target.tree_id}: non-finite docking pose')
@@ -207,7 +210,7 @@ def docking_pose(
 
 def navigation_pose(
         target, road_center_y=0.0, road_yaw=0.0,
-        lateral_offset=0.5):
+        lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET):
     if target.docking_pose_override is not None:
         return target.docking_pose_override
     return docking_pose(target, road_center_y, road_yaw, lateral_offset)

@@ -61,7 +61,7 @@ def begin_reset(state, arm):
 def perform_reset(state, arm, home):
     """Open the gripper and plan HOME, always leaving reset mode locked."""
     try:
-        if not arm.open_gripper(allow_locked=True):
+        if not arm.control_gripper(open_gripper=True, allow_locked=True):
             return False
         return bool(arm.move_joints(home, allow_locked=True))
     finally:

@@ -169,10 +169,14 @@ class ObservationOptimizer:
         return candidate
 
     def rank(self, candidates):
+        preferred_margin = float(self._config.get(
+            'preferred_joint_margin_rad',
+            self._config['min_joint_margin_rad']))
         return sorted(
             (candidate for candidate in candidates
              if candidate.visible and not candidate.rejection_reason),
             key=lambda candidate: (
+                candidate.min_joint_margin_rad < preferred_margin,
                 candidate.condition_number,
                 -candidate.min_joint_margin_rad,
                 candidate.joint_motion_norm,

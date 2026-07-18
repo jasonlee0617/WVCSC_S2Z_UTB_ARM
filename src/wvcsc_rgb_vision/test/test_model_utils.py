@@ -15,8 +15,10 @@ from wvcsc_rgb_vision.two_stage_yolo import (
     Instance,
     Track,
     TwoStageYolo,
+    capture_target_template,
     deduplicate_instances,
     expanded_roi,
+    match_target_template,
     perception_debug_due,
     perception_debug_json,
     track_matches,
@@ -56,6 +58,95 @@ def test_fruit_tracks_survive_a_short_detector_dropout():
     node._assign_track_ids([])
     again = node._assign_track_ids([fruit])[0]
     assert first.target_id == again.target_id
+
+
+def test_locked_template_tracks_target_through_detector_dropout():
+    image = np.zeros((120, 160, 3), dtype=np.uint8)
+    pattern = np.array([
+        [[20, 40, 180], [30, 180, 240], [10, 70, 130]],
+        [[50, 220, 250], [0, 255, 255], [40, 100, 170]],
+        [[10, 30, 100], [60, 150, 230], [25, 60, 140]],
+    ], dtype=np.uint8)
+    image[40:43, 50:53] = pattern
+    target = Instance(
+        'fruit-1', 'diseased_fruit', 0.80,
+        50, 40, 53, 43, 51, 41)
+    template = capture_target_template(
+        image, target, padding_ratio=0.0, min_padding_px=0.0)
+    assert template is not None
+
+    moved = np.zeros_like(image)
+    moved[72:75, 84:87] = pattern
+    tracked = match_target_template(
+        moved, template, target, search_radius_px=50, min_score=0.90)
+
+    assert tracked is not None
+    assert tracked.target_id == 'fruit-1'
+    assert tracked.confidence == pytest.approx(0.80)
+    assert tracked.aim_u == pytest.approx(85.0)
+    assert tracked.aim_v == pytest.approx(73.0)
+
+
+def test_locked_template_rejects_an_unrelated_search_region():
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[10:13, 10:13] = np.array([
+        [[0, 20, 100], [0, 80, 180], [10, 30, 90]],
+        [[5, 120, 220], [0, 255, 255], [10, 70, 160]],
+        [[20, 40, 110], [0, 100, 200], [5, 20, 80]],
+    ], dtype=np.uint8)
+    target = Instance(
+        'fruit-1', 'diseased_fruit', 0.80,
+        10, 10, 13, 13, 11, 11)
+    template = capture_target_template(
+        image, target, padding_ratio=0.0, min_padding_px=0.0)
+
+    assert match_target_template(
+        np.zeros_like(image), template, target,
+        search_radius_px=10, min_score=0.90) is None
+
+
+def test_template_replaces_a_low_confidence_yolo_update():
+    initial = np.zeros((100, 120, 3), dtype=np.uint8)
+    pattern = np.arange(5 * 5 * 3, dtype=np.uint8).reshape(5, 5, 3)
+    initial[20:25, 30:35] = pattern
+    reference = Instance(
+        'fruit-1', 'diseased_fruit', 0.80,
+        30, 20, 35, 25, 32, 22)
+    template = capture_target_template(
+        initial, reference, padding_ratio=0.0, min_padding_px=0.0)
+    moved = np.zeros_like(initial)
+    moved[44:49, 52:57] = pattern
+    low_confidence = Instance(
+        'fruit-9', 'diseased_fruit', 0.12,
+        52, 44, 57, 49, 54, 46)
+
+    node = object.__new__(TwoStageYolo)
+    node._selected_target_id = 'fruit-1'
+    node._selected_target_reference = reference
+    node._selected_target_template = template
+    node.get_parameter = lambda name: SimpleNamespace(value={
+        'track_iou_threshold': 0.20,
+        'track_center_distance_px': 50.0,
+        'target_reassociation_iou_margin': 0.10,
+        'target_reassociation_distance_margin_px': 8.0,
+        'target_equivalent_aim_distance_px': 8.0,
+        'target_lock_ema_alpha': 0.50,
+        'target_template_tracking_enabled': True,
+        'target_template_update_min_confidence': 0.30,
+        'target_template_padding_ratio': 0.0,
+        'target_template_min_padding_px': 0.0,
+        'target_template_search_radius_px': 50.0,
+        'target_template_min_score': 0.90,
+    }[name])
+
+    tracked, reason, event = node._resolve_or_track_selected_target(
+        moved, [low_confidence])
+
+    assert reason == 'none'
+    assert event == 'target_template_tracked'
+    assert tracked.confidence == pytest.approx(0.80)
+    assert tracked.aim_u == pytest.approx(54.0)
+    assert tracked.aim_v == pytest.approx(46.0)
 
 
 def _target_selection_node(selected_id, reference):

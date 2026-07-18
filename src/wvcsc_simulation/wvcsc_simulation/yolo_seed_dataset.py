@@ -44,54 +44,45 @@ def _write_data_yaml(root):
     }, sort_keys=False), encoding='utf-8')
 
 
-def _fruit_seg_manifest(path):
+def _split_manifest(path, layout, classes):
     if path.exists():
         manifest = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
-        if manifest.get('classes') != FRUIT_SEG_CLASS_NAMES:
-            raise ValueError('manifest does not match fruit segmentation classes')
+        if manifest.get('classes') != classes:
+            raise ValueError(f'manifest does not match {layout} classes')
         return manifest
     return {
         'version': 1,
-        'dataset_layout': 'fruit_seg',
+        'dataset_layout': layout,
         'source_topic': '/camera/camera/color/image_raw',
         'image_size': list(IMAGE_SIZE),
-        'classes': FRUIT_SEG_CLASS_NAMES,
+        'classes': classes,
         'samples': [],
     }
+
+
+def _write_split_data_yaml(root, names):
+    (root / 'data.yaml').write_text(yaml.safe_dump({
+        'path': str(root.resolve()),
+        'train': 'images/train',
+        'val': 'images/val',
+        'names': names,
+    }, sort_keys=False), encoding='utf-8')
+
+
+def _fruit_seg_manifest(path):
+    return _split_manifest(path, 'fruit_seg', FRUIT_SEG_CLASS_NAMES)
 
 
 def _write_fruit_seg_data_yaml(root):
-    (root / 'data.yaml').write_text(yaml.safe_dump({
-        'path': str(root.resolve()),
-        'train': 'images/train',
-        'val': 'images/val',
-        'names': FRUIT_SEG_CLASS_NAMES,
-    }, sort_keys=False), encoding='utf-8')
+    _write_split_data_yaml(root, FRUIT_SEG_CLASS_NAMES)
 
 
 def _tree_detect_manifest(path):
-    if path.exists():
-        manifest = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
-        if manifest.get('classes') != TREE_DETECT_CLASS_NAMES:
-            raise ValueError('manifest does not match tree detection classes')
-        return manifest
-    return {
-        'version': 1,
-        'dataset_layout': 'tree_detect',
-        'source_topic': '/camera/camera/color/image_raw',
-        'image_size': list(IMAGE_SIZE),
-        'classes': TREE_DETECT_CLASS_NAMES,
-        'samples': [],
-    }
+    return _split_manifest(path, 'tree_detect', TREE_DETECT_CLASS_NAMES)
 
 
 def _write_tree_detect_data_yaml(root):
-    (root / 'data.yaml').write_text(yaml.safe_dump({
-        'path': str(root.resolve()),
-        'train': 'images/train',
-        'val': 'images/val',
-        'names': TREE_DETECT_CLASS_NAMES,
-    }, sort_keys=False), encoding='utf-8')
+    _write_split_data_yaml(root, TREE_DETECT_CLASS_NAMES)
 
 
 def write_unlabeled_sample(root, image, sample_name, metadata):
@@ -235,8 +226,8 @@ def validate_unlabeled_dataset(root, expected=30):
     return {'images': len(images)}
 
 
-def validate_fruit_seg_dataset(root, expected_train=24, expected_val=6):
-    """Validate a manual-annotation-ready healthy/diseased fruit dataset."""
+def _validate_split_dataset(
+        root, names, manifest_loader, expected_train, expected_val):
     root = Path(root)
     errors = []
     images_by_split = {
@@ -260,14 +251,15 @@ def validate_fruit_seg_dataset(root, expected_train=24, expected_val=6):
         errors.append('dataset must not contain stale Labelme JSON files')
     data = yaml.safe_load((root / 'data.yaml').read_text(encoding='utf-8')) \
         if (root / 'data.yaml').exists() else {}
-    if data != {
+    expected_data = {
             'path': str(root.resolve()),
             'train': 'images/train',
             'val': 'images/val',
-            'names': FRUIT_SEG_CLASS_NAMES,
-    }:
-        errors.append('data.yaml does not match the fruit-seg class contract')
-    manifest = _fruit_seg_manifest(root / 'manifest.yaml')
+            'names': names,
+    }
+    if data != expected_data:
+        errors.append('data.yaml does not match the split dataset contract')
+    manifest = manifest_loader(root / 'manifest.yaml')
     samples = manifest.get('samples', [])
     image_paths = {
         path.relative_to(root).as_posix()
@@ -280,6 +272,14 @@ def validate_fruit_seg_dataset(root, expected_train=24, expected_val=6):
             errors.append(f'{sample.get("image")}: must be pending annotation')
         if sample.get('split') not in ('train', 'val'):
             errors.append(f'{sample.get("image")}: invalid split')
+    return root, images_by_split, samples, errors
+
+
+def validate_fruit_seg_dataset(root, expected_train=24, expected_val=6):
+    """Validate a manual-annotation-ready healthy/diseased fruit dataset."""
+    root, images_by_split, samples, errors = _validate_split_dataset(
+        root, FRUIT_SEG_CLASS_NAMES, _fruit_seg_manifest,
+        expected_train, expected_val)
     if expected_train + expected_val == 30:
         seed_counts = {}
         side_counts = {'left': 0, 'right': 0}
@@ -305,49 +305,9 @@ def validate_fruit_seg_dataset(root, expected_train=24, expected_val=6):
 
 def validate_tree_detect_dataset(root, expected_train=24, expected_val=6):
     """Validate a manually annotatable tree-detection image-only dataset."""
-    root = Path(root)
-    errors = []
-    images_by_split = {
-        split: sorted((root / 'images' / split).glob('*.png'))
-        for split in ('train', 'val')
-    }
-    expected = {'train': expected_train, 'val': expected_val}
-    for split, images in images_by_split.items():
-        if len(images) != expected[split]:
-            errors.append(
-                f'{split}: expected {expected[split]} images, found {len(images)}')
-        for image_path in images:
-            image = cv2.imread(str(image_path))
-            if image is None or image.shape[:2] != (IMAGE_SIZE[1], IMAGE_SIZE[0]):
-                errors.append(f'{image_path}: expected 1280x720 image')
-        if not (root / 'labels' / split).is_dir():
-            errors.append(f'labels/{split}: directory is required')
-    if list((root / 'labels').rglob('*.txt')):
-        errors.append('dataset must not contain automatic YOLO labels')
-    if list((root / 'images').rglob('*.json')):
-        errors.append('dataset must not contain stale Labelme JSON files')
-    data = yaml.safe_load((root / 'data.yaml').read_text(encoding='utf-8')) \
-        if (root / 'data.yaml').exists() else {}
-    if data != {
-            'path': str(root.resolve()),
-            'train': 'images/train',
-            'val': 'images/val',
-            'names': TREE_DETECT_CLASS_NAMES,
-    }:
-        errors.append('data.yaml does not match the tree-detect class contract')
-    manifest = _tree_detect_manifest(root / 'manifest.yaml')
-    samples = manifest.get('samples', [])
-    image_paths = {
-        path.relative_to(root).as_posix()
-        for images in images_by_split.values() for path in images
-    }
-    if {sample.get('image') for sample in samples} != image_paths:
-        errors.append('manifest image paths do not match captured images')
-    for sample in samples:
-        if sample.get('annotation_status') != 'pending':
-            errors.append(f'{sample.get("image")}: must be pending annotation')
-        if sample.get('split') not in ('train', 'val'):
-            errors.append(f'{sample.get("image")}: invalid split')
+    _root, images_by_split, _samples, errors = _validate_split_dataset(
+        root, TREE_DETECT_CLASS_NAMES, _tree_detect_manifest,
+        expected_train, expected_val)
     if errors:
         raise ValueError('\n'.join(errors))
     return {'train': len(images_by_split['train']), 'val': len(images_by_split['val'])}

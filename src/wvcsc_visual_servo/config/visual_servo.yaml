@@ -20,7 +20,7 @@ wvcsc_visual_servo:
     target_invalid_hold_sec: 0.25
     min_confidence: 0.10
     coarse_tolerance_px: 20.0
-    fine_tolerance_px: 4.0
+    fine_tolerance_px: 2.0
     # stable_frames remains feedback telemetry; elapsed time decides success.
     stable_frames: 10
     stable_duration_sec: 0.50
@@ -32,7 +32,7 @@ wvcsc_visual_servo:
     fallback_fx: 507.872735
     fallback_fy: 507.872735
     require_camera_info: true
-    pid_kp_xy: 1.00
+    pid_kp_xy: 2.50
     pid_ki_xy: 0.0
     pid_kd_xy: 0.005
     pid_d_ema_alpha: 0.65
@@ -41,7 +41,9 @@ wvcsc_visual_servo:
     max_linear_speed: 0.08
     max_linear_acceleration: 0.60
     near_target_speed_scale: 1.0
-    warning_speed_scale: 0.35
+    # MoveIt Servo already scales status-1 commands from condition 17 to 30.
+    # Do not apply a second 0.35 multiplier in the IBVS node.
+    warning_speed_scale: 1.0
     command_sign_x: 1.0
     command_sign_y: 1.0
     predict_lead_sec: 0.02

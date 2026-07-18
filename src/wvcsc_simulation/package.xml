@@ -34,18 +34,16 @@
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
   <exec_depend>trajectory_retime_server</exec_depend>
-  <exec_depend>vision_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>wvcsc_description</exec_depend>
   <exec_depend>wvcsc_arm_task</exec_depend>
-  <exec_depend>wvcsc_c10_camera</exec_depend>
+  <exec_depend>wvcsc_interfaces</exec_depend>
   <exec_depend>wvcsc_mission_manager</exec_depend>
   <exec_depend>wvcsc_rgb_vision</exec_depend>
   <exec_depend>wvcsc_visual_servo</exec_depend>
   <exec_depend>wvcsc_spray_controller</exec_depend>
   <exec_depend>wvcsc_uav_gateway</exec_depend>
-  <exec_depend>wvcsc_web_ui</exec_depend>
   <exec_depend>xacro</exec_depend>
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>python3-pytest</test_depend>

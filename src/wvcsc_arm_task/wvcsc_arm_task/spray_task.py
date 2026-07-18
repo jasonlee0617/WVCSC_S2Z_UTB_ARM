@@ -109,6 +109,10 @@ def spray_summary(
         f'alignment_attempts={alignment_attempts}')
 
 
+def target_accounting_is_complete(detected, sprayed, unresolved):
+    return int(detected) == int(sprayed) + int(unresolved)
+
+
 def final_spray_outcome(sprayed, unresolved, saw_disease, summary):
     if sprayed and unresolved:
         return ExecuteSpray.Result.PARTIAL_SUCCESS, summary
@@ -149,9 +153,6 @@ def target_requires_recenter(
 
 
 class SprayTask(Node):
-    _OBSERVATION_POSITION_TOLERANCE = 0.02
-    _OBSERVATION_ORIENTATION_TOLERANCE = 0.05
-
     def __init__(self):
         super().__init__('wvcsc_spray_task')
         self._declare_parameters()
@@ -275,15 +276,20 @@ class SprayTask(Node):
             'inference_mode_topic': '/vision/inference_mode',
             'motion_locked_topic': '/motion_control/locked',
             'tree_confidence': 0.10,
-            'fruit_confidence': 0.30,
+            'fruit_confidence': 0.20,
             'confirmation_frames': 3,
             # Real tree YOLO needs several frames to satisfy confirmation_frames.
             # One second can expire before its first complete inference.
             'scan_pose_detection_timeout_sec': 5.0,
             'detection_timeout_sec': 2.0,
+            'fruit_collection_settle_sec': 1.00,
             'max_alignment_attempts': 2,
             'target_recenter_trigger_px': 48.0,
-            'target_recenter_max_angle_deg': 18.0,
+            'target_recenter_max_angle_deg': 20.0,
+            'target_recenter_refine_goal_px': 8.0,
+            'target_recenter_max_iterations': 2,
+            'target_recenter_residual_candidates_px': [
+                0.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0],
             # Must match wvcsc_visual_servo/config/visual_servo.yaml.
             'target_recenter_desired_offset_u_px': 0.0,
             'target_recenter_desired_offset_v_px': 28.0,
@@ -315,8 +321,11 @@ class SprayTask(Node):
             'observation_image_margin_ratio': 0.07,
             # Keep a margin below MoveIt Servo's 17.0 singularity slowdown
             # threshold while retaining a second physically distinct recovery view.
-            'observation_max_condition_number': 14.0,
-            'observation_min_joint_margin_rad': 0.15,
+            'observation_max_condition_number': 16.5,
+            'observation_min_joint_margin_rad': 0.22,
+            'observation_preferred_joint_margin_rad': 0.35,
+            'observation_position_tolerance_m': 0.01,
+            'observation_orientation_tolerance_rad': 0.01,
         }
         for name, default in parameters.items():
             self.declare_parameter(name, default)
@@ -356,19 +365,31 @@ class SprayTask(Node):
                 self.get_parameter('observation_max_condition_number').value),
             'min_joint_margin_rad': float(
                 self.get_parameter('observation_min_joint_margin_rad').value),
+            'preferred_joint_margin_rad': float(
+                self.get_parameter(
+                    'observation_preferred_joint_margin_rad').value),
+            'position_tolerance_m': float(
+                self.get_parameter(
+                    'observation_position_tolerance_m').value),
+            'orientation_tolerance_rad': float(
+                self.get_parameter(
+                    'observation_orientation_tolerance_rad').value),
         }
         positive = (
             'fruit_zone_height_min_m', 'fruit_zone_height_max_m',
             'fruit_zone_radius_m', 'distance_min_m', 'distance_max_m',
             'distance_step_m', 'camera_height_min_m', 'camera_height_max_m',
             'camera_height_step_m', 'max_condition_number',
-            'min_joint_margin_rad')
+            'min_joint_margin_rad', 'preferred_joint_margin_rad',
+            'position_tolerance_m', 'orientation_tolerance_rad')
         if (not all(math.isfinite(values[name]) and values[name] > 0.0
                     for name in positive) or
                 values['fruit_zone_height_min_m'] >=
                 values['fruit_zone_height_max_m'] or
                 values['distance_min_m'] > values['distance_max_m'] or
                 values['camera_height_min_m'] > values['camera_height_max_m'] or
+                values['preferred_joint_margin_rad'] <
+                values['min_joint_margin_rad'] or
                 not values['azimuth_offsets_deg'] or
                 not 0.0 <= values['image_margin_ratio'] < 0.5):
             raise ValueError('observation search parameters are invalid')
@@ -378,6 +399,13 @@ class SprayTask(Node):
         values = {
             'trigger_px': float(self.get_parameter('target_recenter_trigger_px').value),
             'max_angle_deg': float(self.get_parameter('target_recenter_max_angle_deg').value),
+            'refine_goal_px': float(
+                self.get_parameter('target_recenter_refine_goal_px').value),
+            'max_iterations': int(
+                self.get_parameter('target_recenter_max_iterations').value),
+            'residual_candidates_px': tuple(sorted(set(
+                float(value) for value in self.get_parameter(
+                    'target_recenter_residual_candidates_px').value))),
             'desired_offset_u_px': float(
                 self.get_parameter('target_recenter_desired_offset_u_px').value),
             'desired_offset_v_px': float(
@@ -388,9 +416,19 @@ class SprayTask(Node):
                 self.get_parameter(
                     'target_post_recenter_min_confidence').value),
         }
-        if (not all(math.isfinite(value) for value in values.values()) or
+        scalar_values = tuple(
+            value for name, value in values.items()
+            if name != 'residual_candidates_px')
+        if (not all(math.isfinite(value) for value in scalar_values) or
                 values['trigger_px'] <= 0.0 or values['max_angle_deg'] <= 0.0 or
                 values['max_angle_deg'] > 180.0 or
+                values['refine_goal_px'] <= 0.0 or
+                values['refine_goal_px'] >= values['trigger_px'] or
+                not 1 <= values['max_iterations'] <= 3 or
+                not values['residual_candidates_px'] or
+                any(not math.isfinite(value) or value < 0.0 or
+                    value >= values['trigger_px']
+                    for value in values['residual_candidates_px']) or
                 values['post_stable_sec'] <= 0.0 or
                 not 0.0 <= values['post_min_confidence'] <= 1.0):
             raise ValueError('target recenter parameters are invalid')
@@ -568,11 +606,11 @@ class SprayTask(Node):
 
         processed = []
         exhausted = []
+        known_targets = []
         attempts = []
         pending_attempt = None
         sprayed = 0
         saw_disease = False
-        detected = 0
         alignment_failures = 0
         recenter_attempts = 0
         recenter_failures = 0
@@ -593,9 +631,18 @@ class SprayTask(Node):
                 f'ids=({",".join(c.target_id for c in candidates[:8])})'
                 f'{"..." if len(candidates) > 8 else ""}')
             saw_disease = saw_disease or bool(candidates)
-            detected = max(detected, len(candidates))
             feedback(ExecuteSpray.Feedback.QUEUING, 0.35, 'QUEUING')
             queue = self._queue(candidates, processed + exhausted)
+            if pending_attempt is not None and queue:
+                target = min(
+                    queue, key=lambda item: item.distance_to(pending_attempt.target))
+                self._replace_known_target(
+                    known_targets, pending_attempt.target, target)
+                self._remember_targets(
+                    known_targets,
+                    [candidate for candidate in candidates if candidate is not target])
+            else:
+                self._remember_targets(known_targets, candidates)
             self.get_logger().info(
                 f'[ARM][{tree}] QUEUE candidates={len(candidates)} '
                 f'processed={len(processed)} exhausted={len(exhausted)} '
@@ -607,13 +654,17 @@ class SprayTask(Node):
                         f'[ARM][ALIGN] target={pending_attempt.target.target_id} '
                         'was not redetected after observation recovery; marked unresolved')
                     pending_attempt = None
+                for target in self._pending_targets(
+                        known_targets, processed, exhausted):
+                    self._mark_unresolved(target, exhausted)
+                    self.get_logger().warn(
+                        f'[ARM][QUEUE] target={target.target_id} disappeared '
+                        'after a complete detection cycle; marked unresolved')
                 self.get_logger().info(
                     f'[ARM][{tree}] DETECT queue empty '
                     f'(processed={len(processed)} exhausted={len(exhausted)}) → breaking loop')
                 break
             if pending_attempt is not None:
-                target = min(
-                    queue, key=lambda item: item.distance_to(pending_attempt.target))
                 attempt = pending_attempt
                 attempt.target = target
                 pending_attempt = None
@@ -642,6 +693,7 @@ class SprayTask(Node):
                 self.get_logger().warn(
                     f'[ARM][RECENTER] target={target.target_id} {recenter_message}; '
                     'trying the next observation candidate')
+                self._rewind_for_untried_observation(attempt)
                 recovered, moved = self._recover_to_next_observation(
                     cancel_requested, feedback)
                 if recovered:
@@ -700,6 +752,7 @@ class SprayTask(Node):
                     self.get_logger().warn(
                         f'[ARM][ALIGN] recoverable failure code={align_code}; '
                         'trying the next observation candidate')
+                    self._rewind_for_untried_observation(attempt)
                     recovered, moved = self._recover_to_next_observation(
                         cancel_requested, feedback)
                     if recovered:
@@ -753,6 +806,18 @@ class SprayTask(Node):
                 return ExecuteSpray.Result.HOME_FAILED, 'observation return failed'
             self._reset_fruit_tracking()
 
+        for target in self._pending_targets(
+                known_targets, processed, exhausted):
+            self._mark_unresolved(target, exhausted)
+        if sprayed != len(processed) or not target_accounting_is_complete(
+                len(known_targets), sprayed, len(exhausted)):
+            message = (
+                'target accounting invariant failed: '
+                f'detected={len(known_targets)} sprayed={sprayed} '
+                f'unresolved={len(exhausted)} treated={len(processed)}')
+            self.get_logger().error(f'[ARM][{tree}] {message}')
+            return self._vision_failure(message, cancel_requested)
+
         feedback(ExecuteSpray.Feedback.RETURNING_HOME, 0.90, 'RETURNING_HOME')
         self.get_logger().info(f'[ARM][{tree}] HOME returning to home_pose...')
         if not self._return_home(cancel_requested):
@@ -760,7 +825,7 @@ class SprayTask(Node):
                 cancel_requested) else (ExecuteSpray.Result.HOME_FAILED, 'HOME motion failed')
         self.get_logger().info(f'[ARM][{tree}] HOME reached')
         summary = spray_summary(
-            detected, sprayed, len(exhausted), alignment_failures,
+            len(known_targets), sprayed, len(exhausted), alignment_failures,
             recenter_attempts, recenter_failures, alignment_attempts)
         self.get_logger().info(
             f'[ARM][{tree}] ═══ SUMMARY ═══ '
@@ -796,6 +861,16 @@ class SprayTask(Node):
     def _alignment_retry_allowed(self, attempt_count):
         return attempt_count < int(
             self.get_parameter('max_alignment_attempts').value)
+
+    def _rewind_for_untried_observation(self, attempt):
+        """Wrap once when a new target starts at the final observation view."""
+        current = self._observation_candidate_index
+        if current + 1 < len(self._observation_candidates):
+            return
+        if any(
+                index not in attempt.recentered_observation_indices
+                for index in range(max(0, current))):
+            self._observation_candidate_index = -1
 
     def _recover_to_next_observation(self, cancel_requested, feedback):
         moved = False
@@ -861,7 +936,10 @@ class SprayTask(Node):
 
     def _wait_for_fruits(self, cancel_requested):
         deadline = time.monotonic() + float(self.get_parameter('detection_timeout_sec').value)
+        settle = float(
+            self.get_parameter('fruit_collection_settle_sec').value)
         required = int(self.get_parameter('confirmation_frames').value)
+        ready_since = None
         while time.monotonic() < deadline:
             if self._aborted(cancel_requested):
                 return None
@@ -872,7 +950,11 @@ class SprayTask(Node):
                         if self._fruit_counts.get(target_id, 0) >= required
                     ]
                     if candidates:
-                        return candidates
+                        now = time.monotonic()
+                        if ready_since is None:
+                            ready_since = now
+                        if now - ready_since >= settle:
+                            return candidates
             time.sleep(0.02)
         with self._vision_mutex:
             return [] if self._fruit_frames else None
@@ -970,32 +1052,10 @@ class SprayTask(Node):
             return False, 'target recenter already used at this observation'
         attempt.recentered_observation_indices.add(index)
         observation = self._observation_candidates[index]
-        try:
-            camera_position, camera_quat, angle_deg = recenter_camera_pose(
-                observation.camera_position, observation.camera_quat, camera,
-                target.center_u, target.center_v,
-                self._recenter_config['desired_offset_u_px'],
-                self._recenter_config['desired_offset_v_px'],
-                self._recenter_config['max_angle_deg'])
-            tool_position, tool_quat = tool_pose_from_camera_pose(
-                camera_position, camera_quat,
-                self._camera_mount[0], self._camera_mount[1])
-        except (TypeError, ValueError) as error:
-            return False, f'target recenter rejected: {error}'
-        candidate = ObservationCandidate(
-            candidate_id=f'{observation.candidate_id}_target_{target.target_id}',
-            distance_m=observation.distance_m,
-            camera_height_m=observation.camera_height_m,
-            azimuth_deg=observation.azimuth_deg,
-            camera_position=camera_position,
-            camera_quat=camera_quat,
-            tool_position=tool_position,
-            tool_quat=tool_quat,
-            visible=True,
-            visible_margin_px=math.inf,
-        )
-        if not self._move_to_recentered_pose(candidate, current_joints):
-            return False, f'target recenter rejected: {candidate.rejection_reason}'
+        candidate, angle_deg, rejection_reason = self._move_recenter_step(
+            observation, target, camera, current_joints)
+        if candidate is None:
+            return False, f'target recenter rejected: {rejection_reason}'
         if self._aborted(cancel_requested):
             return False, 'spray goal canceled'
         self._reset_target_confirmation(target.target_id)
@@ -1014,6 +1074,50 @@ class SprayTask(Node):
             confirmed.center_u, confirmed.center_v, camera[4], camera[5],
             self._recenter_config['desired_offset_u_px'],
             self._recenter_config['desired_offset_v_px'])
+        total_angle_deg = angle_deg
+        iterations = 1
+        while (
+                iterations < self._recenter_config['max_iterations'] and
+                max(abs(post_error_u), abs(post_error_v)) >
+                self._recenter_config['refine_goal_px']):
+            inputs = self._wait_for_observation_inputs()
+            if inputs is None:
+                break
+            camera, current_joints = inputs
+            refined, refine_angle, rejection_reason = self._move_recenter_step(
+                candidate, confirmed, camera, current_joints,
+                suffix=f'_refine{iterations}')
+            if refined is None:
+                self._publish_observation_debug(
+                    'target_recenter_refine_skipped', candidate,
+                    target_id=target.target_id,
+                    pre_error_u_px=pre_error_u,
+                    pre_error_v_px=pre_error_v,
+                    post_error_u_px=post_error_u,
+                    post_error_v_px=post_error_v,
+                    planned_angle_deg=total_angle_deg,
+                    rejection_reason=rejection_reason)
+                break
+            candidate = refined
+            total_angle_deg += refine_angle
+            iterations += 1
+            self._reset_target_confirmation(target.target_id)
+            if not self._wait_for_target_confirmation(
+                    target.target_id, cancel_requested,
+                    require_workspace=True):
+                self._publish_observation_debug(
+                    'target_recenter_failed', candidate,
+                    target_id=target.target_id,
+                    pre_error_u_px=pre_error_u,
+                    pre_error_v_px=pre_error_v,
+                    planned_angle_deg=total_angle_deg,
+                    rejection_reason='target_not_reconfirmed_after_refine')
+                return False, 'target was not reconfirmed after recenter refinement'
+            confirmed = self._latest_target()
+            post_error_u, post_error_v = target_pixel_error(
+                confirmed.center_u, confirmed.center_v, camera[4], camera[5],
+                self._recenter_config['desired_offset_u_px'],
+                self._recenter_config['desired_offset_v_px'])
         self._publish_observation_debug(
             'target_recenter_confirmed', candidate,
             target_id=target.target_id,
@@ -1021,14 +1125,58 @@ class SprayTask(Node):
             pre_error_v_px=pre_error_v,
             post_error_u_px=post_error_u,
             post_error_v_px=post_error_v,
-            planned_angle_deg=angle_deg)
+            planned_angle_deg=total_angle_deg)
         self.get_logger().info(
-            f'[ARM][RECENTER] target={target.target_id} angle={angle_deg:.1f}deg '
+            f'[ARM][RECENTER] target={target.target_id} '
+            f'iterations={iterations} angle={total_angle_deg:.1f}deg '
             f'error=({pre_error_u:.1f},{pre_error_v:.1f})px'
             f'→({post_error_u:.1f},{post_error_v:.1f})px '
             f'condition={candidate.condition_number:.2f} '
             f'joint_margin={candidate.min_joint_margin_rad:.2f}')
         return True, 'target reconfirmed after recenter'
+
+    def _move_recenter_step(
+            self, observation, target, camera, current_joints, *, suffix=''):
+        rejection_reason = 'no partial recenter candidate was feasible'
+        for residual_px in self._recenter_config['residual_candidates_px']:
+            try:
+                camera_position, camera_quat, angle_deg = recenter_camera_pose(
+                    observation.camera_position, observation.camera_quat,
+                    camera, target.center_u, target.center_v,
+                    self._recenter_config['desired_offset_u_px'],
+                    self._recenter_config['desired_offset_v_px'],
+                    self._recenter_config['max_angle_deg'],
+                    residual_error_px=residual_px)
+                tool_position, tool_quat = tool_pose_from_camera_pose(
+                    camera_position, camera_quat,
+                    self._camera_mount[0], self._camera_mount[1])
+            except (TypeError, ValueError) as error:
+                rejection_reason = str(error)
+                continue
+            trial = ObservationCandidate(
+                candidate_id=(
+                    f'{observation.candidate_id}_target_{target.target_id}'
+                    f'_r{residual_px:g}{suffix}'),
+                distance_m=observation.distance_m,
+                camera_height_m=observation.camera_height_m,
+                azimuth_deg=observation.azimuth_deg,
+                camera_position=camera_position,
+                camera_quat=camera_quat,
+                tool_position=tool_position,
+                tool_quat=tool_quat,
+                visible=True,
+                visible_margin_px=math.inf,
+            )
+            if self._move_to_recentered_pose(trial, current_joints):
+                return trial, angle_deg, ''
+            rejection_reason = trial.rejection_reason
+            if (rejection_reason.startswith('actual_') or
+                    rejection_reason in {
+                        'moveit_execution_failed',
+                        'joint_state_unavailable_after_motion',
+                    }):
+                break
+        return None, 0.0, rejection_reason
 
     def _move_to_recentered_pose(self, candidate, current_joints):
         """Apply the normal collision IK, singularity and joint-margin gates."""
@@ -1048,8 +1196,9 @@ class SprayTask(Node):
             return False
         trajectory = self.arm.plan_pose(
             candidate.tool_position, candidate.tool_quat, frame_id=self._base_frame,
-            tolerance_position=self._OBSERVATION_POSITION_TOLERANCE,
-            tolerance_orientation=self._OBSERVATION_ORIENTATION_TOLERANCE)
+            tolerance_position=self._observation_config['position_tolerance_m'],
+            tolerance_orientation=self._observation_config[
+                'orientation_tolerance_rad'])
         planned = self.arm.trajectory_final_positions(
             trajectory, self.arm_joint_names) if trajectory is not None else None
         if planned is None:
@@ -1071,6 +1220,9 @@ class SprayTask(Node):
             candidate.rejection_reason = 'joint_state_unavailable_after_motion'
         else:
             self._observation_optimizer.evaluate_ik(candidate, actual, actual)
+            if candidate.rejection_reason:
+                candidate.rejection_reason = (
+                    f'actual_{candidate.rejection_reason}')
         if candidate.rejection_reason:
             self._publish_observation_debug('candidate_rejected', candidate)
             return False
@@ -1095,6 +1247,34 @@ class SprayTask(Node):
                     item.center_v - float(self.get_parameter('image_height').value) / 2.0),
                 -item.confidence),
         )
+
+    def _remember_targets(self, known, candidates):
+        for candidate in candidates:
+            for index, previous in enumerate(known):
+                if self._same_target(candidate, previous):
+                    known[index] = candidate
+                    break
+            else:
+                known.append(candidate)
+
+    def _replace_known_target(self, known, previous, current):
+        for index, candidate in enumerate(known):
+            if self._same_target(candidate, previous):
+                known[index] = current
+                known[:] = [
+                    candidate for candidate_index, candidate in enumerate(known)
+                    if candidate_index == index or
+                    not self._same_target(candidate, current)
+                ]
+                return
+        self._remember_targets(known, [current])
+
+    def _pending_targets(self, known, processed, exhausted):
+        resolved = processed + exhausted
+        return [
+            target for target in known
+            if not any(self._same_target(target, previous) for previous in resolved)
+        ]
 
     def _attempt_for(self, candidate, attempts):
         return next((attempt for attempt in attempts if self._same_target(
@@ -1330,8 +1510,10 @@ class SprayTask(Node):
                 return False
             trajectory = self.arm.plan_pose(
                 candidate.tool_position, candidate.tool_quat, frame_id=self._base_frame,
-                tolerance_position=self._OBSERVATION_POSITION_TOLERANCE,
-                tolerance_orientation=self._OBSERVATION_ORIENTATION_TOLERANCE)
+                tolerance_position=self._observation_config[
+                    'position_tolerance_m'],
+                tolerance_orientation=self._observation_config[
+                    'orientation_tolerance_rad'])
             planned = self.arm.trajectory_final_positions(
                 trajectory, self.arm_joint_names) if trajectory is not None else None
             if planned is None:
@@ -1459,8 +1641,10 @@ class SprayTask(Node):
         position, quat = pose
         return self.arm.move_pose(
             position, quat, frame_id=self._base_frame,
-            tolerance_position=self._OBSERVATION_POSITION_TOLERANCE,
-            tolerance_orientation=self._OBSERVATION_ORIENTATION_TOLERANCE)
+            tolerance_position=self._observation_config[
+                'position_tolerance_m'],
+            tolerance_orientation=self._observation_config[
+                'orientation_tolerance_rad'])
 
     def _return_home(self, cancel_requested):
         return not self._aborted(cancel_requested) and self.arm.move_joints(self._home)

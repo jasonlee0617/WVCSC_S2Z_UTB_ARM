@@ -205,7 +205,7 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
                 assert _spin_until(executor, future.done)
                 assert future.result().success
 
-        expected_nav = [(3.0, 0.5), (5.0, -0.5)] * 3
+        expected_nav = [(3.0, 0.2), (5.0, -0.2)] * 3
         assert len(servers.nav_goals) == len(expected_nav)
         for actual, expected in zip(servers.nav_goals, expected_nav):
             assert math.isclose(actual[0], expected[0], abs_tol=1e-6)
@@ -223,7 +223,7 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
             'tree_01', 'tree_02']
         assert math.isclose(
             harness.plan.targets[0].docking_pose.position.y,
-            0.5,
+            0.2,
             abs_tol=1e-6,
         )
     finally:
@@ -278,7 +278,7 @@ def test_optional_return_home_adds_final_nav_goal():
             ),
         )
         assert servers.nav_goals == [
-            (3.0, 0.5), (5.0, -0.5), (0.25, -0.1)]
+            (3.0, 0.2), (5.0, -0.2), (0.25, -0.1)]
         assert servers.spray_goals == [
             ('tree_01', 'left'), ('tree_02', 'right')]
     finally:

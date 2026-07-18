@@ -8,23 +8,23 @@ mission:
       confidence: 0.96
       position: {x: 3.0, y: 2.0, z: 0.0}
       spray_side: left
-      spray_duration: 2.0
+      spray_duration: 5.0
       evidence_uri: mock://tree_01
-    # - tree_id: tree_02
-    #   confidence: 0.94
-    #   position: {x: 7.0, y: 2.0, z: 0.0}
-    #   spray_side: left
-    #   spray_duration: 2.0
-    #   evidence_uri: mock://tree_02
-    # - tree_id: tree_03
-    #   confidence: 0.96
-    #   position: {x: 11.0, y: 2.0, z: 0.0}
-    #   spray_side: left
-    #   spray_duration: 2.0
-    #   evidence_uri: mock://tree_03
-    # - tree_id: tree_04
-    #   confidence: 0.94
-    #   position: {x: 15.0, y: 2.0, z: 0.0}
-    #   spray_side: left
-    #   spray_duration: 2.0
-    #   evidence_uri: mock://tree_04
+    - tree_id: tree_02
+      confidence: 0.94
+      position: {x: 7.0, y: 2.0, z: 0.0}
+      spray_side: left
+      spray_duration: 5.0
+      evidence_uri: mock://tree_02
+    - tree_id: tree_03
+      confidence: 0.96
+      position: {x: 11.0, y: 2.0, z: 0.0}
+      spray_side: left
+      spray_duration: 5.0
+      evidence_uri: mock://tree_03
+    - tree_id: tree_04
+      confidence: 0.94
+      position: {x: 15.0, y: 2.0, z: 0.0}
+      spray_side: left
+      spray_duration: 5.0
+      evidence_uri: mock://tree_04

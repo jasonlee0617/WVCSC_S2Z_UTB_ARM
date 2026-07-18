@@ -17,7 +17,8 @@ class _Arm:
         self.calls.append('cancel_and_wait')
         return self.stop_success
 
-    def open_gripper(self, allow_locked):
+    def control_gripper(self, open_gripper, allow_locked):
+        assert open_gripper
         assert allow_locked
         self.calls.append('open')
         return self.open_success
