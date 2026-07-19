@@ -1,1 +1,0 @@
-"""WVCSC spray actuator boundary."""

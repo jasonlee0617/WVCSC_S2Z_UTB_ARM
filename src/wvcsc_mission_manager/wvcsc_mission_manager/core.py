@@ -37,6 +37,7 @@ class Target:
 class MissionCore:
     PENDING = 'PENDING'
     COMPLETED = 'COMPLETED'
+    PARTIAL = 'PARTIAL'
     SKIPPED = 'SKIPPED'
     FAILED = 'FAILED'
     ACTIVE = {
@@ -58,8 +59,10 @@ class MissionCore:
         self.targets = ()
         self.current_index = 0
         self.completed_targets = 0
+        self.partial_targets = 0
         self.skipped_targets = 0
         self.target_outcomes = []
+        self.target_messages = []
         self.last_error = ''
 
     @property
@@ -79,8 +82,10 @@ class MissionCore:
         self.targets = tuple(targets)
         self.current_index = 0
         self.completed_targets = 0
+        self.partial_targets = 0
         self.skipped_targets = 0
         self.target_outcomes = [self.PENDING] * len(self.targets)
+        self.target_messages = [''] * len(self.targets)
         self.last_error = ''
         self.state = MissionState.READY
         return 'accepted'
@@ -94,20 +99,46 @@ class MissionCore:
     def stop_verified(self):
         return self._transition(MissionState.VERIFYING_STOP, MissionState.ARM_SPRAYING)
 
-    def arm_succeeded(self, return_home=False):
+    @property
+    def processed_targets(self):
+        return sum(outcome != self.PENDING for outcome in self.target_outcomes)
+
+    @property
+    def all_targets_completed(self):
+        return bool(self.targets) and all(
+            outcome == self.COMPLETED for outcome in self.target_outcomes)
+
+    def _finish_after_current(self, return_home):
+        if self.current_index < len(self.targets):
+            self.state = MissionState.NAVIGATING
+        elif return_home:
+            self.state = MissionState.RETURNING_HOME
+        elif self.all_targets_completed:
+            self.state = MissionState.MISSION_COMPLETED
+        else:
+            self.state = MissionState.FAILED
+
+    def arm_succeeded(self, return_home=False, message=''):
         if self.state != MissionState.ARM_SPRAYING:
             return False
         self.target_outcomes[self.current_index] = self.COMPLETED
+        self.target_messages[self.current_index] = str(message)
         self.completed_targets += 1
         self.current_index += 1
-        self.state = (
-            MissionState.NAVIGATING
-            if self.current_index < len(self.targets)
-            else (
-                MissionState.RETURNING_HOME
-                if return_home else MissionState.MISSION_COMPLETED
-            )
-        )
+        self._finish_after_current(return_home)
+        return True
+
+    def arm_partial(self, message='', return_home=False):
+        """记录树级部分完成，并继续剩余树；最后必须以 FAILED 收尾。"""
+        if self.state != MissionState.ARM_SPRAYING:
+            return False
+        self.target_outcomes[self.current_index] = self.PARTIAL
+        self.target_messages[self.current_index] = str(message)
+        self.partial_targets += 1
+        self.last_error = (
+            f'incomplete tree={self.targets[self.current_index].tree_id}: {message}')
+        self.current_index += 1
+        self._finish_after_current(return_home)
         return True
 
     def skip_current(self, return_home=False):
@@ -119,13 +150,13 @@ class MissionCore:
             return False
         previous_state = self.state
         self.target_outcomes[self.current_index] = self.SKIPPED
+        self.target_messages[self.current_index] = 'tree skipped'
+        self.last_error = (
+            f'incomplete tree={self.targets[self.current_index].tree_id}: tree skipped')
         self.current_index += 1
         self.skipped_targets += 1
         if self.current_index >= len(self.targets):
-            self.state = (
-                MissionState.RETURNING_HOME
-                if return_home else MissionState.MISSION_COMPLETED
-            )
+            self._finish_after_current(return_home)
         elif previous_state in {
                 MissionState.VERIFYING_STOP,
                 MissionState.ARM_SPRAYING}:
@@ -147,7 +178,8 @@ class MissionCore:
     def home_succeeded(self, canceled=False):
         target = (
             MissionState.CANCELED if canceled
-            else MissionState.MISSION_COMPLETED)
+            else (MissionState.MISSION_COMPLETED
+                  if self.all_targets_completed else MissionState.FAILED))
         return self._transition(MissionState.RETURNING_HOME, target)
 
     def pause(self):
@@ -171,6 +203,7 @@ class MissionCore:
                 self.current_index < len(self.target_outcomes) and
                 self.target_outcomes[self.current_index] == self.PENDING):
             self.target_outcomes[self.current_index] = self.FAILED
+            self.target_messages[self.current_index] = self.last_error
         self.state = MissionState.FAILED
         return True
 

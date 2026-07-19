@@ -1,8 +1,8 @@
 # WVCSC ARMSpray 视觉喷洒闭环实施方案
 
-> 更新日期：2026-07-18
-> 当前阶段：四树基线已完成 `4/4`，7 次视觉对准和喷洒全部成功；对准中位时间 `1.4 s`、最大 `2.0 s`，最终单轴误差不超过 `2 px`。本轮已实施仿真机械臂平衡加速、控制器启动 fail-fast 和严格病果目标核算，等待相同 seed 连续三轮 Gazebo 性能验收。
-> 验证结果：全部 WVCSC Python 测试 `185/185` 通过；本轮变更包隔离构建通过，`colcon test-result` 为 `79 tests, 0 errors, 0 failures`。动态观察位姿、目标重心、检测去重、对准恢复、人工安全复位和轨迹性能日志均已实现。
+> 更新日期：2026-07-19
+> 当前阶段：四树基线已完成 `4/4`，7 次视觉对准和喷洒全部成功；对准中位时间 `1.4 s`、最大 `2.0 s`，最终单轴误差不超过 `2 px`。现已完成 30 Hz IBVS、100 Hz MoveIt Servo 分层升级，等待相同 seed 连续三轮 Gazebo A/B 性能验收。
+> 验证结果：五个核心包直接测试 `193 passed`；隔离构建全部通过，`colcon test-result` 为 `196 tests, 0 errors, 0 failures, 0 skipped`。动态观察位姿、目标重心、检测去重、对准恢复、人工安全复位、轨迹性能日志和分层频率配置测试均已实现。
 
 ## 0. 2026-07-18 工作区收敛记录
 
@@ -10,8 +10,10 @@
 
 - ROS 包由 26 个收敛为 25 个，删除默认关闭且与 Nav2 Qt 功能重叠的 `wvcsc_web_ui`。
 - 支持入口集中到 `wvcsc_simulation/system_sim.launch.py`、C10 launch 和各节点 `ros2 run`；删除 7 个无调用方的独立 launch。
-- `trajectory_retime_server` 核心服务继续保留给未修改的 `alicia_m_bringup`，但 `wvcsc_arm_task` 和仿真主入口不再依赖它。
-- 删除未使用的 `AliciaMoveIt.move_cartesian()`、内部 retime 适配、`close_gripper()` 和对应失效测试。
+- `trajectory_retime_server` 核心服务继续保留给未修改的 `alicia_m_bringup`，同时由当前
+  `wvcsc_arm_task` 和仿真主入口的 Alicia 轨迹适配链使用。
+- 保留当前 `AliciaMoveIt` 的 Cartesian retime 校验和 open/close gripper 能力，避免
+  改变现有仿真、复位和测试接口。
 - 视觉 PID 从带永久零 Z 轴的 NumPy 三维实现收敛为标准库二维实现；Servo 状态、目标预测、稳定判定和安全语义不变。
 - fruit/tree 双数据集共享 split 验证逻辑，外部数据集和训练脚本不改动。
 - Mission Manager 的默认停靠横向偏移统一由 `DEFAULT_DOCKING_LATERAL_OFFSET=0.2` 定义。
@@ -71,12 +73,12 @@ mission_manager 发送 tree_hint (PoseStamped, 在 alicia_base_link 下)
 spray_task._move_to_observation():
     1. TF 查询 tree_hint 在 base_frame 下的坐标 → tree_in_base = (tx, ty, tz)
     2. TF 查询 tool0 → camera_color_optical_frame 的外参 → camera_mount
-    3. 从 observation_distance_candidates 依次尝试距离
-    4. camera_look_at_pose(tree_in_base, aim_height, camera_height, distance)
+    3. ObservationOptimizer 按距离、相机高度和方位角生成观察候选
+    4. camera_look_at_pose(tree_in_base, aim_height, camera_height, distance, azimuth)
        → 相机光轴(+Z)指向树冠位置，得到 camera 位姿
     5. tool_pose_from_camera_pose() → 转为 tool0 位姿
-    6. yaw_rotate_quaternion() 生成 scan_poses (扇形扫描候选)
-    7. arm.move_pose() → MoveIt IK + 规划 + 执行
+    6. 相机视野、碰撞 IK、条件数和关节余量筛选并排序候选
+    7. arm.plan_pose() + execute_trajectory() → MoveIt 规划与执行
     ↓
 机械臂到达观察位姿，相机光轴对准树冠
 ```
@@ -565,13 +567,16 @@ Fairino 参数移植，真实机械臂必须重新启用并验证。
 只有在 JointTrajectory 达到 `≥18 Hz` 后仍存在振荡、噪声或明显延迟，才
 根据新 rosbag 选择性增加目标跳变限制、延迟补偿或前馈。
 
-### 11.5 验收门槛
+### 11.5 当前验收门槛
 
-- `/servo_node/delta_twist_cmds` 和 `/arm_controller/joint_trajectory` 均 `≥18 Hz`
-- 每条 JointTrajectory 只有一个 `time_from_start=0.05 s` 的目标点
+- `/servo_node/delta_twist_cmds` 为 `27–33 Hz`
+- `/arm_controller/joint_trajectory` 为 `90–110 Hz`
+- `/vision/target` 有效检测阶段 `≥25 Hz`
+- 每条 JointTrajectory 只有一个 `time_from_start=0.01 s` 的目标点
 - 相机实际路径/命令积分比例 `≥60%`
-- 双轴误差均 `≤4 px` 且连续保持 `≥0.5 s`
-- 中位收敛时间 `≤5 s`，最大 `≤8 s`
+- 双轴误差均 `≤2 px` 且连续保持 `≥0.5 s`
+- 中位收敛时间 `≤2 s`，最大 `≤3 s`
+- Gazebo real-time factor `≥0.95`
 - 连续三轮满足 `detected == sprayed`、`unresolved=0`、`alignment_failures=0`
 
 ### 11.6 2026-07-18 吞吐、检测去重与人工复位修复
@@ -714,3 +719,31 @@ ros2 launch wvcsc_simulation system_sim.launch.py \
 ```
 
 上述 `0.40/0.50` 只用于 Gazebo，不得直接移植到真实 Alicia-M。
+
+### 11.9 2026-07-19 MoveIt Servo 100 Hz、视觉控制 30 Hz 分层升级
+
+仿真控制链调整为：C10/YOLO 约 30 Hz、IBVS Twist 30 Hz、MoveIt Servo
+JointTrajectory 100 Hz、`ros2_control` 100 Hz。具体变更为：
+
+- `moveit_servo.yaml` 的 `publish_period` 从 `0.05 s` 改为 `0.01 s`，保持
+  `low_latency_mode=false` 和 `incoming_command_timeout=0.30 s`；
+- `visual_servo.yaml` 的 `control_rate_hz` 从 20 Hz 改为 30 Hz；
+- 停止前零速度命令由 5 条改为 8 条，持续时间约 `8/30=0.267 s`；
+- 仿真 `controller_manager.update_rate` 保持 100 Hz，Gazebo physics 保持
+  1000 Hz；PID、速度、加速度、滤波器与 rosbag 话题均未改动。
+
+该升级主要用于减小底层命令间隔和改善轨迹平滑度，不会突破约 30 Hz 的新视觉
+信息上限。只有对准中位时间改善至少 10%，或关节跟踪误差 P95 改善至少 20%，
+且 YOLO 频率和 Gazebo 实时率不下降时才保留。否则回退：
+
+```yaml
+publish_period: 0.05
+control_rate_hz: 20.0
+zero_command_count: 5
+```
+
+该参数组合仅用于 Gazebo；真机需要独立配置并重新启用碰撞检查。
+
+代码验证结果：五个核心包构建成功，直接测试 `193 passed`，ROS 包测试汇总为
+`196 tests, 0 errors, 0 failures, 0 skipped`。实际 `90–110/27–33 Hz` 吞吐、
+实时率和收益门槛仍需通过下一轮 Gazebo bag 验证，不能由静态配置测试代替。

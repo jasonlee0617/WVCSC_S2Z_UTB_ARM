@@ -1,4 +1,14 @@
-"""Two-stage C10 perception: tree detection followed by fruit segmentation."""
+"""C10 两阶段 YOLO 感知、病果跟踪与视觉伺服目标发布节点。
+
+图像数据流为：整帧树木检测 -> 扩展树木 ROI -> 健康/病果分割 -> 重复实例去除 ->
+跨帧 ID 关联。机械臂通过 ``/vision/selected_target_id`` 锁定一颗病果后，节点在
+``target`` 模式持续发布 ``Target2D``；其 ``center_u/v`` 是分割掩膜内距离边界最远
+的安全喷洒点，不是检测框中心。
+
+所有图像坐标和尺寸单位为像素，原点在左上角，``u`` 向右、``v`` 向下。感知层
+``Instance`` 只描述当前/短期跟踪实例，任务层会另外维护跨观察位的目标状态，二者
+不可合并。目标关联歧义时发布无效目标并停机等待，禁止为了连续性改喷邻近病果。
+"""
 
 from dataclasses import dataclass, replace
 import json
@@ -29,6 +39,7 @@ from .model_utils import (
 
 @dataclass(frozen=True)
 class Instance:
+    """一帧中的树或果实实例；``aim_u/v`` 是掩膜安全瞄准点。"""
     target_id: str
     class_name: str
     confidence: float
@@ -69,12 +80,14 @@ class Instance:
 
 @dataclass
 class Track:
+    """短期跨帧轨迹；允许少量漏检，但不会跨任务或树木复用。"""
     instance: Instance
     missed_frames: int = 0
 
 
 @dataclass(frozen=True)
 class TargetTemplate:
+    """锁定病果的局部外观模板，用于短暂低置信度或 YOLO 空窗。"""
     patch: np.ndarray
     bbox_left: float
     bbox_top: float
@@ -324,15 +337,33 @@ def expanded_roi(left, top, right, bottom, image_width, image_height, padding):
 
 
 def safest_mask_point(points, width, height):
-    """Return the furthest in-mask point, never a centroid outside the fruit."""
+    """返回掩膜深部核心的稳定瞄准点，并保证结果仍位于果实内部。
+
+    距离变换的单个最大像素对分割轮廓的一像素变化非常敏感；圆形病果还可能有
+    多个等价最大值，``minMaxLoc`` 会任意选择其中一个。这里先取距离不小于最大值
+    80% 的安全核心，再选择最接近核心质心的真实核心像素。该点仍有足够边界余量，
+    同时避免视觉伺服因最大值在相邻像素间跳动而反复启停。
+    """
     mask = np.zeros((height, width), dtype=np.uint8)
     cv2.fillPoly(mask, [np.asarray(points, dtype=np.int32)], 255)
-    _minimum, _maximum, _min_point, point = cv2.minMaxLoc(
-        cv2.distanceTransform(mask, cv2.DIST_L2, 5))
-    return float(point[0]), float(point[1])
+    distance = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    maximum = float(distance.max())
+    if maximum <= 0.0:
+        raise ValueError('fruit mask has no interior pixel')
+    core = np.argwhere(distance >= 0.80 * maximum)
+    centroid = core.mean(axis=0)
+    index = int(np.argmin(np.sum((core - centroid) ** 2, axis=1)))
+    row, column = core[index]
+    return float(column), float(row)
 
 
 class TwoStageYolo(Node):
+    """根据任务阶段切换推理负载，并维持单个选中病果的逻辑身份。
+
+    ``idle/tree/fruits/target`` 模式由机械臂节点控制。图像回调串行完成推理和发布；
+    MissionStatus 变化会清空树锁、轨迹和模板，避免上一棵树的 ID 污染下一棵树。
+    """
+
     def __init__(self):
         super().__init__('wvcsc_two_stage_yolo')
         self._declare_parameters()
@@ -401,8 +432,13 @@ class TwoStageYolo(Node):
             'track_max_missed_frames': 5,
             'target_reassociation_iou_margin': 0.10,
             'target_reassociation_distance_margin_px': 8.0,
+            # Camera recentering can move a locked fruit farther than the
+            # ordinary frame-to-frame tracker gate.  This wider gate is used
+            # only while one explicit task target is selected; it is not used
+            # to merge unrelated fruits into the normal track set.
+            'target_reassociation_distance_px': 160.0,
             'target_equivalent_aim_distance_px': 8.0,
-            'target_lock_ema_alpha': 0.50,
+            'target_lock_ema_alpha': 0.20,
             'target_template_tracking_enabled': True,
             'target_template_update_min_confidence': 0.30,
             'target_template_padding_ratio': 0.50,
@@ -450,6 +486,7 @@ class TwoStageYolo(Node):
             self._selected_target_template = None
 
     def _on_selected_target(self, message):
+        """幂等锁定逻辑目标；重复发布同一 ID 不得清空已有几何参考。"""
         selected_target_id = message.data.strip()
         if (selected_target_id and
                 selected_target_id == self._selected_target_id and
@@ -472,6 +509,7 @@ class TwoStageYolo(Node):
         self._inference_mode = mode
 
     def _on_image(self, message):
+        """执行当前模式所需的最小推理链，并发布检测、目标和诊断。"""
         if not self._tree_id or self._inference_mode == 'idle':
             return
         try:
@@ -580,6 +618,7 @@ class TwoStageYolo(Node):
         return instances
 
     def _assign_track_ids(self, instances):
+        """进行确定性一对一关联，避免一个历史 ID 同时分配给多个实例。"""
         assigned = []
         threshold = float(self.get_parameter('track_iou_threshold').value)
         distance = float(self.get_parameter('track_center_distance_px').value)
@@ -634,7 +673,11 @@ class TwoStageYolo(Node):
         return detection
 
     def _resolve_selected_target(self, instances):
-        """Keep an externally selected disease target stable across ID churn."""
+        """在检测器 ID 变化时保持外部选中病果的逻辑身份。
+
+        只有重叠或中心距离满足阈值且最佳候选与次佳候选有足够间隔时才重关联；
+        歧义返回明确原因，不使用“离喷洒像素最近”之类可能选错目标的策略。
+        """
         if not self._selected_target_id:
             return None, 'no_selected_target', 'target_invalid'
         reference = self._selected_target_reference
@@ -646,11 +689,30 @@ class TwoStageYolo(Node):
                 return None, 'selected_id_missing', 'target_invalid'
             self._selected_target_reference = target
             return target, 'none', 'target_valid'
+        reassociation_distance = float(self.get_parameter(
+            'target_reassociation_distance_px').value)
+        # When the tracker still reports the selected logical ID, keep that
+        # identity if it remains geometrically plausible.  The generic
+        # nearest-candidate rule is intentionally more conservative because a
+        # stale ID must not steal the locked target from a nearby fruit.
+        exact = next((item for item in instances
+                      if item.target_id == self._selected_target_id and
+                      item.class_name == 'diseased_fruit' and
+                      (item.iou(reference) >= float(self.get_parameter(
+                          'track_iou_threshold').value) or
+                       item.distance_to(reference) <= reassociation_distance)),
+                     None)
+        if exact is not None:
+            exact = smoothed_target(
+                reference, exact,
+                self.get_parameter('target_lock_ema_alpha').value)
+            self._selected_target_reference = exact
+            return exact, 'none', 'target_valid'
         target, reason = reassociation_candidate(
             reference,
             instances,
             float(self.get_parameter('track_iou_threshold').value),
-            float(self.get_parameter('track_center_distance_px').value),
+            reassociation_distance,
             float(self.get_parameter('target_reassociation_iou_margin').value),
             float(self.get_parameter(
                 'target_reassociation_distance_margin_px').value),
@@ -668,6 +730,7 @@ class TwoStageYolo(Node):
         return None, reason, 'target_invalid'
 
     def _resolve_or_track_selected_target(self, image, instances):
+        """优先使用 YOLO 几何关联，短时低置信度/漏检时才退化到模板跟踪。"""
         target, invalid_reason, event = self._resolve_selected_target(instances)
         tracking_enabled = (
             image is not None and
@@ -724,6 +787,7 @@ class TwoStageYolo(Node):
         return tracked, 'none', 'target_template_tracked'
 
     def _publish_selected_target(self, image, instances, cv_image=None):
+        """以原逻辑 ID 发布 Target2D；无可靠候选时仍发布 ``valid=false``。"""
         target, invalid_reason, event = self._resolve_or_track_selected_target(
             cv_image, instances)
         if not self._selected_target_id:
@@ -747,6 +811,7 @@ class TwoStageYolo(Node):
         return target, invalid_reason, event
 
     def _log_target_state(self, target, invalid_reason, event):
+        """仅在目标有效性或关联事件变化时输出，避免逐帧刷屏。"""
         state = (bool(target), invalid_reason, event)
         if state == self._last_target_state:
             return
@@ -762,6 +827,7 @@ class TwoStageYolo(Node):
 
     def _publish_perception_debug(
             self, image, tree, fruits, target, invalid_reason, event):
+        """发布限频 JSON，记录实际候选 ID、关联事件和图像处理延迟。"""
         now = time.monotonic()
         state = (
             self._inference_mode, tree is not None, self._selected_target_id,

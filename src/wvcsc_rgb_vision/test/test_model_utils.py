@@ -129,6 +129,7 @@ def test_template_replaces_a_low_confidence_yolo_update():
         'track_center_distance_px': 50.0,
         'target_reassociation_iou_margin': 0.10,
         'target_reassociation_distance_margin_px': 8.0,
+        'target_reassociation_distance_px': 50.0,
         'target_equivalent_aim_distance_px': 8.0,
         'target_lock_ema_alpha': 0.50,
         'target_template_tracking_enabled': True,
@@ -158,6 +159,7 @@ def _target_selection_node(selected_id, reference):
         'track_center_distance_px': 40.0,
         'target_reassociation_iou_margin': 0.10,
         'target_reassociation_distance_margin_px': 8.0,
+        'target_reassociation_distance_px': 40.0,
         'target_equivalent_aim_distance_px': 8.0,
         'target_lock_ema_alpha': 0.35,
     }[name])
@@ -176,6 +178,23 @@ def test_selected_target_is_reassociated_when_its_tracker_id_changes():
     assert reason == 'none'
     assert event == 'target_reassociated'
     assert node._selected_target_reference == target
+
+
+def test_selected_target_keeps_exact_tracker_id_after_large_camera_motion():
+    reference = Instance('fruit-1', 'diseased_fruit', 0.9, 10, 10, 30, 30, 20, 20)
+    same_id = Instance('fruit-1', 'diseased_fruit', 0.9, 130, 10, 150, 30, 140, 20)
+    node = _target_selection_node('fruit-1', reference)
+    node.get_parameter = lambda name: SimpleNamespace(value={
+        'track_iou_threshold': 0.30,
+        'target_reassociation_distance_px': 160.0,
+        'target_lock_ema_alpha': 0.35,
+    }[name])
+
+    target, reason, event = node._resolve_selected_target([same_id])
+
+    assert target.target_id == 'fruit-1'
+    assert reason == 'none'
+    assert event == 'target_valid'
 
 
 def test_repeated_selected_target_message_preserves_geometric_reference():
@@ -304,6 +323,14 @@ def test_mask_safe_point_is_inside_the_instance_polygon():
     u, v = safest_mask_point(polygon, 64, 64)
     assert 20 <= u <= 40
     assert 20 <= v <= 40
+
+
+def test_mask_safe_point_uses_center_of_deep_core_not_arbitrary_maximum():
+    polygon = np.array([[10, 10], [50, 10], [50, 50], [10, 50]], dtype=float)
+
+    u, v = safest_mask_point(polygon, 64, 64)
+
+    assert (u, v) == pytest.approx((30.0, 30.0), abs=1.0)
 
 
 def test_deduplication_keeps_highest_confidence_same_class_instance():

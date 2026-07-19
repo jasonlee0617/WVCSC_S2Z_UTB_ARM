@@ -20,11 +20,19 @@ wvcsc_two_stage_yolo:
     track_max_missed_frames: 5
     target_reassociation_iou_margin: 0.10
     target_reassociation_distance_margin_px: 8.0
+    # Wider than ordinary frame tracking to bridge the known camera motion
+    # introduced by one coarse target recenter; task selection remains explicit.
+    target_reassociation_distance_px: 160.0
     # Merge only masks whose safe spray points are already within fine tolerance.
     target_equivalent_aim_distance_px: 8.0
-    target_lock_ema_alpha: 0.50
-    # Simulation-only bridge across the current model's low-confidence
-    # centre-image gap. A high-confidence YOLO lock seeds the local template.
+    # Damp the safe-mask-point noise without adding more than about 0.2 s lag
+    # at the measured 25-30 Hz inference rate.
+    target_lock_ema_alpha: 0.20
+    # Invalid YOLO frames already stop Servo and may recover for 0.75 s.  Do not
+    # replace a real segmentation point with template matching, which can lock
+    # onto nearby leaves and create a slow target drift.
+    # Bridge short YOLO dropouts while MoveIt recenters the camera. The arm-side
+    # fixed-radius stability gate must pass before Servo can start.
     target_template_tracking_enabled: true
     target_template_update_min_confidence: 0.30
     target_template_padding_ratio: 0.50

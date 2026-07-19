@@ -147,6 +147,8 @@ def generate_launch_description():
     use_mission_manager = LaunchConfiguration('use_mission_manager')
     arm_velocity_scaling = LaunchConfiguration('arm_velocity_scaling')
     arm_acceleration_scaling = LaunchConfiguration('arm_acceleration_scaling')
+    planning_pipeline_id = LaunchConfiguration('planning_pipeline_id')
+    planner_id = LaunchConfiguration('planner_id')
     yolo_python_executable = LaunchConfiguration('yolo_python_executable')
     auto_start_mission = LaunchConfiguration('auto_start_mission')
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
@@ -159,7 +161,7 @@ def generate_launch_description():
     uav_share = get_package_share_directory('wvcsc_uav_gateway')
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
     visual_servo_share = get_package_share_directory('wvcsc_visual_servo')
-    spray_share = get_package_share_directory('wvcsc_spray_controller')
+    spray_share = get_package_share_directory('wvcsc_arm_task')
     moveit_share = get_package_share_directory('alicia_m_moveit_config')
     gazebo_share = get_package_share_directory('gazebo_ros')
     nav2_share = get_package_share_directory('nav2_bringup')
@@ -224,21 +226,11 @@ def generate_launch_description():
         'robot_description_planning': joint_limits,
     }
     moveit_controllers = load_yaml('alicia_m_moveit_config', 'config/moveit_controllers.yaml')
+    ompl_planning = load_yaml('alicia_m_moveit_config', 'config/ompl_planning.yaml')
     planning_pipeline = {
         'default_planning_pipeline': 'ompl',
         'planning_pipelines': ['ompl'],
-        'ompl': {
-            'planning_plugin': 'ompl_interface/OMPLPlanner',
-            'request_adapters': (
-                'default_planner_request_adapters/AddTimeOptimalParameterization '
-                'default_planner_request_adapters/ResolveConstraintFrames '
-                'default_planner_request_adapters/FixWorkspaceBounds '
-                'default_planner_request_adapters/FixStartStateBounds '
-                'default_planner_request_adapters/FixStartStateCollision '
-                'default_planner_request_adapters/FixStartStatePathConstraints'
-            ),
-            'start_state_max_bounds_error': 0.1,
-        },
+        'ompl': ompl_planning,
     }
     common_moveit = [
         robot_description,
@@ -345,6 +337,8 @@ def generate_launch_description():
         'base_frame': 'alicia_base_link',
         'group_name': 'arm',
         'tool_link': 'tool0',
+        'planning_pipeline_id': planning_pipeline_id,
+        'planner_id': planner_id,
         'velocity_scaling': ParameterValue(
             arm_velocity_scaling, value_type=float),
         'acceleration_scaling': ParameterValue(
@@ -543,7 +537,7 @@ def generate_launch_description():
         ])), output='screen',
     )
     spray_simulator = Node(
-        package='wvcsc_spray_controller', executable='spray_simulator',
+        package='wvcsc_arm_task', executable='spray_simulator',
         parameters=[
             os.path.join(spray_share, 'config', 'spray_sim.yaml'),
             {'use_sim_time': True},
@@ -608,6 +602,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.40'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.50'),
+        DeclareLaunchArgument('planning_pipeline_id', default_value='ompl'),
+        DeclareLaunchArgument('planner_id', default_value='RRTConnectFast'),
         DeclareLaunchArgument(
             'yolo_python_executable', default_value='/home/robot/venvs/wvcsc_yolo_ros/bin/python'),
         DeclareLaunchArgument('auto_start_mission', default_value='true'),

@@ -1,6 +1,6 @@
 # WVCSC_S2Z_UTB_ARM 项目分析
 
-> 更新日期：2026-07-18
+> 更新日期：2026-07-19
 > 详细架构：[WORKSPACE_ARCHITECTURE.md](WORKSPACE_ARCHITECTURE.md)
 > 仿真执行手册：[WVCSC_S2Z_UTB_ARM_Codex_仿真任务闭环实施方案.md](WVCSC_S2Z_UTB_ARM_Codex_仿真任务闭环实施方案.md)
 
@@ -22,7 +22,7 @@ Mock/Replay UAV
   → 动态观察位姿与扇形扫描
   → tree YOLO detect + fruit YOLO segment
   → 病果去重、逻辑目标锁定、目标重心
-  → 20 Hz MoveIt Servo 图像平面 XY 对准
+  → 30 Hz IBVS Twist → 100 Hz MoveIt Servo 图像平面 XY 对准
   → Spray Action 保持 5 s
   → 返回观察位继续下一病果
   → HOME
@@ -38,7 +38,7 @@ Mock/Replay UAV
 | 任务管理 | 已完成 | 顺序执行、停稳、fail-safe、skip、cancel/reset |
 | 机械臂任务 | 已完成代码链 | 动态观察、目标重心、逐果作业、HOME |
 | 两级 YOLO | 已接入 | 树检测、果实分割、检测去重、目标锁定与模板短时跟踪 |
-| 视觉伺服 | 已接通 | 20 Hz Twist/JointTrajectory、4 px 稳定门槛、状态保护 |
+| 视觉伺服 | 已接通 | 30 Hz Twist、100 Hz JointTrajectory、2 px 稳定门槛、状态保护 |
 | 喷洒执行器 | 已完成仿真边界 | 定时 5 s，无夹爪开闭副作用 |
 | C10 真机入口 | 第一版完成 | by-id、标准图像话题、诊断与 respawn |
 
@@ -87,11 +87,13 @@ Mock/Replay UAV
 
 工作区从 26 个 ROS 包收敛为 25 个：
 
-- 删除 `wvcsc_web_ui`，任务操作统一到 ROS 服务和受保护的 Nav2 Qt 前端。
-- 保留 `trajectory_retime_server` 核心包，因为未修改的 `alicia_m_bringup` 仍依赖它。
-- `wvcsc_arm_task` 和 `wvcsc_simulation` 不再依赖重定时服务。
+- 当前不保留独立 Web UI；任务操作统一到 ROS 服务和受保护的 Nav2 Qt 前端。
+- `trajectory_retime_server` 仍由未修改的 `alicia_m_bringup` 以及 WVCSC 仿真
+  的 Alicia 轨迹适配链使用，因此不从当前依赖图移除。
+- `wvcsc_arm_task` 和 `wvcsc_simulation` 当前仍通过 Alicia 轨迹适配链使用重定时服务。
 - 删除六个项目独立 launch 和 retime 独立 launch，支持入口集中到系统 launch、C10 launch 和 `ros2 run`。
-- 删除 Arm Adapter 中未使用的 Cartesian retime 与 close-gripper 路径。
+- Arm Adapter 的 Cartesian retime 校验和 open/close gripper 能力继续保留，避免破坏
+  当前仿真、复位和测试接口。
 - 将视觉 PID 收敛为标准库实现的二维控制器，移除 NumPy 运行依赖。
 - 合并 fruit/tree 数据集的 split 验证重复逻辑。
 
@@ -119,12 +121,12 @@ Mock/Replay UAV
 
 | 参数 | 当前值 |
 |---|---:|
-| 控制频率 | 20 Hz |
-| `Kp XY` | 1.0 |
+| IBVS / MoveIt Servo / ros2_control | 30 / 100 / 100 Hz |
+| `Kp XY` | 2.5 |
 | `Kd XY` | 0.005 |
 | 最大线速度 | 0.08 m/s |
 | 最大线加速度 | 0.60 m/s² |
-| 最终容差 | 4 px/轴 |
+| 最终容差 | 2 px/轴 |
 | 稳定持续时间 | 0.5 s |
 | 对齐超时 | 8 s |
 
@@ -145,7 +147,8 @@ Mock/Replay UAV
 ## 7. 推荐实施顺序
 
 1. 完成本轮删减后的全包构建与测试。
-2. 在 Gazebo 运行单棵树并手动录 bag，确认控制吞吐仍为 20 Hz。
+2. 在 Gazebo 运行单棵树并手动录 bag，确认 Twist 为 `27–33 Hz`、
+   JointTrajectory 为 `90–110 Hz`，且 Gazebo 实时率不低于 `0.95`。
 3. 先验收目标锁定和重心，再验收 PID 收敛，最后验收逐果喷洒。
 4. 若低置信度仍阻断，优先重训模型，不继续提高 PID。
 5. 完成 C10 内参、相机—tool0—喷嘴外参和固定喷距标定。

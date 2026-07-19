@@ -1,9 +1,7 @@
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from wvcsc_interfaces.msg import DiseaseTreeArray
 
-from .message_factory import mission_message
+from .message_factory import mission_message, mission_publisher
 from .validation import load_and_validate
 
 
@@ -23,13 +21,7 @@ class MockUavGateway(Node):
             float(self.get_parameter('max_abs_coordinate').value),
         )
         self._config = config
-        qos = QoSProfile(
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        self._publisher = self.create_publisher(
-            DiseaseTreeArray, '/uav/disease_trees', qos)
+        self._publisher = mission_publisher(self)
         self._timer = self.create_timer(
             max(0.001, config['publish_delay_sec']), self._publish_once)
 

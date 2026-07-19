@@ -25,6 +25,9 @@ class _Future:
 
 
 class _Logger:
+    def debug(self, _message):
+        pass
+
     def error(self, _message):
         pass
 
@@ -67,6 +70,10 @@ class _Harness:
         self._spray_handle = object()
         self._phase_started = 0.0
         self._nav_timeout = 5.0
+        self._nav_startup_retry_timeout = 30.0
+        self._nav_startup_retry_interval = 0.5
+        self._initial_nav_started = None
+        self._nav_retry_due = None
         self._spray_timeout = 5.0
         self._spray_progress_timeout = 3.0
         self._spray_last_progress = 0.0
@@ -82,6 +89,10 @@ class _Harness:
         self.status_updates = 0
         self._navigation_active = MissionManager._navigation_active.__get__(
             self, _Harness)
+        self._clear_nav_startup_retry = (
+            MissionManager._clear_nav_startup_retry.__get__(self, _Harness))
+        self._schedule_initial_nav_retry = (
+            MissionManager._schedule_initial_nav_retry.__get__(self, _Harness))
 
     def _fail(self, message):
         self.failures.append(str(message))
@@ -179,6 +190,19 @@ def test_nav_rejection_and_failure_are_fail_fast():
     assert failed.core.current_index == 0
 
 
+def test_initial_nav_rejection_retries_while_lifecycle_activates():
+    retrying = _Harness()
+    retrying._initial_nav_started = 0.0
+    retrying._now = lambda: 1.0
+
+    MissionManager._nav_goal_response(
+        retrying, _Future(SimpleNamespace(accepted=False)))
+
+    assert retrying.core.state == MissionState.NAVIGATING
+    assert retrying._nav_retry_due == 1.5
+    assert retrying.failures == []
+
+
 def test_paused_navigation_cancel_does_not_fail_mission():
     paused = _Harness(MissionState.PAUSED)
     MissionManager._nav_result(
@@ -223,7 +247,7 @@ def test_ordinary_vision_failure_skips_target_after_home():
             status=GoalStatus.STATUS_ABORTED, result=result)),
     )
 
-    assert harness.core.state == MissionState.MISSION_COMPLETED
+    assert harness.core.state == MissionState.FAILED
     assert harness.core.skipped_targets == 1
     assert harness.core.target_outcomes == [MissionCore.SKIPPED]
     assert harness.failures == []
@@ -248,7 +272,7 @@ def test_inspected_without_disease_completes_the_tree():
     assert harness.core.skipped_targets == 0
 
 
-def test_partial_success_completes_the_tree():
+def test_partial_success_marks_tree_incomplete_and_fails_final_mission():
     harness = _Harness(MissionState.ARM_SPRAYING)
     result = SimpleNamespace(
         success=True,
@@ -262,8 +286,10 @@ def test_partial_success_completes_the_tree():
             status=GoalStatus.STATUS_SUCCEEDED, result=result)),
     )
 
-    assert harness.core.state == MissionState.MISSION_COMPLETED
-    assert harness.core.completed_targets == 1
+    assert harness.core.state == MissionState.FAILED
+    assert harness.core.completed_targets == 0
+    assert harness.core.partial_targets == 1
+    assert harness.core.target_outcomes == [MissionCore.PARTIAL]
 
 
 def test_nav_spray_and_stop_timeouts_fail_the_active_target():
@@ -395,6 +421,8 @@ def test_last_target_can_require_return_home_navigation():
 
 def test_return_home_nav_success_completes_mission():
     harness = _Harness(MissionState.RETURNING_HOME)
+    harness.core.target_outcomes = [MissionCore.COMPLETED]
+    harness.core.completed_targets = 1
 
     MissionManager._nav_result(
         harness,
@@ -430,7 +458,7 @@ def test_skip_requires_paused_navigation_to_settle():
     MissionManager._skip_current(harness, None, response)
     assert response.success
     assert harness.core.skipped_targets == 1
-    assert harness.core.state == MissionState.MISSION_COMPLETED
+    assert harness.core.state == MissionState.FAILED
 
 
 def test_manual_return_home_is_started_only_from_safe_settled_state():

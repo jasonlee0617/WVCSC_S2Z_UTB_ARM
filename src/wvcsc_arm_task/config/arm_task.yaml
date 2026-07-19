@@ -2,6 +2,8 @@ wvcsc_spray_task:
   ros__parameters:
     retime_service_name: /retime_trajectory
     retime_timeout: 5.0
+    planning_pipeline_id: ompl
+    planner_id: RRTConnectFast
     gripper_open_position: 0.0
     gripper_closed_position: -0.05
     gripper_max_effort: 5.0
@@ -58,19 +60,40 @@ wvcsc_spray_task:
     # confidence fruit is not discarded merely because it stabilized later.
     fruit_collection_settle_sec: 1.00
     max_alignment_attempts: 2
-    # Reorient once before fine visual servo when a fruit is outside its
-    # ±48 px micro-adjustment workspace. Values mirror visual_servo.yaml.
+    # MoveIt only performs coarse re-centering for targets outside the visual
+    # servo work area. 10-48 px residuals are intentionally left to IBVS so the
+    # continuous controller produces real non-zero commands and can be measured.
     target_recenter_trigger_px: 48.0
+    # The same radius gates post-recenter reliability before sending Align.
+    target_recenter_workspace_px: 48.0
     target_recenter_max_angle_deg: 20.0
-    target_recenter_refine_goal_px: 8.0
+    # Residuals above 24 px are refined or moved to a safer observation pose;
+    # the remaining 10-24 px are deliberately left to image-based Servo.
+    target_recenter_refine_goal_px: 24.0
+    # One coarse move plus at most one bounded refinement. Fine correction is
+    # owned by visual servo, not repeated MoveIt re-planning.
     target_recenter_max_iterations: 2
-    # Try full centering first, then preserve progressively more joint margin.
-    # Every candidate remains inside the ±48 px fine-Servo workspace.
-    target_recenter_residual_candidates_px: [0.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0]
+    # If the exact look-at pose violates angle, collision, singularity or joint
+    # reserve gates, try a safe partial rotation and refine from the real TF.
+    target_recenter_residual_candidates_px: [12.0, 16.0, 24.0, 8.0, 32.0, 40.0, 3.0, 1.0, 0.0]
+    # At fx about 508, 0.002 rad is roughly one pixel. These are stricter
+    # than observation-search tolerances, which are intentionally broader.
+    target_recenter_position_tolerance_m: 0.002
+    target_recenter_orientation_tolerance_rad: 0.002
     target_recenter_desired_offset_u_px: 0.0
     target_recenter_desired_offset_v_px: 28.0
-    target_post_recenter_stable_sec: 0.50
+    # Recenter is accepted after a short stable target window. A 4 px drift
+    # gate rejects real target jumps without blocking normal YOLO mask jitter.
+    target_post_recenter_stable_sec: 0.20
+    target_post_recenter_max_drift_px: 4.0
+    # Tolerate isolated YOLO dropouts, but never start Servo while the current
+    # sample is invalid or after a sustained target loss.
+    target_post_recenter_max_gap_sec: 0.20
     target_post_recenter_min_confidence: 0.30
+    # Require two independent empty views after the last treated target. This
+    # prevents a fruit missed in the first post-spray view from being silently
+    # counted as complete while keeping the bounded search practical in Gazebo.
+    completion_scan_empty_limit: 2
     processed_iou_threshold: 0.30
     processed_center_distance_px: 40.0
     image_width: 1280

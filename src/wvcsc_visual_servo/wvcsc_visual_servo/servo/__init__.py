@@ -1,1 +1,0 @@
-"""Reusable visual-servo helpers."""

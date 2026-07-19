@@ -169,6 +169,27 @@ def test_joint_motion_executes_planned_trajectory():
         for message in adapter._node.logger.infos)
 
 
+def test_motion_adapter_uses_configured_ompl_planner():
+    adapter, moveit, _retime, _gripper = _adapter()
+    assert moveit.pipeline_id == 'ompl'
+    assert moveit.planner_id == 'RRTConnectFast'
+    assert any(
+        'pipeline=ompl' in message and 'planner=RRTConnectFast' in message
+        for message in adapter._node.logger.infos)
+
+
+@pytest.mark.parametrize('kwargs', [
+    {'planning_pipeline_id': ''},
+    {'planner_id': ''},
+])
+def test_empty_planner_configuration_is_rejected(kwargs):
+    node = _Node()
+    with pytest.raises(ValueError):
+        AliciaMoveIt(
+            node, moveit=_MoveIt(_trajectory()), gripper=_Gripper(),
+            arm_activity=_Activity(), gripper_activity=_Activity(), **kwargs)
+
+
 def test_pose_motion_passes_observation_tolerances_to_moveit():
     adapter, moveit, _retime, _gripper = _adapter()
     assert adapter.move_pose(

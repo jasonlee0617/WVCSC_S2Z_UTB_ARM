@@ -1,6 +1,6 @@
 import pytest
 
-from wvcsc_spray_controller.core import SprayInterlock
+from wvcsc_arm_task.core import SprayInterlock
 
 
 @pytest.mark.parametrize('mission,tree,duration,mode', [

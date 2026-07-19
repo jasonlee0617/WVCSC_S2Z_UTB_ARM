@@ -6,11 +6,12 @@ from types import SimpleNamespace
 from action_msgs.msg import GoalStatus
 from wvcsc_interfaces.action import AlignTarget, ExecuteSpray
 
-from wvcsc_arm_task.spray_task import (
-    FruitTarget, SprayTask, TargetAttempt, completion_feedback_allowed,
+from wvcsc_arm_task.spray_task import SprayTask
+from wvcsc_arm_task.target_flow import (
+    FruitTarget, TargetAttempt, completion_feedback_allowed,
     deduplicate_candidates, detection_candidates, final_spray_outcome,
     spray_summary, target_accounting_is_complete, target_requires_recenter)
-from wvcsc_arm_task.observation_optimizer import ObservationCandidate
+from wvcsc_arm_task.observation import ObservationCandidate
 
 
 def _target(target_id, center_u, center_v, confidence=0.9):
@@ -204,6 +205,7 @@ def test_vision_failure_never_publishes_completed_feedback():
 
 class _ObservationHarness:
     _move_to_next_observation = SprayTask._move_to_next_observation
+    _execute_candidate_motion = SprayTask._execute_candidate_motion
 
     def __init__(self):
         self._observation_candidates = [
@@ -274,8 +276,46 @@ def test_observation_candidates_advance_and_skip_planning_failures():
     assert task._observation_distance == 1.20
 
 
+def test_observation_recovery_skips_indices_already_used_by_target():
+    task = _ObservationHarness()
+
+    assert task._move_to_next_observation({0})
+
+    assert task.moves == [1.20]
+    assert task._observation_candidate_index == 1
+
+
+def test_tree_hint_validation_is_a_static_geometry_guard():
+    valid = SimpleNamespace(
+        header=SimpleNamespace(frame_id='map'),
+        point=SimpleNamespace(x=1.0, y=2.0, z=3.0),
+    )
+    invalid = SimpleNamespace(
+        header=SimpleNamespace(frame_id=''),
+        point=SimpleNamespace(x=1.0, y=2.0, z=3.0),
+    )
+
+    assert SprayTask._hint_available(valid)
+    assert not SprayTask._hint_available(invalid)
+
+
+def test_feedback_callback_is_static_and_publishes_action_feedback():
+    published = []
+    handle = SimpleNamespace(publish_feedback=published.append)
+
+    SprayTask._feedback(
+        handle, ExecuteSpray.Feedback.MOVING_TO_OBSERVE,
+        0.25, 'computing look-at pose')
+
+    assert len(published) == 1
+    assert published[0].phase == ExecuteSpray.Feedback.MOVING_TO_OBSERVE
+    assert published[0].progress == 0.25
+    assert published[0].phase_text == 'computing look-at pose'
+
+
 class _RetryHarness:
     _alignment_retry_allowed = SprayTask._alignment_retry_allowed
+    _is_recoverable_alignment_code = SprayTask._is_recoverable_alignment_code
 
     def get_parameter(self, _name):
         return SimpleNamespace(value=2)
@@ -287,31 +327,64 @@ def test_alignment_retry_is_bounded_by_configured_attempts():
     assert not task._alignment_retry_allowed(2)
 
 
+def test_servo_safety_stop_is_recoverable_alignment_code():
+    assert _RetryHarness._is_recoverable_alignment_code(
+        AlignTarget.Result.SERVO_SAFETY_STOP)
+
+
 def test_target_recenter_uses_the_same_desired_spray_pixel_as_visual_servo():
     assert not target_requires_recenter(
-        688.0, 408.0, 1280, 720, 0.0, 28.0, 48.0)
+        680.0, 388.0, 1280, 720, 0.0, 28.0, 48.0)
     assert target_requires_recenter(
         689.0, 408.0, 1280, 720, 0.0, 28.0, 48.0)
+    assert target_requires_recenter(
+        641.2, 389.2, 1280, 720, 0.0, 28.0, 1.5)
 
 
-class _TargetCallbackHarness:
+class _TargetStateHarness:
     _on_selected_target = SprayTask._on_selected_target
+    _lock_target = SprayTask._lock_target
+    _reset_target_confirmation = SprayTask._reset_target_confirmation
+    _latest_target = SprayTask._latest_target
 
-    def __init__(self):
+    def __init__(self, target_id='fruit-1'):
         self._vision_mutex = threading.Lock()
-        self._target_confirmation_id = 'fruit-1'
+        self._target_confirmation_id = target_id
         self._target_valid_frames = 0
         self._target_confirmation_frames = 0
         self._target_workspace_stable_since = None
         self._target_workspace_last_seen = None
+        self._target_workspace_anchor = None
+        self._target_workspace_currently_valid = False
         self._latest_selected_target = None
         self._recenter_config = {
             'trigger_px': 48.0,
+            'workspace_px': 48.0,
             'desired_offset_u_px': 0.0,
             'desired_offset_v_px': 28.0,
             'post_stable_sec': 0.50,
+            'post_max_drift_px': 0.75,
+            'post_max_gap_sec': 0.25,
             'post_min_confidence': 0.30,
         }
+
+        self.events = []
+
+    def _select_target(self, target_id):
+        self.events.append(('select', target_id))
+
+    def _set_inference_mode(self, mode):
+        self.events.append(('mode', mode))
+
+    def _wait_for_target_confirmation(
+            self, target_id, _cancel_requested, *, require_workspace):
+        assert not require_workspace
+        self._latest_selected_target = _target(target_id, 777.0, 333.0)
+        return True
+
+
+class _TargetCallbackHarness(_TargetStateHarness):
+    pass
 
 
 def _target_message(center_u, center_v, *, valid=True, confidence=0.8):
@@ -338,9 +411,9 @@ def test_target_confirmation_uses_target2d_mask_aim_point():
 
 def test_post_recenter_gate_requires_confidence_and_half_second_span(monkeypatch):
     task = _TargetCallbackHarness()
-    times = iter([0.0, 0.20, 0.49, 0.51])
+    times = iter([0.0, 0.20, 0.40, 0.51])
     monkeypatch.setattr(
-        'wvcsc_arm_task.spray_task.time.monotonic', lambda: next(times))
+        'wvcsc_arm_task.target_flow.time.monotonic', lambda: next(times))
 
     task._on_selected_target(
         _target_message(650.0, 390.0, confidence=0.29))
@@ -357,45 +430,52 @@ def test_post_recenter_gate_requires_confidence_and_half_second_span(monkeypatch
         0.51)
 
 
-def test_post_recenter_gate_resets_on_invalid_frame(monkeypatch):
+def test_post_recenter_gate_tolerates_one_short_invalid_frame(monkeypatch):
     task = _TargetCallbackHarness()
-    times = iter([1.0, 1.2])
+    times = iter([1.0, 1.1, 1.2])
     monkeypatch.setattr(
-        'wvcsc_arm_task.spray_task.time.monotonic', lambda: next(times))
+        'wvcsc_arm_task.target_flow.time.monotonic', lambda: next(times))
+    task._on_selected_target(_target_message(650.0, 390.0))
+    task._on_selected_target(_target_message(650.0, 390.0, valid=False))
+    task._on_selected_target(_target_message(650.0, 390.0))
+
+    assert task._target_confirmation_frames == 2
+    assert task._target_workspace_stable_since == 1.0
+    assert task._target_workspace_currently_valid
+
+
+def test_post_recenter_gate_resets_after_sustained_invalid_gap(monkeypatch):
+    task = _TargetCallbackHarness()
+    times = iter([1.0, 1.3, 1.4])
+    monkeypatch.setattr(
+        'wvcsc_arm_task.target_flow.time.monotonic', lambda: next(times))
     task._on_selected_target(_target_message(650.0, 390.0))
     task._on_selected_target(_target_message(650.0, 390.0, valid=False))
     task._on_selected_target(_target_message(650.0, 390.0))
 
     assert task._target_confirmation_frames == 1
-    assert task._target_workspace_stable_since == 1.2
+    assert task._target_workspace_stable_since == 1.4
 
 
-class _TargetLockHarness:
-    _lock_target = SprayTask._lock_target
-    _reset_target_confirmation = SprayTask._reset_target_confirmation
-    _latest_target = SprayTask._latest_target
+def test_post_recenter_gate_restarts_when_aim_point_keeps_drifting(monkeypatch):
+    task = _TargetCallbackHarness()
+    times = iter([0.0, 0.2, 0.4, 0.6])
+    monkeypatch.setattr(
+        'wvcsc_arm_task.target_flow.time.monotonic', lambda: next(times))
 
+    task._on_selected_target(_target_message(640.0, 388.0))
+    task._on_selected_target(_target_message(640.4, 388.0))
+    task._on_selected_target(_target_message(640.8, 388.0))
+    task._on_selected_target(_target_message(641.2, 388.0))
+
+    assert task._target_confirmation_frames == 2
+    assert task._target_workspace_anchor == (640.8, 388.0)
+    assert math.isclose(task._target_workspace_stable_since, 0.4)
+
+
+class _TargetLockHarness(_TargetStateHarness):
     def __init__(self):
-        self._vision_mutex = threading.Lock()
-        self._target_confirmation_id = ''
-        self._target_valid_frames = 0
-        self._target_confirmation_frames = 0
-        self._target_workspace_stable_since = None
-        self._target_workspace_last_seen = None
-        self._latest_selected_target = None
-        self.events = []
-
-    def _select_target(self, target_id):
-        self.events.append(('select', target_id))
-
-    def _set_inference_mode(self, mode):
-        self.events.append(('mode', mode))
-
-    def _wait_for_target_confirmation(
-            self, target_id, _cancel_requested, *, require_workspace):
-        assert not require_workspace
-        self._latest_selected_target = _target(target_id, 777.0, 333.0)
-        return True
+        super().__init__(target_id='')
 
 
 def test_target_is_locked_before_camera_motion_and_returns_mask_aim():
@@ -409,6 +489,7 @@ def test_target_is_locked_before_camera_motion_and_returns_mask_aim():
 
 class _RecenterSafetyHarness:
     _move_to_recentered_pose = SprayTask._move_to_recentered_pose
+    _execute_candidate_motion = SprayTask._execute_candidate_motion
 
     def __init__(self):
         self.arm = self
@@ -440,6 +521,35 @@ def test_target_recenter_rejects_collision_ik_before_planning_or_servo():
     assert not task.planning_called
 
 
+class _CameraPoseHarness:
+    _current_camera_pose = SprayTask._current_camera_pose
+
+    def __init__(self):
+        self._base_frame = 'alicia_base_link'
+        self._camera_frame = 'camera_color_optical_frame'
+        self.requests = []
+        self._tf_buffer = self
+
+    def lookup_transform(self, target_frame, source_frame, _time):
+        self.requests.append((target_frame, source_frame))
+        return SimpleNamespace(transform=SimpleNamespace(
+            translation=SimpleNamespace(x=0.1, y=-0.2, z=0.3),
+            rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+        ))
+
+    @staticmethod
+    def get_logger():
+        return SimpleNamespace(debug=lambda *_args: None, warn=lambda *_args: None)
+
+
+def test_recenter_uses_actual_camera_tf_as_its_geometric_feedback():
+    task = _CameraPoseHarness()
+
+    assert task._current_camera_pose() == (
+        (0.1, -0.2, 0.3), (0.0, 0.0, 0.0, 1.0))
+    assert task.requests == [('alicia_base_link', 'camera_color_optical_frame')]
+
+
 class _RecenterAttemptHarness:
     _recenter_target = SprayTask._recenter_target
     _move_recenter_step = SprayTask._move_recenter_step
@@ -452,16 +562,21 @@ class _RecenterAttemptHarness:
             camera_quat=(0.0, 0.0, 0.0, 1.0))]
         self._camera_mount = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
         self._recenter_config = {
-            'trigger_px': 48.0, 'max_angle_deg': 18.0,
+            'trigger_px': 48.0, 'workspace_px': 48.0,
+            'max_angle_deg': 18.0,
             'refine_goal_px': 8.0, 'max_iterations': 1,
             'residual_candidates_px': (
-                0.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0),
+                12.0, 16.0, 24.0, 8.0, 32.0, 40.0, 3.0, 1.0, 0.0),
             'desired_offset_u_px': 0.0, 'desired_offset_v_px': 28.0,
         }
 
     @staticmethod
     def _wait_for_observation_inputs():
         return (500.0, 500.0, 640.0, 360.0, 1280, 720), (0.0,) * 6
+
+    @staticmethod
+    def _current_camera_pose():
+        return (1.0, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)
 
 
 def test_recenter_angle_rejection_is_recoverable_and_not_retried_at_same_view():
@@ -486,7 +601,7 @@ class _PartialRecenterHarness(_RecenterAttemptHarness):
         self.trials.append(candidate.candidate_id)
         candidate.condition_number = 10.0
         candidate.min_joint_margin_rad = 0.20
-        if candidate.candidate_id.endswith('_r32'):
+        if candidate.candidate_id.endswith('_r16'):
             return True
         candidate.rejection_reason = 'joint_limit_margin'
         return False
@@ -527,27 +642,99 @@ def test_recenter_uses_a_larger_residual_when_precise_rotation_lacks_margin():
     assert ok
     assert message == 'target reconfirmed after recenter'
     assert task.trials == [
-        'observe_target_fruit-1_r0',
-        'observe_target_fruit-1_r8',
         'observe_target_fruit-1_r12',
         'observe_target_fruit-1_r16',
-        'observe_target_fruit-1_r24',
-        'observe_target_fruit-1_r32',
     ]
     assert task.debug_events == ['target_recenter_confirmed']
+
+
+def test_recenter_residual_outside_strict_tolerance_is_not_sent_to_servo():
+    task = _PartialRecenterHarness()
+    task._recenter_config['trigger_px'] = 1.5
+    attempt = TargetAttempt(_target('fruit-1', 740.0, 360.0))
+
+    ok, message = task._recenter_target(
+        attempt.target, attempt, lambda: False)
+
+    assert not ok
+    assert 'Servo entry tolerance 1.5px' in message
+    assert task.debug_events == ['target_recenter_failed']
+
+
+class _NoRecenterDriftHarness:
+    _recenter_target = SprayTask._recenter_target
+
+    def __init__(self):
+        self._recenter_config = {
+            'trigger_px': 48.0, 'workspace_px': 48.0,
+            'desired_offset_u_px': 0.0, 'desired_offset_v_px': 28.0,
+        }
+        self.debug_events = []
+
+    @staticmethod
+    def _wait_for_observation_inputs():
+        return (500.0, 500.0, 640.0, 360.0, 1280, 720), (0.0,) * 6
+
+    @staticmethod
+    def _wait_for_target_confirmation(
+            _target_id, _cancel_requested, *, require_workspace):
+        assert require_workspace
+        return True
+
+    @staticmethod
+    def _latest_target():
+        # Desired point is (640, 388); the confirmed target drifted to 644.
+        return _target('fruit-1', 644.0, 388.0)
+
+    def _publish_observation_debug(self, event, *_args, **_kwargs):
+        self.debug_events.append(event)
+
+
+def test_small_residual_inside_workspace_is_sent_to_visual_servo():
+    task = _NoRecenterDriftHarness()
+    attempt = TargetAttempt(_target('fruit-1', 641.0, 388.0))
+
+    ok, message = task._recenter_target(
+        attempt.target, attempt, lambda: False)
+
+    assert ok
+    assert message == 'target already inside fine-servo workspace'
+    assert task.debug_events == ['target_recenter_not_required']
+
+
+def test_large_residual_inside_workspace_is_sent_to_visual_servo():
+    task = _NoRecenterDriftHarness()
+    task._latest_target = lambda: _target('fruit-1', 652.0, 427.0)
+    attempt = TargetAttempt(_target('fruit-1', 652.0, 427.0))
+
+    ok, message = task._recenter_target(
+        attempt.target, attempt, lambda: False)
+
+    assert ok
+    assert message == 'target already inside fine-servo workspace'
+    assert task.debug_events == ['target_recenter_not_required']
 
 
 class _IterativeRecenterHarness(_PartialRecenterHarness):
     def __init__(self):
         super().__init__()
         self._recenter_config['max_iterations'] = 2
+        self._actual_camera_poses = iter([
+            ((1.10, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)),
+            ((1.20, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)),
+        ])
+        self.planned_camera_positions = []
         self._latest_targets = iter([
             _target('fruit-1', 660.0, 388.0),
             _target('fruit-1', 645.0, 388.0),
         ])
 
+    def _current_camera_pose(self):
+        return next(self._actual_camera_poses)
+
     def _move_to_recentered_pose(self, candidate, _joints):
         self.trials.append(candidate.candidate_id)
+        self.planned_camera_positions.append(candidate.camera_position)
         candidate.condition_number = 10.0
         candidate.min_joint_margin_rad = 0.50
         return True
@@ -565,8 +752,46 @@ def test_recenter_refines_again_when_mask_aim_moves_after_first_motion():
 
     assert ok
     assert len(task.trials) == 2
-    assert task.trials[0].endswith('_r0')
-    assert task.trials[1].endswith('_r0_refine1')
+    assert task.trials[0].endswith('_r12')
+    assert task.trials[1].endswith('_r12_refine1')
+    assert task.planned_camera_positions == [
+        (1.10, 0.0, 1.0),
+        (1.20, 0.0, 1.0),
+    ]
+
+
+class _FiveStepRecenterHarness(_IterativeRecenterHarness):
+    def __init__(self):
+        super().__init__()
+        self._recenter_config.update({
+            'trigger_px': 3.0,
+            'refine_goal_px': 1.0,
+            'max_iterations': 5,
+        })
+        self._actual_camera_poses = iter([
+            ((1.10, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)),
+            ((1.20, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)),
+            ((1.30, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)),
+            ((1.40, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)),
+        ])
+        self._latest_targets = iter([
+            _target('fruit-1', 660.0, 388.0),
+            _target('fruit-1', 650.0, 388.0),
+            _target('fruit-1', 644.1, 388.0),
+            _target('fruit-1', 640.5, 388.0),
+        ])
+
+
+def test_recenter_can_use_two_extra_safe_refinements_for_small_residuals():
+    task = _FiveStepRecenterHarness()
+    attempt = TargetAttempt(_target('fruit-1', 740.0, 388.0))
+
+    ok, message = task._recenter_target(
+        attempt.target, attempt, lambda: False)
+
+    assert ok
+    assert message == 'target reconfirmed after recenter'
+    assert len(task.trials) == 4
 
 
 class _PostRecenterHarness:
@@ -582,10 +807,11 @@ class _PostRecenterHarness:
         self._camera_mount = (
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
         self._recenter_config = {
-            'trigger_px': 48.0, 'max_angle_deg': 18.0,
+            'trigger_px': 48.0, 'workspace_px': 48.0,
+            'max_angle_deg': 18.0,
             'refine_goal_px': 8.0, 'max_iterations': 1,
             'residual_candidates_px': (
-                0.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0),
+                12.0, 16.0, 24.0, 8.0, 32.0, 40.0, 3.0, 1.0, 0.0),
             'desired_offset_u_px': 0.0, 'desired_offset_v_px': 28.0,
         }
         self.debug_events = []
@@ -593,6 +819,10 @@ class _PostRecenterHarness:
     @staticmethod
     def _wait_for_observation_inputs():
         return (500.0, 500.0, 640.0, 360.0, 1280, 720), (0.0,) * 6
+
+    @staticmethod
+    def _current_camera_pose():
+        return (1.0, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)
 
     @staticmethod
     def _move_to_recentered_pose(_candidate, _joints):
@@ -661,3 +891,90 @@ def test_new_target_can_wrap_to_an_untried_earlier_observation():
     SprayTask._rewind_for_untried_observation(task, attempt)
 
     assert task._observation_candidate_index == -1
+
+
+class _RecoveryScanHarness:
+    def __init__(self, candidate_index, candidate_count):
+        self._observation_candidate_index = candidate_index
+        self._observation_candidates = [object()] * candidate_count
+        self.selected = []
+        self.modes = []
+        self.reset_count = 0
+
+    def _select_target(self, value):
+        self.selected.append(value)
+
+    def _set_inference_mode(self, value):
+        self.modes.append(value)
+
+    def _reset_fruit_tracking(self):
+        self.reset_count += 1
+
+    @staticmethod
+    def get_logger():
+        return SimpleNamespace(info=lambda *_args: None)
+
+
+class _MissingTargetRecoveryHarness(_RecoveryScanHarness):
+    _recover_missing_target = SprayTask._recover_missing_target
+    _attempt_for = SprayTask._attempt_for
+    _same_target = SprayTask._same_target
+    _rewind_for_untried_observation = SprayTask._rewind_for_untried_observation
+
+    def __init__(self):
+        super().__init__(candidate_index=0, candidate_count=2)
+
+    def get_parameter(self, name):
+        return SimpleNamespace(value={
+            'processed_iou_threshold': 0.30,
+            'processed_center_distance_px': 40.0,
+        }[name])
+
+    def _recover_to_next_observation(
+            self, _cancel_requested, _feedback, excluded_indices=None):
+        assert excluded_indices == {0}
+        self._observation_candidate_index = 1
+        return True, True
+
+def test_missing_target_searches_another_safe_view_before_unresolved():
+    task = _MissingTargetRecoveryHarness()
+    attempts = []
+    target = _target('fruit-2', 800.0, 360.0)
+
+    attempt, recovered, moved = task._recover_missing_target(
+        target, None, attempts, lambda: False, lambda *_args: None)
+
+    assert recovered and moved
+    assert attempts == [attempt]
+    assert attempt.target == target
+    assert attempt.recentered_observation_indices == {0}
+    assert task._observation_candidate_index == 1
+    assert task.selected == ['']
+    assert task.modes == ['idle']
+    assert task.reset_count == 1
+
+
+class _CompletionScanHarness(_RecoveryScanHarness):
+    _recover_for_completion_scan = SprayTask._recover_for_completion_scan
+
+    def __init__(self):
+        super().__init__(candidate_index=2, candidate_count=3)
+
+    def _recover_to_next_observation(
+            self, _cancel_requested, _feedback, excluded_indices=None):
+        assert self._observation_candidate_index == -1
+        assert excluded_indices == {0, 2}
+        self._observation_candidate_index = 1
+        return True, True
+
+def test_completion_scan_wraps_once_to_an_unvisited_safe_view():
+    task = _CompletionScanHarness()
+
+    recovered, moved = task._recover_for_completion_scan(
+        {0, 2}, lambda: False, lambda *_args: None)
+
+    assert recovered and moved
+    assert task._observation_candidate_index == 1
+    assert task.selected == ['']
+    assert task.modes == ['idle']
+    assert task.reset_count == 1

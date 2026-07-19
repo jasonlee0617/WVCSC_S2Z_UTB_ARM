@@ -23,6 +23,7 @@ setup(
     license='Apache-2.0',
     entry_points={'console_scripts': [
         'spray_task = wvcsc_arm_task.spray_task:main',
+        'spray_simulator = wvcsc_arm_task.spray_simulator:main',
         'motion_control = wvcsc_arm_task.motion_control:main',
     ]},
 )

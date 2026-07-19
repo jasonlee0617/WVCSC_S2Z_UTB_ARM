@@ -42,7 +42,7 @@
   <exec_depend>wvcsc_mission_manager</exec_depend>
   <exec_depend>wvcsc_rgb_vision</exec_depend>
   <exec_depend>wvcsc_visual_servo</exec_depend>
-  <exec_depend>wvcsc_spray_controller</exec_depend>
+
   <exec_depend>wvcsc_uav_gateway</exec_depend>
   <exec_depend>xacro</exec_depend>
   <test_depend>ament_cmake_pytest</test_depend>

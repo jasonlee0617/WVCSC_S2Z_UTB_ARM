@@ -12,6 +12,10 @@ mission_manager:
     manual_tree_standoff: 1.5
     manual_tree_base_z: 0.0
     nav_goal_timeout_sec: 120.0
+    # Nav2 advertises its Action before the lifecycle manager activates it.
+    # Retry only the first automatic/manual navigation goal within this window.
+    nav_startup_retry_timeout_sec: 30.0
+    nav_startup_retry_interval_sec: 0.5
     spray_goal_timeout_sec: 180.0
     spray_progress_timeout_sec: 30.0
     return_home_after_finish: false

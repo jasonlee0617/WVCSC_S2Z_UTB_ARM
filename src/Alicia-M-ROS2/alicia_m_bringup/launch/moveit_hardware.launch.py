@@ -33,11 +33,14 @@ def _print_launch_config(context):
     mode = LaunchConfiguration('control_mode').perform(context)
     baud = LaunchConfiguration('baudrate').perform(context)
     speed = LaunchConfiguration('default_speed').perform(context)
+    pipeline = LaunchConfiguration('planning_pipeline_id').perform(context)
+    planner = LaunchConfiguration('planner_id').perform(context)
 
     print(f'\033[1;34m[INFO] Serial port: {port}\033[0m')
     print(f'\033[1;34m[INFO] Control mode: {mode}\033[0m')
     print(f'\033[1;34m[INFO] Baudrate: {baud}\033[0m')
     print(f'\033[1;34m[INFO] Default speed: {speed} rad/s\033[0m')
+    print(f'\033[1;34m[INFO] MoveIt planner: {pipeline}/{planner}\033[0m')
     if mode == 'mit':
         kp = LaunchConfiguration('mit_kp').perform(context)
         kd = LaunchConfiguration('mit_kd').perform(context)
@@ -70,6 +73,12 @@ def generate_launch_description():
             'use_rviz', default_value='true',
             description='Launch RViz'),
         DeclareLaunchArgument(
+            'planning_pipeline_id', default_value='ompl',
+            description='MoveIt planning pipeline for WVCSC arm tasks'),
+        DeclareLaunchArgument(
+            'planner_id', default_value='RRTConnectFast',
+            description='OMPL planner for WVCSC arm tasks'),
+        DeclareLaunchArgument(
             'enable_wvcsc_motion_interface', default_value='false',
             description=(
                 'Enable WVCSC motion_control/retime/spray only after Alicia-M '
@@ -83,6 +92,8 @@ def generate_launch_description():
     mit_kp = LaunchConfiguration('mit_kp')
     mit_kd = LaunchConfiguration('mit_kd')
     use_rviz = LaunchConfiguration('use_rviz')
+    planning_pipeline_id = LaunchConfiguration('planning_pipeline_id')
+    planner_id = LaunchConfiguration('planner_id')
     enable_wvcsc_motion_interface = LaunchConfiguration(
         'enable_wvcsc_motion_interface')
 
@@ -128,21 +139,13 @@ def generate_launch_description():
     joint_limits_yaml = load_yaml(moveit_config_pkg, 'config/joint_limits.yaml')
     pilz_cartesian_limits_yaml = load_yaml(
         moveit_config_pkg, 'config/pilz_cartesian_limits.yaml')
+    ompl_planning_yaml = load_yaml(
+        moveit_config_pkg, 'config/ompl_planning.yaml')
 
     planning_pipeline_config = {
         'default_planning_pipeline': 'ompl',
         'planning_pipelines': ['ompl', 'pilz_industrial_motion_planner'],
-        'ompl': {
-            'planning_plugin': 'ompl_interface/OMPLPlanner',
-            'request_adapters':
-                'default_planner_request_adapters/AddTimeOptimalParameterization '
-                'default_planner_request_adapters/ResolveConstraintFrames '
-                'default_planner_request_adapters/FixWorkspaceBounds '
-                'default_planner_request_adapters/FixStartStateBounds '
-                'default_planner_request_adapters/FixStartStateCollision '
-                'default_planner_request_adapters/FixStartStatePathConstraints',
-            'start_state_max_bounds_error': 0.1,
-        },
+        'ompl': ompl_planning_yaml,
         'pilz_industrial_motion_planner': {
             'planning_plugin': 'pilz_industrial_motion_planner/CommandPlanner',
             'request_adapters': '',
@@ -269,6 +272,8 @@ def generate_launch_description():
         'base_frame': 'base_link',
         'group_name': 'arm',
         'tool_link': 'tool0',
+        'planning_pipeline_id': planning_pipeline_id,
+        'planner_id': planner_id,
         'velocity_scaling': 0.1,
         'acceleration_scaling': 0.1,
         'retime_timeout': 5.0,

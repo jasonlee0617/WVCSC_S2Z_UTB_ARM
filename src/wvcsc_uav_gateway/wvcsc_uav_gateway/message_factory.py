@@ -1,6 +1,21 @@
-"""Conversion from validated mission dictionaries to ROS messages."""
+"""Shared UAV message construction and publication helpers.
 
+Mock and replay gateways intentionally publish the same latched mission topic.
+Keeping its QoS contract here prevents the two input modes from drifting apart.
+"""
+
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from wvcsc_interfaces.msg import DiseaseTree, DiseaseTreeArray
+
+
+def mission_publisher(node):
+    """Create the common reliable/transient-local mission publisher."""
+    qos = QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+    return node.create_publisher(DiseaseTreeArray, '/uav/disease_trees', qos)
 
 
 def mission_message(config, stamp):

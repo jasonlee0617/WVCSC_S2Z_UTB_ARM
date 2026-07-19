@@ -73,6 +73,35 @@ def test_optional_return_home_finishes_only_after_home_navigation():
     assert core.state == MissionState.MISSION_COMPLETED
 
 
+def test_partial_tree_continues_remaining_targets_but_cannot_complete_mission():
+    core = MissionCore()
+    core.load('demo', _targets())
+    core.start()
+    assert core.nav_succeeded() and core.stop_verified()
+    assert core.arm_partial('sprayed=1 unresolved=1')
+    assert core.state == MissionState.NAVIGATING
+    assert core.partial_targets == 1
+    assert core.completed_targets == 0
+    assert core.target_outcomes == [core.PARTIAL, core.PENDING]
+
+    assert core.nav_succeeded() and core.stop_verified() and core.arm_succeeded()
+    assert core.state == MissionState.FAILED
+    assert core.completed_targets == 1
+    assert core.partial_targets == 1
+    assert core.target_outcomes == [core.PARTIAL, core.COMPLETED]
+
+
+def test_partial_tree_return_home_stays_failed_after_home_navigation():
+    core = MissionCore()
+    core.load('demo', [_targets()[0]])
+    core.start()
+    assert core.nav_succeeded() and core.stop_verified()
+    assert core.arm_partial('sprayed=1 unresolved=1', return_home=True)
+    assert core.state == MissionState.RETURNING_HOME
+    assert core.home_succeeded()
+    assert core.state == MissionState.FAILED
+
+
 def test_safe_skip_and_manual_return_home_semantics():
     core = MissionCore()
     core.load('demo', _targets())

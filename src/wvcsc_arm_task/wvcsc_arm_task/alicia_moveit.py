@@ -46,6 +46,14 @@ def _valid_retimed_trajectory(trajectory):
     return True
 
 
+def _wait_for_future(future, timeout):
+    """Wait for an rclpy future without changing the node's executor state."""
+    deadline = time.monotonic() + float(timeout)
+    while not future.done() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return future.done()
+
+
 class _GripperClient:
     def __init__(self, node, action_name, callback_group=None):
         self._client = ActionClient(
@@ -54,13 +62,6 @@ class _GripperClient:
         self._mutex = threading.Lock()
         self._active = False
         self._cancel_requested = False
-
-    @staticmethod
-    def _wait_future(future, timeout):
-        deadline = time.monotonic() + timeout
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        return future.done()
 
     def command(self, position, max_effort, timeout):
         if not self._client.wait_for_server(timeout_sec=timeout):
@@ -74,7 +75,7 @@ class _GripperClient:
         goal.command.max_effort = float(max_effort)
         try:
             goal_future = self._client.send_goal_async(goal)
-            if not self._wait_future(goal_future, timeout):
+            if not _wait_for_future(goal_future, timeout):
                 return False
             goal_handle = goal_future.result()
             if goal_handle is None or not goal_handle.accepted:
@@ -86,7 +87,7 @@ class _GripperClient:
             if cancel_requested:
                 goal_handle.cancel_goal_async()
             result_future = goal_handle.get_result_async()
-            if not self._wait_future(result_future, timeout):
+            if not _wait_for_future(result_future, timeout):
                 self.cancel()
                 return False
             result = result_future.result()
@@ -168,6 +169,7 @@ class AliciaMoveIt:
             tool_link='tool0', velocity_scaling=0.1, acceleration_scaling=0.1,
             retime_service_name='/retime_trajectory', retime_timeout=5.0,
             execution_timeout=60.0, planning_time=2.0,
+            planning_pipeline_id='ompl', planner_id='RRTConnectFast',
             gripper_action='/gripper_controller/gripper_cmd',
             gripper_open_position=0.0, gripper_closed_position=-0.05,
             gripper_max_effort=5.0, callback_group=None,
@@ -184,6 +186,10 @@ class AliciaMoveIt:
             raise ValueError('retime_timeout must be positive')
         if float(planning_time) <= 0.0:
             raise ValueError('planning_time must be positive')
+        if not str(planning_pipeline_id).strip():
+            raise ValueError('planning_pipeline_id must not be empty')
+        if not str(planner_id).strip():
+            raise ValueError('planner_id must not be empty')
 
         self._node = node
         self._group_name = str(group_name)
@@ -193,6 +199,8 @@ class AliciaMoveIt:
         self._retime_timeout = float(retime_timeout)
         self._execution_timeout = float(execution_timeout)
         self._planning_time = float(planning_time)
+        self._planning_pipeline_id = str(planning_pipeline_id)
+        self._planner_id = str(planner_id)
         self._gripper_open_position = float(gripper_open_position)
         self._gripper_closed_position = float(gripper_closed_position)
         self._gripper_max_effort = float(gripper_max_effort)
@@ -213,10 +221,14 @@ class AliciaMoveIt:
         self._moveit.max_velocity = self._velocity_scaling
         self._moveit.max_acceleration = self._acceleration_scaling
         self._moveit.allowed_planning_time = self._planning_time
+        self._moveit.pipeline_id = self._planning_pipeline_id
+        self._moveit.planner_id = self._planner_id
         self._node.get_logger().info(
             '[ARM][MOTION] configuration '
             f'velocity_scaling={self._velocity_scaling:.2f} '
-            f'acceleration_scaling={self._acceleration_scaling:.2f}')
+            f'acceleration_scaling={self._acceleration_scaling:.2f} '
+            f'pipeline={self._planning_pipeline_id} '
+            f'planner={self._planner_id}')
         self._trajectory_event_pub = node.create_publisher(
             String, '/trajectory_execution_event', 1)
 
@@ -246,19 +258,12 @@ class AliciaMoveIt:
     def _allowed(self, epoch, allow_locked):
         return (allow_locked or not self.state.locked) and epoch == self._epoch()
 
-    @staticmethod
-    def _wait_future(future, timeout):
-        deadline = time.monotonic() + timeout
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        return future.done()
-
     def _plan(self, timeout=None, **kwargs):
         cartesian_fraction_threshold = float(
             kwargs.pop('cartesian_fraction_threshold', 0.0))
         future = self._moveit.plan_async(**kwargs)
         timeout = self._execution_timeout if timeout is None else float(timeout)
-        if future is None or not self._wait_future(future, timeout):
+        if future is None or not _wait_for_future(future, timeout):
             return None
         return self._moveit.get_trajectory(
             future,
@@ -311,7 +316,7 @@ class AliciaMoveIt:
         request.velocity_scaling = float(velocity_scaling)
         request.acceleration_scaling = float(acceleration_scaling)
         future = self._retime_client.call_async(request)
-        if not self._wait_future(future, self._retime_timeout):
+        if not _wait_for_future(future, self._retime_timeout):
             self._node.get_logger().error('Cartesian trajectory retiming timed out')
             return None
         try:
@@ -343,6 +348,10 @@ class AliciaMoveIt:
             else float(acceleration_scaling))
         planned_duration = self.trajectory_duration(trajectory)
         started = time.monotonic()
+        def finish(result, success):
+            return self._motion_result(
+                planned_duration, started, result, success,
+                velocity_scaling, acceleration_scaling)
         self._moveit.execute(trajectory)
         deadline = time.monotonic() + self._execution_timeout
         acceptance_deadline = time.monotonic() + min(5.0, self._execution_timeout)
@@ -355,26 +364,16 @@ class AliciaMoveIt:
                 error = self._moveit.get_last_execution_error_code()
                 success = error is not None and error.val == MoveItErrorCodes.SUCCESS
                 result = 'SUCCEEDED' if success else 'FAILED'
-                return self._motion_result(
-                    planned_duration, started, result, success,
-                    velocity_scaling, acceleration_scaling)
+                return finish(result, success)
             if not saw_motion and time.monotonic() >= acceptance_deadline:
-                return self._motion_result(
-                    planned_duration, started, 'NOT_STARTED', False,
-                    velocity_scaling, acceleration_scaling)
+                return finish('NOT_STARTED', False)
             if not self._allowed(epoch, allow_locked):
-                return self._motion_result(
-                    planned_duration, started, 'CANCELED', False,
-                    velocity_scaling, acceleration_scaling)
+                return finish('CANCELED', False)
             time.sleep(0.01)
         if not saw_motion:
-            return self._motion_result(
-                planned_duration, started, 'NOT_STARTED', False,
-                velocity_scaling, acceleration_scaling)
+            return finish('NOT_STARTED', False)
         self.cancel()
-        return self._motion_result(
-            planned_duration, started, 'TIMEOUT', False,
-            velocity_scaling, acceleration_scaling)
+        return finish('TIMEOUT', False)
 
     def _motion_result(
             self, planned_duration, started, result, success,
@@ -466,7 +465,7 @@ class AliciaMoveIt:
             start_joint_state=list(start_joint_positions),
             wait_for_server_timeout_sec=float(timeout),
         )
-        if future is None or not self._wait_future(future, timeout):
+        if future is None or not _wait_for_future(future, timeout):
             return None
         try:
             response = future.result()

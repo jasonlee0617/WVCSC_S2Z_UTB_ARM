@@ -1,0 +1,237 @@
+# Canonical OMPL configuration shared by Alicia-M Mock, Gazebo and hardware.
+#
+# RRTConnectFast is the production default: it prioritizes short planning time
+# and robust reachability for repeated agricultural observation/spray motions.
+# Other planners remain selectable through planner_id for benchmarking or
+# constrained scenes; do not change the default without comparable benchmarks.
+planning_plugin: ompl_interface/OMPLPlanner
+
+# These adapters repair common request-state errors before OMPL solves and add
+# time parameterization after a collision-free path is found.
+request_adapters: >-
+  default_planner_request_adapters/AddTimeOptimalParameterization
+  default_planner_request_adapters/ResolveConstraintFrames
+  default_planner_request_adapters/FixWorkspaceBounds
+  default_planner_request_adapters/FixStartStateBounds
+  default_planner_request_adapters/FixStartStateCollision
+  default_planner_request_adapters/FixStartStatePathConstraints
+
+# Allow small encoder/controller boundary noise, but reject genuinely invalid
+# start states instead of silently clamping large joint-limit violations.
+start_state_max_bounds_error: 0.1
+
+# Collision interpolation resolution as a fraction of the joint-space extent.
+# Kept tight for tree/vehicle/tool clearance; lowering it increases planning
+# cost, while raising it can miss narrow collisions.
+longest_valid_segment_fraction: 0.005
+
+planner_configs:
+  # Multi-solution post-processor. Useful only when path quality matters more
+  # than planning latency; it is not the task-loop default.
+  AnytimePathShortening:
+    type: geometric::AnytimePathShortening
+    shortcut: true
+    hybridize: true
+    max_hybrid_paths: 24
+    num_planners: 4
+    planners: ""
+
+  # Primary bidirectional planner for online observation, recenter and HOME.
+  RRTConnectFast:
+    type: geometric::RRTConnect
+    range: 0.25
+
+  # Conservative RRTConnect baseline for A/B comparison with the default.
+  RRTConnect:
+    type: geometric::RRTConnect
+    range: 0.20
+
+  # Compatibility alias used by MoveIt-generated clients and old RViz setups.
+  RRTConnectkConfigDefault:
+    type: geometric::RRTConnect
+    range: 0.20
+
+  # Single-tree reachability planner; useful for quick feasibility checks.
+  RRT:
+    type: geometric::RRT
+    range: 0.20
+    goal_bias: 0.05
+
+  # Asymptotically optimal RRT; slower but useful for trajectory-quality tests.
+  RRTstar:
+    type: geometric::RRTstar
+    range: 0.20
+    goal_bias: 0.05
+    delay_collision_checking: 1
+
+  # Cost-sensitive tree planners. Keep the Humble-supported parameter names,
+  # including OMPL's historical "frountier" spelling.
+  TRRT:
+    type: geometric::TRRT
+    range: 0.15
+    goal_bias: 0.05
+    max_states_failed: 10
+    temp_change_factor: 2.0
+    min_temperature: 1.0e-9
+    init_temperature: 1.0e-5
+    frountier_threshold: 0.0
+    frountierNodeRatio: 0.1
+    k_constant: 0.0
+
+  BiTRRT:
+    type: geometric::BiTRRT
+    range: 0.15
+    temp_change_factor: 0.1
+    init_temperature: 100
+    frountier_threshold: 0.0
+    frountier_node_ratio: 0.1
+    cost_threshold: 1.0e+300
+
+  LBTRRT:
+    type: geometric::LBTRRT
+    range: 0.15
+    goal_bias: 0.05
+    epsilon: 0.4
+
+  # Lazy/expansive planners can help in narrow or collision-expensive scenes.
+  SBL:
+    type: geometric::SBL
+    range: 0.20
+  EST:
+    type: geometric::EST
+    range: 0.20
+    goal_bias: 0.05
+  BiEST:
+    type: geometric::BiEST
+    range: 0.20
+  ProjEST:
+    type: geometric::ProjEST
+    range: 0.20
+    goal_bias: 0.05
+
+  # Projection-grid planners use arm.projection_evaluator below.
+  KPIECE:
+    type: geometric::KPIECE
+    range: 0.20
+    goal_bias: 0.05
+    border_fraction: 0.9
+    failed_expansion_score_factor: 0.5
+    min_valid_path_fraction: 0.5
+  BKPIECE:
+    type: geometric::BKPIECE
+    range: 0.20
+    border_fraction: 0.9
+    failed_expansion_score_factor: 0.5
+    min_valid_path_fraction: 0.5
+  LBKPIECE:
+    type: geometric::LBKPIECE
+    range: 0.20
+    border_fraction: 0.9
+    min_valid_path_fraction: 0.5
+
+  # Roadmap planners are mainly for repeated-query or quality experiments.
+  PRM:
+    type: geometric::PRM
+    max_nearest_neighbors: 15
+  PRMstar:
+    type: geometric::PRMstar
+  LazyPRM:
+    type: geometric::LazyPRM
+    range: 0.20
+  LazyPRMstar:
+    type: geometric::LazyPRMstar
+
+  # Batch-sampling planners. The sample counts are intentionally fixed for
+  # reproducible simulation benchmarks, not for minimum online latency.
+  FMT:
+    type: geometric::FMT
+    num_samples: 1000
+    radius_multiplier: 1.1
+    nearest_k: 1
+    cache_cc: 1
+    heuristics: 0
+    extended_fmt: 1
+  BFMT:
+    type: geometric::BFMT
+    num_samples: 1000
+    radius_multiplier: 1.0
+    nearest_k: 1
+    balanced: 0
+    optimality: 1
+    heuristics: 1
+    cache_cc: 1
+    extended_fmt: 1
+  PDST:
+    type: geometric::PDST
+
+  # High-dimensional exploration planner using a GNAT nearest-neighbor tree.
+  STRIDE:
+    type: geometric::STRIDE
+    range: 0.20
+    goal_bias: 0.05
+    use_projected_distance: 0
+    degree: 16
+    max_degree: 18
+    min_degree: 12
+    max_pts_per_leaf: 6
+    estimated_dimension: 0.0
+    min_valid_path_fraction: 0.2
+
+  # Sparse roadmaps trade planning time for compact, reusable graph structure.
+  SPARS:
+    type: geometric::SPARS
+    stretch_factor: 3.0
+    sparse_delta_fraction: 0.25
+    dense_delta_fraction: 0.001
+    max_failures: 1000
+  SPARStwo:
+    type: geometric::SPARStwo
+    stretch_factor: 3.0
+    sparse_delta_fraction: 0.25
+    dense_delta_fraction: 0.001
+    max_failures: 5000
+
+arm:
+  # The default must remain in planner_configs above. Switch planner_id at
+  # launch time for experiments, e.g. planner_id:=RRTstar.
+  default_planner_config: RRTConnectFast
+  planner_configs:
+    - RRTConnectFast
+    - RRTConnect
+    - RRTConnectkConfigDefault
+    - RRT
+    - RRTstar
+    - TRRT
+    - BiTRRT
+    - LBTRRT
+    - SBL
+    - EST
+    - BiEST
+    - ProjEST
+    - KPIECE
+    - BKPIECE
+    - LBKPIECE
+    - PRM
+    - PRMstar
+    - LazyPRM
+    - LazyPRMstar
+    - AnytimePathShortening
+    - FMT
+    - BFMT
+    - PDST
+    - STRIDE
+    - SPARS
+    - SPARStwo
+
+  # The two broadest base joints provide a stable low-dimensional projection
+  # for KPIECE/BKPIECE/LBKPIECE without coupling to Fairino-specific frames.
+  projection_evaluator: joints(joint1,joint2)
+
+  # Force joint-space planning for this serial 6-DOF arm. This avoids an
+  # unnecessary Cartesian state representation while preserving KDL IK for
+  # pose-goal conversion.
+  enforce_joint_model_state_space: true
+
+  # Repeat the collision interpolation rule at the planning-group scope so it
+  # is explicit to OMPL even if a future MoveIt version ignores the global key.
+  longest_valid_segment_fraction: 0.005

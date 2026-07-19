@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 
 
 def _value(node, name):
@@ -14,7 +15,7 @@ class ServoRuntimeConfig:
     min_confidence: float
     coarse_tolerance_px: float
     fine_tolerance_px: float
-    stable_frames: int
+    control_resume_tolerance_px: float
     stable_duration_sec: float
     progress_window_sec: float
     min_progress_px: float
@@ -24,10 +25,11 @@ class ServoRuntimeConfig:
     max_linear_acceleration: float
     near_target_speed_scale: float
     warning_speed_scale: float
-    command_sign_x: float
-    command_sign_y: float
     predict_lead_sec: float
     max_predict_horizon_sec: float
+    command_mode: str
+    max_angular_speed: float
+    max_angular_acceleration: float
 
     @classmethod
     def from_node(cls, node):
@@ -39,7 +41,8 @@ class ServoRuntimeConfig:
             min_confidence=float(_value(node, 'min_confidence')),
             coarse_tolerance_px=float(_value(node, 'coarse_tolerance_px')),
             fine_tolerance_px=float(_value(node, 'fine_tolerance_px')),
-            stable_frames=int(_value(node, 'stable_frames')),
+            control_resume_tolerance_px=float(
+                _value(node, 'control_resume_tolerance_px')),
             stable_duration_sec=float(_value(node, 'stable_duration_sec')),
             progress_window_sec=float(_value(node, 'progress_window_sec')),
             min_progress_px=float(_value(node, 'min_progress_px')),
@@ -49,12 +52,14 @@ class ServoRuntimeConfig:
             max_linear_acceleration=float(_value(node, 'max_linear_acceleration')),
             near_target_speed_scale=float(_value(node, 'near_target_speed_scale')),
             warning_speed_scale=float(_value(node, 'warning_speed_scale')),
-            command_sign_x=float(_value(node, 'command_sign_x')),
-            command_sign_y=float(_value(node, 'command_sign_y')),
             predict_lead_sec=float(_value(node, 'predict_lead_sec')),
             max_predict_horizon_sec=float(_value(node, 'max_predict_horizon_sec')),
+            command_mode=str(_value(node, 'command_mode')),
+            max_angular_speed=float(_value(node, 'max_angular_speed')),
+            max_angular_acceleration=float(
+                _value(node, 'max_angular_acceleration')),
         )
-        if (config.control_rate_hz <= 0.0 or config.stable_frames <= 0 or
+        if (config.control_rate_hz <= 0.0 or
                 config.stable_duration_sec <= 0.0 or
                 config.progress_window_sec <= 0.0 or
                 config.min_progress_px <= 0.0 or
@@ -62,6 +67,18 @@ class ServoRuntimeConfig:
                 not 0.0 <= config.invalid_target_hold_sec <= config.stale_timeout_sec):
             raise ValueError(
                 'control, convergence, progress or stale target timing is invalid')
+        if (not math.isfinite(config.fine_tolerance_px)
+                or not math.isfinite(config.control_resume_tolerance_px)
+                or config.fine_tolerance_px <= 0.0
+                or config.control_resume_tolerance_px < config.fine_tolerance_px):
+            raise ValueError('alignment tolerance hysteresis is invalid')
         if not 0.0 < config.near_target_speed_scale <= 1.0:
             raise ValueError('near_target_speed_scale must be in (0, 1]')
+        if config.command_mode not in {'linear_xy', 'angular_xy'}:
+            raise ValueError('command_mode must be linear_xy or angular_xy')
+        if (not math.isfinite(config.max_angular_speed)
+                or not math.isfinite(config.max_angular_acceleration)
+                or config.max_angular_speed <= 0.0
+                or config.max_angular_acceleration <= 0.0):
+            raise ValueError('angular command limits are invalid')
         return config

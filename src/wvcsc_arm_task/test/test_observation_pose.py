@@ -2,13 +2,13 @@ import math
 
 import pytest
 
-from wvcsc_arm_task.observation_pose import (
+from wvcsc_arm_task.observation import (
     camera_look_at_pose,
     recenter_camera_pose,
+    rotation_matrix_from_quaternion,
     rotate_vector,
     tool_pose_from_camera_pose,
     transform_point,
-    yaw_rotate_quaternion,
 )
 
 
@@ -58,10 +58,12 @@ def test_tool_pose_from_camera_pose_inverts_fixed_camera_translation():
     assert quat == pytest.approx((0.0, 0.0, 0.0, 1.0))
 
 
-def test_yaw_rotate_quaternion_keeps_a_horizontal_fan_at_fixed_camera_position():
-    forward = _forward_from_quaternion(
-        yaw_rotate_quaternion((0.0, math.sqrt(0.5), 0.0, math.sqrt(0.5)), 90.0))
-    assert forward == pytest.approx((0.0, 1.0, 0.0))
+def test_rotation_matrix_and_rotate_vector_share_the_same_geometry():
+    quaternion = (0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5))
+    matrix = rotation_matrix_from_quaternion(quaternion)
+    assert tuple(row[0] for row in matrix) == pytest.approx((0.0, 1.0, 0.0))
+    assert rotate_vector((1.0, 0.0, 0.0), quaternion) == pytest.approx(
+        (0.0, 1.0, 0.0))
 
 
 def test_recenter_keeps_camera_position_and_maps_target_to_desired_spray_ray():

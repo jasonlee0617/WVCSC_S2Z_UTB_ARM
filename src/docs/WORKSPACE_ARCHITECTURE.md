@@ -57,7 +57,7 @@
 | `wvcsc_mission_manager` | 导航、停稳、机械臂编排 | `/mission/*` |
 | `wvcsc_arm_task` | 观察、重心、逐果作业、HOME | `/arm/execute_spray` |
 | `wvcsc_rgb_vision` | 两级 YOLO、跟踪、目标锁定 | `/vision/*` |
-| `wvcsc_visual_servo` | 20 Hz 图像平面 XY 控制 | `/vision/align_target` |
+| `wvcsc_visual_servo` | 30 Hz IBVS + 100 Hz Servo 图像平面 XY 控制 | `/vision/align_target` |
 | `wvcsc_spray_controller` | 可取消的喷洒执行器边界 | `/spray/execute` |
 | `wvcsc_c10_camera` | C10 真机采集、诊断、断线恢复 | 标准 Image/CameraInfo |
 | `wvcsc_simulation` | Gazebo 果园、Nav2 仿真、统一 launch、数据采集 | `system_sim.launch.py` |
@@ -141,7 +141,10 @@ world → map → odom → base_footprint → base_link → alicia_base_link →
 - `robot_state_publisher` 发布机器人固定/关节 TF。
 - 仿真不启动 AMCL，避免第二个 `map→odom`。
 
-MoveIt 负责观察、重心和 HOME 的碰撞规划。MoveIt Servo 只承担短距离图像对准；Gazebo 当前关闭 Servo 在线碰撞缩放以保证 20 Hz，仍保留关节限位、奇异点保护和规划阶段碰撞检查。该参数不得直接用于真机。
+MoveIt 负责观察、重心和 HOME 的碰撞规划。MoveIt Servo 只承担短距离图像对准；
+Gazebo 采用 30 Hz IBVS Twist、100 Hz Servo JointTrajectory 和 100 Hz
+`ros2_control`。当前关闭 Servo 在线碰撞缩放以避免同步碰撞计算阻塞控制链，
+仍保留关节限位、奇异点保护和规划阶段碰撞检查。该参数不得直接用于真机。
 
 ## 6. 启动入口
 
@@ -180,13 +183,14 @@ Mock、Replay、视觉、任务、喷洒节点仍保留 `ros2 run` 入口。删�
 以下边界有意保持独立：
 
 - RGB Vision：隔离 YOLO/PyTorch 依赖。
-- Visual Servo：隔离 20 Hz 控制回路。
+- Visual Servo：隔离 30 Hz 图像控制与 100 Hz Servo 输出链。
 - Arm Task：隔离长时动作与恢复状态机。
 - Spray Controller：保留真喷头替换点。
 - UAV Gateway：保留 Live UAV 替换点。
 - C10 Camera：隔离设备生命周期和诊断。
 
-`trajectory_retime_server` 不再由 WVCSC 仿真和 `wvcsc_arm_task` 使用，但为未修改的 `alicia_m_bringup` 保留。受保护的上游/硬件包不参与本轮重构。
+`trajectory_retime_server` 由未修改的 `alicia_m_bringup` 和当前 WVCSC 仿真
+的 Alicia 轨迹适配链共同使用，因此保留在依赖图中。受保护的上游/硬件包不参与本轮重构。
 
 ## 9. 当前验收边界
 

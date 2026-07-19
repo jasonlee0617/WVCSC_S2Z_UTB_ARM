@@ -14,7 +14,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
 from wvcsc_interfaces.action import Spray
 
-from wvcsc_spray_controller.spray_simulator import SpraySimulator
+from wvcsc_arm_task.spray_simulator import SpraySimulator
 
 
 def _spin_until(executor, predicate, timeout=3.0):

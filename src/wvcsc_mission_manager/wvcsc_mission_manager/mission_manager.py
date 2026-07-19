@@ -1,3 +1,14 @@
+"""空地协同任务编排节点。
+
+节点接收无人机在 ``map`` 坐标系发布的病树列表，为每棵树计算道路停靠位姿，依次
+调用 Nav2 ``NavigateToPose``、基于 ``/odom`` 的连续停稳检测和机械臂
+``ExecuteSpray``。它只负责树级顺序、超时、取消、返回 HOME 和公开状态；病果级
+观察/识别/喷洒由 ``wvcsc_arm_task`` 负责。
+
+回调由双线程执行器处理，但所有状态转移都委托给 ``MissionCore``。只要存在跳过或
+部分喷洒，剩余树仍会继续执行，但最终状态必须为 ``FAILED``，不会误报为任务完成。
+"""
+
 import math
 
 from action_msgs.msg import GoalStatus
@@ -32,6 +43,8 @@ from .core import (
 
 
 class MissionManager(Node):
+    """串联 Mock/真实 UAV、Nav2 与机械臂 Action 的事件驱动状态机外壳。"""
+
     def __init__(self, **kwargs):
         super().__init__('mission_manager', **kwargs)
         self._declare_parameters()
@@ -47,6 +60,10 @@ class MissionManager(Node):
         self._manual_tree_base_z = float(
             self.get_parameter('manual_tree_base_z').value)
         self._nav_timeout = float(self.get_parameter('nav_goal_timeout_sec').value)
+        self._nav_startup_retry_timeout = float(
+            self.get_parameter('nav_startup_retry_timeout_sec').value)
+        self._nav_startup_retry_interval = float(
+            self.get_parameter('nav_startup_retry_interval_sec').value)
         self._spray_timeout = float(self.get_parameter('spray_goal_timeout_sec').value)
         self._spray_progress_timeout = float(
             self.get_parameter('spray_progress_timeout_sec').value)
@@ -59,6 +76,11 @@ class MissionManager(Node):
         )
         if not all(math.isfinite(value) for value in self._home_pose):
             raise ValueError('home pose must contain finite values')
+        if (not math.isfinite(self._nav_startup_retry_timeout) or
+                not math.isfinite(self._nav_startup_retry_interval) or
+                self._nav_startup_retry_timeout <= 0.0 or
+                self._nav_startup_retry_interval <= 0.0):
+            raise ValueError('initial Nav2 retry timing must be finite and positive')
         self._configured_return_home_after_finish = (
             self._return_home_after_finish)
         self._configured_home_pose = self._home_pose
@@ -92,6 +114,8 @@ class MissionManager(Node):
         self._nav_pending = False
         self._spray_pending = False
         self._phase_started = None
+        self._initial_nav_started = None
+        self._nav_retry_due = None
         self._spray_last_progress = None
         self._manual_return_home = False
 
@@ -123,6 +147,10 @@ class MissionManager(Node):
             'manual_tree_standoff': 1.5,
             'manual_tree_base_z': 0.0,
             'nav_goal_timeout_sec': 120.0,
+            # An action server can exist before Nav2's lifecycle nodes are active.
+            # Bound retries make auto-start independent of launch ordering.
+            'nav_startup_retry_timeout_sec': 30.0,
+            'nav_startup_retry_interval_sec': 0.5,
             'spray_goal_timeout_sec': 180.0,
             'spray_progress_timeout_sec': 30.0,
             'return_home_after_finish': False,
@@ -147,6 +175,7 @@ class MissionManager(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def _on_mission(self, message):
+        """校验并装载一批 map 坐标病树；运行中的任务不会被新消息覆盖。"""
         try:
             targets = self._validate_message(message)
             outcome = self.core.load(message.mission_id.strip(), targets)
@@ -156,6 +185,7 @@ class MissionManager(Node):
         if outcome == 'accepted':
             self._restore_configured_mission_options()
             self._manual_return_home = False
+            self._clear_nav_startup_retry()
             self.get_logger().info(
                 f'[MISSION] accepted mission={self.core.mission_id} '
                 f'targets={len(self.core.targets)}')
@@ -226,6 +256,7 @@ class MissionManager(Node):
         self._return_home_after_finish = bool(
             request.return_home_after_finish)
         self._manual_return_home = False
+        self._clear_nav_startup_retry()
         self.get_logger().info(
             f'[MISSION] accepted manual mission={self.core.mission_id} '
             f'targets={len(self.core.targets)}')
@@ -292,8 +323,7 @@ class MissionManager(Node):
             return self._reply(response, False, 'mission is not READY')
         if not self._servers_ready():
             return self._reply(response, False, 'Nav2 or spray Action server is not ready')
-        self.core.start()
-        self._send_nav_goal()
+        self._begin_mission_navigation()
         return self._reply(response, True, 'mission started')
 
     def _pause(self, _request, response):
@@ -370,6 +400,7 @@ class MissionManager(Node):
             return self._reply(response, False, 'reset requires a terminal state')
         self._restore_configured_mission_options()
         self._manual_return_home = False
+        self._clear_nav_startup_retry()
         self._publish_plan()
         self._publish_status()
         return self._reply(response, True, 'mission reset')
@@ -383,7 +414,34 @@ class MissionManager(Node):
     def _servers_ready(self):
         return self._nav_client.server_is_ready() and self._spray_client.server_is_ready()
 
+    def _clear_nav_startup_retry(self):
+        self._initial_nav_started = None
+        self._nav_retry_due = None
+
+    def _begin_mission_navigation(self):
+        """启动首个导航，并为 Nav2 生命周期激活窗口建立有界重试计时。"""
+        self.core.start()
+        self._initial_nav_started = self._now()
+        self._nav_retry_due = None
+        self._send_nav_goal()
+
+    def _schedule_initial_nav_retry(self):
+        """仅在首个 Goal 被未激活的 Nav2 拒绝时重试，避免掩盖运行期故障。"""
+        now = self._now()
+        started = self._initial_nav_started
+        if (not self._navigation_active() or self.core.current_index != 0 or
+                started is None or
+                now - started > self._nav_startup_retry_timeout):
+            return False
+        self._nav_retry_due = now + self._nav_startup_retry_interval
+        self.get_logger().warn(
+            '[NAV] initial goal rejected while Nav2 is activating; '
+            f'retrying in {self._nav_startup_retry_interval:.1f}s')
+        self._publish_status()
+        return True
+
     def _send_nav_goal(self):
+        """发送当前树或 HOME 的 Nav2 Goal，并启动本阶段超时计时。"""
         if self.core.state == MissionState.RETURNING_HOME:
             x, y, yaw = self._home_pose
             target_label = 'HOME'
@@ -421,16 +479,20 @@ class MissionManager(Node):
                 self._fail(f'Nav2 goal send failed: {error}')
             return
         if handle is None or not handle.accepted:
+            if self._schedule_initial_nav_retry():
+                return
             if self._navigation_active():
                 self._fail('Nav2 rejected the goal')
             return
         self._nav_handle = handle
+        self._clear_nav_startup_retry()
         if not self._navigation_active():
             self._cancel_nav_goal()
         result_future = handle.get_result_async()
         result_future.add_done_callback(self._nav_result)
 
     def _nav_result(self, future):
+        """消费 Nav2 最终结果；到树后先进入停稳检测，而非立即启动机械臂。"""
         self._nav_handle = None
         try:
             wrapped = future.result()
@@ -463,6 +525,7 @@ class MissionManager(Node):
         self._stop_detector.update(self._now(), linear, angular)
 
     def _send_spray_goal(self):
+        """把当前病树提示和作业参数交给机械臂，树级状态仍由本节点持有。"""
         target = self.core.current_target
         goal = ExecuteSpray.Goal()
         goal.mission_id = self.core.mission_id
@@ -509,13 +572,15 @@ class MissionManager(Node):
         result_future.add_done_callback(self._spray_result)
 
     def _spray_feedback(self, feedback_message):
+        """仅用反馈刷新进展看门狗；阶段明细由机械臂节点负责显示。"""
         feedback = feedback_message.feedback
         if self.core.state == MissionState.ARM_SPRAYING:
             self._spray_last_progress = self._now()
-        self.get_logger().info(
+        self.get_logger().debug(
             f'[ARM] {feedback.phase_text} progress={feedback.progress:.2f}')
 
     def _spray_result(self, future):
+        """根据机械臂结果推进下一棵树；部分成功保留为明确告警。"""
         self._spray_handle = None
         self._spray_last_progress = None
         try:
@@ -535,8 +600,9 @@ class MissionManager(Node):
             self.core.skip_current(self._return_home_after_finish)
             self.get_logger().info(
                 f'[MISSION] skipped tree={skipped} '
-                f'processed={self.core.completed_targets + self.core.skipped_targets}/'
+                f'processed={self.core.processed_targets}/'
                 f'{len(self.core.targets)} completed={self.core.completed_targets} '
+                f'partial={self.core.partial_targets} '
                 f'skipped={self.core.skipped_targets}: {result.message}')
             if self.core.state in {
                     MissionState.NAVIGATING,
@@ -552,33 +618,55 @@ class MissionManager(Node):
             return
         finished = self.core.current_target.tree_id
         self._manual_return_home = False
-        self.core.arm_succeeded(self._return_home_after_finish)
         if result.error_code == ExecuteSpray.Result.INSPECTED_NO_DISEASE:
             outcome = 'inspected without disease'
+            self.core.arm_succeeded(
+                self._return_home_after_finish, result.message)
         elif result.error_code == ExecuteSpray.Result.PARTIAL_SUCCESS:
             outcome = 'partially sprayed'
+            self.core.arm_partial(
+                result.message, self._return_home_after_finish)
             self.get_logger().warn(
                 f'[MISSION] partial tree={finished}: {result.message}')
         else:
             outcome = 'sprayed'
+            self.core.arm_succeeded(
+                self._return_home_after_finish, result.message)
         self.get_logger().info(
             f'[MISSION] {outcome} tree={finished} '
-            f'processed={self.core.completed_targets + self.core.skipped_targets}/'
+            f'processed={self.core.processed_targets}/'
             f'{len(self.core.targets)} completed={self.core.completed_targets} '
+            f'partial={self.core.partial_targets} '
             f'skipped={self.core.skipped_targets}: {result.message}')
         if self.core.state == MissionState.NAVIGATING:
             self._send_nav_goal()
         elif self.core.state == MissionState.RETURNING_HOME:
             self._send_nav_goal()
         else:
+            if self.core.state == MissionState.FAILED:
+                self.get_logger().error(
+                    '[MISSION] FAILED: mission contains incomplete tree results')
+            elif self.core.state == MissionState.MISSION_COMPLETED:
+                self.get_logger().info(
+                    f'[MISSION] MISSION_COMPLETED targets={len(self.core.targets)} '
+                    f'completed={self.core.completed_targets} '
+                    f'partial={self.core.partial_targets} '
+                    f'skipped={self.core.skipped_targets}')
             self._publish_status()
 
     def _tick(self):
+        """100 ms 看门狗：自动启动、导航超时、停稳确认和机械臂进展超时。"""
         if self.core.state == MissionState.READY and self._auto_start and self._servers_ready():
-            self.core.start()
-            self._send_nav_goal()
+            self._begin_mission_navigation()
             return
         now = self._now()
+        if self._nav_retry_due is not None:
+            if not self._navigation_active():
+                self._clear_nav_startup_retry()
+            elif now >= self._nav_retry_due:
+                self._nav_retry_due = None
+                self._send_nav_goal()
+            return
         if self._navigation_active() and self._phase_started is not None:
             if now - self._phase_started >= self._nav_timeout:
                 self._fail('Nav2 goal timed out')
@@ -601,6 +689,7 @@ class MissionManager(Node):
     def _fail(self, message):
         if not self.core.fail(message):
             return
+        self._clear_nav_startup_retry()
         self._stop_detector.stop()
         self._cancel_nav_goal()
         self._cancel_spray_goal()
@@ -616,6 +705,7 @@ class MissionManager(Node):
             self._spray_handle.cancel_goal_async()
 
     def _publish_status(self):
+        """发布 Transient Local 任务快照，供 UI、感知节点和晚加入订阅者使用。"""
         message = MissionStatus()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = self._map_frame
@@ -636,9 +726,9 @@ class MissionManager(Node):
                 target_status.state = MissionTargetStatus.COMPLETED
             elif outcome == MissionCore.SKIPPED:
                 target_status.state = MissionTargetStatus.SKIPPED
-            elif outcome == MissionCore.FAILED:
+            elif outcome in {MissionCore.PARTIAL, MissionCore.FAILED}:
                 target_status.state = MissionTargetStatus.FAILED
-                target_status.message = self.core.last_error
+                target_status.message = self.core.target_messages[index]
             elif index == self.core.current_index:
                 target_status.state = MissionTargetStatus.CURRENT
             else:

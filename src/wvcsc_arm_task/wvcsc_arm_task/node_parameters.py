@@ -26,6 +26,9 @@ def create_alicia_moveit(node, state):
         retime_timeout=float(_parameter(node, 'retime_timeout', 5.0)),
         execution_timeout=float(_parameter(node, 'execution_timeout', 60.0)),
         planning_time=float(_parameter(node, 'planning_time', 2.0)),
+        planning_pipeline_id=str(_parameter(
+            node, 'planning_pipeline_id', 'ompl')),
+        planner_id=str(_parameter(node, 'planner_id', 'RRTConnectFast')),
         gripper_action=str(_parameter(
             node, 'gripper_action', '/gripper_controller/gripper_cmd')),
         gripper_open_position=float(_parameter(

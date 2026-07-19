@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from launch import LaunchContext
 from launch.actions import Shutdown
 
@@ -76,6 +77,15 @@ def test_arm_scaling_and_controller_service_timeout_are_explicit():
     assert "'acceleration_scaling': ParameterValue(" in LAUNCH_SOURCE
 
 
+def test_arm_planner_selection_is_exposed_as_launch_arguments():
+    assert "DeclareLaunchArgument('planning_pipeline_id', default_value='ompl')" \
+        in LAUNCH_SOURCE
+    assert "DeclareLaunchArgument('planner_id', default_value='RRTConnectFast')" \
+        in LAUNCH_SOURCE
+    assert "'planning_pipeline_id': planning_pipeline_id" in LAUNCH_SOURCE
+    assert "'planner_id': planner_id" in LAUNCH_SOURCE
+
+
 @pytest.mark.parametrize('name,value', [
     ('arm_velocity_scaling', '0'),
     ('arm_velocity_scaling', '1.01'),
@@ -104,3 +114,47 @@ def test_valid_arm_scaling_passes_launch_validation(monkeypatch):
     })
 
     assert _launch_module().validate_arm_scaling(context) == []
+
+
+def test_simulation_loads_the_canonical_alicia_ompl_config():
+    config_path = (
+        Path(__file__).parents[2] / 'Alicia-M-ROS2' /
+        'alicia_m_moveit_config' / 'config' / 'ompl_planning.yaml'
+    )
+    config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
+
+    assert "load_yaml('alicia_m_moveit_config', 'config/ompl_planning.yaml')" \
+        in LAUNCH_SOURCE
+    assert "'ompl': ompl_planning" in LAUNCH_SOURCE
+    assert config['planning_plugin'] == 'ompl_interface/OMPLPlanner'
+    assert config['arm']['default_planner_config'] == 'RRTConnectFast'
+    assert set(config['arm']['planner_configs']) <= set(config['planner_configs'])
+    assert config['arm']['projection_evaluator'] == 'joints(joint1,joint2)'
+    assert config['arm']['enforce_joint_model_state_space'] is True
+    assert 'AnytimePathShortening' in config['arm']['planner_configs']
+
+
+def test_simulation_control_stack_uses_layered_100_30_hz_rates():
+    source_root = Path(__file__).parents[2]
+    controller_config = yaml.safe_load((
+        source_root / 'wvcsc_description' / 'config' /
+        'ros2_controllers.yaml'
+    ).read_text(encoding='utf-8'))
+    servo_config = yaml.safe_load((
+        source_root / 'wvcsc_visual_servo' / 'config' /
+        'moveit_servo.yaml'
+    ).read_text(encoding='utf-8'))
+    visual_config = yaml.safe_load((
+        source_root / 'wvcsc_visual_servo' / 'config' /
+        'visual_servo.yaml'
+    ).read_text(encoding='utf-8'))['wvcsc_visual_servo']['ros__parameters']
+
+    assert controller_config['controller_manager']['ros__parameters'][
+        'update_rate'] == 100
+    assert servo_config['publish_period'] == pytest.approx(0.05)
+    assert servo_config['low_latency_mode'] is True
+    assert servo_config['incoming_command_timeout'] == pytest.approx(0.30)
+    assert visual_config['control_rate_hz'] == pytest.approx(30.0)
+    assert visual_config['zero_command_count'] == 8
+    assert visual_config['zero_command_count'] / visual_config[
+        'control_rate_hz'] == pytest.approx(8.0 / 30.0)
