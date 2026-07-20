@@ -89,16 +89,26 @@ wvcsc_visual_servo:
     progress_window_sec: 4.0
     min_progress_px: 1.0
 
-    # 图像期望偏置：指定目标在画面中的理想像素位置。
-    # V 轴设置为 +28px，意味着目标最终会落在图像中心偏下 28px 处。
-    # 这是为了给末端的喷洒喷头留出物理间隙，防止喷头完全遮挡相机视野。
+    # 喷嘴投影点上的残余像素微调。几何主补偿来自camera->spray_nozzle_link TF；
+    # 仿真默认无需trim，实机湿喷标定后由nozzle.yaml覆盖。
     desired_offset_u_px: 0.0
-    desired_offset_v_px: 28.0
+    desired_offset_v_px: 0.0
+
+    # 固定1m工距的喷嘴轴线投影补偿。任何CameraInfo/TF/几何异常均拒绝伺服，
+    # 禁止退化到图像中心后误喷。
+    aim_compensation_enabled: true
+    aim_range_source: fixed
+    aim_fixed_range_m: 1.0
+    aim_range_tolerance_m: 0.05
+    aim_nozzle_frame: spray_nozzle_link
+    aim_min_forward_axis_z: 0.2
+    aim_image_margin_px: 20.0
 
     # ----------------------------------------------------------------------
     # 5. 相机内参容错
     # ----------------------------------------------------------------------
-    # 如果相机驱动没有及时发布 `CameraInfo`，使用以下默认值作为备用。
+    # 仅在显式关闭 require_camera_info 的非喷洒诊断场景使用以下备用焦距；
+    # 喷嘴补偿启用时始终要求真实 CameraInfo，禁止用默认内参执行喷洒。
     fallback_fx: 507.872735
     fallback_fy: 507.872735
     # 是否强制等待 CameraInfo。

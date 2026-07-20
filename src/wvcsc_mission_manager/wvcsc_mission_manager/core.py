@@ -49,6 +49,7 @@ class Target:
     spray_duration: float
     evidence_uri: str = ''
     docking_pose_override: tuple | None = None  # 如果手动注入任务，可覆盖自动生成的停靠点
+    tree_hint_override: tuple | None = None  # 实测任务可显式提供树根 map 坐标
 
 
 class MissionCore:
@@ -123,6 +124,10 @@ class MissionCore:
 
     def stop_verified(self):
         return self._transition(MissionState.VERIFYING_STOP, MissionState.ARM_SPRAYING)
+
+    def retry_navigation(self):
+        """停靠质量不合格时重新导航当前目标，不推进任务索引。"""
+        return self._transition(MissionState.VERIFYING_STOP, MissionState.NAVIGATING)
 
     @property
     def processed_targets(self):

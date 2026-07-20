@@ -20,8 +20,10 @@ from collections import deque
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data)
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Bool
 
 
 class CameraWatchdog(Node):
@@ -39,6 +41,7 @@ class CameraWatchdog(Node):
             'expected_height': 720,                      # 期望分辨率高度
             'expected_fps': 30.0,                        # 期望帧率
             'stale_timeout_sec': 1.0,                    # 判定流过期的超时时间（秒）
+            'health_topic': '/camera/healthy',           # 实机安全联锁输入
         }
         for name, default in defaults.items():
             self.declare_parameter(name, default)
@@ -58,6 +61,13 @@ class CameraWatchdog(Node):
         # 4. 创建诊断消息发布器（发布到 ROS 标准 `/diagnostics` 话题）
         self._publisher = self.create_publisher(
             DiagnosticArray, '/diagnostics', 10)
+        self._health_publisher = self.create_publisher(
+            Bool, str(self.get_parameter('health_topic').value),
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ))
 
         # 5. 订阅相机图像和内参话题
         self.create_subscription(
@@ -153,10 +163,19 @@ class CameraWatchdog(Node):
             status.level = DiagnosticStatus.WARN
             status.message = 'image timestamp differs from ROS clock'
 
-        # 7. 是否从未收到过 CameraInfo 标定信息？
+        # 7. CameraInfo 是喷嘴投影补偿的安全输入。缺失、分辨率不匹配或
+        # 焦距无效时不能只告警后继续自动作业，必须关闭相机健康联锁。
         elif self._last_info is None:
-            status.level = DiagnosticStatus.WARN
+            status.level = DiagnosticStatus.ERROR
             status.message = 'CameraInfo not received'
+
+        elif (self._last_info.width != expected_w
+                or self._last_info.height != expected_h
+                or len(self._last_info.k) != 9
+                or self._last_info.k[0] <= 0.0
+                or self._last_info.k[4] <= 0.0):
+            status.level = DiagnosticStatus.ERROR
+            status.message = 'CameraInfo is invalid or has wrong resolution'
 
         # 8. 实际测量的帧率是否低于期望值的 70% (即低于 21 Hz)？
         elif self._measured_fps() < expected_fps * 0.70:
@@ -188,6 +207,10 @@ class CameraWatchdog(Node):
         message.header.stamp = now.to_msg()
         message.status = [status]
         self._publisher.publish(message)
+        # WARN（例如帧率稍低）仍允许作业；断流、图像/内参几何或编码错误
+        # 会关闭联锁，确保视觉伺服不会在未知内参下启动。
+        self._health_publisher.publish(Bool(
+            data=status.level != DiagnosticStatus.ERROR))
 
 
 def main():

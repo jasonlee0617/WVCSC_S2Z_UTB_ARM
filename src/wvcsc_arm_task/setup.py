@@ -25,5 +25,6 @@ setup(
         'spray_task = wvcsc_arm_task.spray_task:main',
         'spray_simulator = wvcsc_arm_task.spray_simulator:main',
         'motion_control = wvcsc_arm_task.motion_control:main',
+        'motion_control_keyboard = wvcsc_arm_task.motion_control_keyboard:main',
     ]},
 )

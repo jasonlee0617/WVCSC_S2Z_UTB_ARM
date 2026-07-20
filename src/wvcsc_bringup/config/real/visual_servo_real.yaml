@@ -1,0 +1,30 @@
+wvcsc_visual_servo:
+  ros__parameters:
+    control_rate_hz: 30.0
+    command_mode: angular_xy
+    default_timeout_sec: 8.0
+    require_camera_info: true
+    target_stale_timeout_sec: 0.50
+    min_confidence: 0.25
+    aim_compensation_enabled: true
+    aim_range_source: fixed
+    aim_fixed_range_m: 1.0
+    aim_range_tolerance_m: 0.05
+    aim_nozzle_frame: spray_nozzle_link
+    aim_min_forward_axis_z: 0.2
+    aim_image_margin_px: 60.0
+    desired_offset_u_px: 0.0
+    desired_offset_v_px: 0.0
+
+    # Conservative initial real-arm limits.  Tune only from recorded data.
+    max_angular_speed: 0.15
+    max_angular_acceleration: 1.00
+    max_linear_speed: 0.02
+    max_linear_acceleration: 0.15
+    pid_kp_xy: 4.00
+    pid_ki_xy: 0.0
+    pid_kd_xy: 0.005
+    fine_tolerance_px: 1.5
+    control_resume_tolerance_px: 2.0
+    stable_duration_sec: 0.50
+    zero_command_count: 8

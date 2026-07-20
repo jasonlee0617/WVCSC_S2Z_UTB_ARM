@@ -1,0 +1,8 @@
+schema_version: 1
+parent_frame: tool0
+child_frame: spray_nozzle_link
+translation: {x: 0.0, y: 0.0, z: 0.0}
+rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+working_distance_m: 1.0
+working_distance_tolerance_m: 0.05
+pixel_trim: {u: 0.0, v: 0.0}

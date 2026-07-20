@@ -1,0 +1,43 @@
+wvcsc_two_stage_yolo:
+  ros__parameters:
+    profile: real_leaf
+    image_topic: /camera/color/image_raw
+    selected_target_topic: /vision/selected_target_id
+    tree_detections_topic: /vision/tree_detections
+    fruit_detections_topic: /vision/fruit_detections
+    target_topic: /vision/target
+    tree_visualization_topic: /vision/tree_debug_image
+    fruit_visualization_topic: /vision/fruit_debug_image
+    perception_debug_topic: /vision/perception_debug
+    perception_debug_rate_hz: 5.0
+    inference_mode_topic: /vision/inference_mode
+
+    tree_model_path: yolov8s_real.pt
+    fruit_model_path: yolov8s_seg_real.pt
+    tree_class_id: 0
+    tree_class_name: tree
+    target_class_id: 0
+    target_class_name: disease_leaf
+    target_id_prefix: leaf
+    # 实机权重必须严格为 detect:{0: tree} 和 segment:{0: disease_leaf}。
+    strict_model_classes: true
+
+    tree_confidence: 0.25
+    fruit_confidence: 0.25
+    roi_padding: 0.10
+    track_iou_threshold: 0.20
+    track_center_distance_px: 50.0
+    track_max_missed_frames: 5
+    target_reassociation_distance_px: 160.0
+    target_reassociation_iou_margin: 0.10
+    target_reassociation_distance_margin_px: 8.0
+    target_equivalent_aim_distance_px: 8.0
+    target_lock_ema_alpha: 0.20
+    target_template_tracking_enabled: true
+    target_template_update_min_confidence: 0.30
+    target_template_padding_ratio: 0.50
+    target_template_min_padding_px: 6.0
+    target_template_search_radius_px: 80.0
+    target_template_min_score: 0.55
+    tree_lock_iou_threshold: 0.20
+    publish_visualization: true

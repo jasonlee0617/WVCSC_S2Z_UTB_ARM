@@ -1,0 +1,61 @@
+auto_calibration_collector:
+  ros__parameters:
+    use_sim_time: false
+    group_name: arm
+    base_frame: alicia_base_link
+    tool_link: tool0
+    camera_frame: camera_color_optical_frame
+    marker_frame: calibration_aruco
+    joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
+    planner_id: RRTConnectFast
+    planning_pipeline_id: ompl
+    velocity_scaling: 0.05
+    acceleration_scaling: 0.05
+    planning_time: 5.0
+    execution_timeout: 90.0
+
+    marker_id: 1
+    marker_size_m: 0.070
+    aruco_dictionary: DICT_5X5_250
+    image_topic: /camera/color/image_raw
+    camera_info_topic: /camera/color/camera_info
+    joint_state_topic: /joint_states
+    motion_locked_topic: /motion_control/locked
+    motion_state_topic: /motion_control/state
+    emergency_stop_topic: /safety/emergency_stop
+
+    minimum_samples: 15
+    minimum_solution_samples: 14
+    target_samples: 18
+    maximum_samples: 22
+    minimum_safe_candidates: 14
+    stable_frames: 10
+    settle_time_sec: 1.0
+    marker_distance_min_m: 0.25
+    marker_distance_max_m: 0.80
+    minimum_corner_margin_px: 60.0
+    maximum_center_std_px: 4.0
+    maximum_marker_depth_std_m: 0.003
+    maximum_marker_angle_std_deg: 0.8
+    minimum_translation_delta_m: 0.006
+    minimum_rotation_delta_deg: 3.0
+    minimum_translation_span_m: 0.04
+    minimum_rotation_span_deg: 20.0
+    maximum_center_error_px: 45.0
+    recenter_step_limit_m: 0.003
+    recenter_total_limit_m: 0.010
+    recenter_attempt_limit: 3
+
+    max_condition_number: 14.0
+    min_joint_margin_rad: 0.22
+    position_tolerance_m: 0.003
+    orientation_tolerance_rad: 0.01
+
+    algorithm_names: [OpenCV/Park, OpenCV/Horaud, OpenCV/Tsai-Lenz]
+    maximum_algorithm_translation_delta_m: 0.010
+    maximum_algorithm_rotation_delta_deg: 2.0
+    maximum_camera_translation_norm_m: 0.30
+    maximum_marker_position_rms_m: 0.005
+    maximum_marker_rotation_rms_deg: 1.0
+    easy_service_timeout_sec: 10.0
+    output_file: ~/.ros/wvcsc_calibration/c10_handeye.yaml

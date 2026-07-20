@@ -184,7 +184,8 @@ class TargetFlowMixin:
     def _on_fruit_detections(self, message):
         """YOLO 病果分割结果的回调，更新目标计数与最新快照。"""
         fruits = detection_candidates(
-            message, 'diseased_fruit', self.get_parameter('fruit_confidence').value)
+            message, str(self.get_parameter('target_class_name').value),
+            self.get_parameter('fruit_confidence').value)
         with self._vision_mutex:
             self._fruit_frames += 1
             current = {fruit.target_id: fruit for fruit in fruits}

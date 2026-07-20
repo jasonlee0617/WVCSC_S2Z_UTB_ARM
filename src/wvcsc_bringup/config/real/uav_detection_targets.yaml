@@ -1,0 +1,32 @@
+# Real-map coordinates supplied through the same validated Mock UAV contract.
+# Replace x/y only after mapping; the mission remains manual-start gated.
+mission:
+  mission_id: corn_real_demo_001
+  source_mode: mock
+  frame_id: map
+  publish_delay_sec: 1.0
+  trees:
+    - tree_id: corn_01
+      confidence: 0.94
+      position: {x: 1.50, y: 0.50, z: 0.0}
+      spray_side: left
+      spray_duration: 5.0
+      evidence_uri: mock://corn_01
+    - tree_id: corn_02
+      confidence: 0.92
+      position: {x: 1.50, y: 2.50, z: 0.0}
+      spray_side: left
+      spray_duration: 5.0
+      evidence_uri: mock://corn_02
+    - tree_id: corn_03
+      confidence: 0.96
+      position: {x: 1.50, y: 4.50, z: 0.0}
+      spray_side: left
+      spray_duration: 5.0
+      evidence_uri: mock://corn_03
+    - tree_id: corn_04
+      confidence: 0.91
+      position: {x: 1.50, y: 6.50, z: 0.0}
+      spray_side: left
+      spray_duration: 5.0
+      evidence_uri: mock://corn_04

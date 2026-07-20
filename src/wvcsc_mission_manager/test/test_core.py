@@ -50,6 +50,17 @@ def test_manual_tree_hint_uses_docking_yaw_and_spray_side():
     assert manual_tree_hint((3.0, 0.5, 0.0), 'right', 1.5) == (3.0, -1.0, 0.0)
 
 
+def test_stop_verification_can_return_to_navigation_for_same_target():
+    core = MissionCore()
+    core.load('retry', [
+        Target('tree_1', 3.0, 2.0, 0.0, 0.9, 'left', 2.0)])
+    assert core.start()
+    assert core.nav_succeeded()
+    assert core.retry_navigation()
+    assert core.state == MissionState.NAVIGATING
+    assert core.current_index == 0
+
+
 def test_two_target_success_path():
     core = MissionCore()
     assert core.load('demo', _targets()) == 'accepted'

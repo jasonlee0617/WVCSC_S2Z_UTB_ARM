@@ -20,7 +20,7 @@ TREE_CLASS_NAMES = {0: 'tree'}
 # 第二阶段 (Fruit Segmentation) 的类别映射
 # ID 0: 健康果实 (Healthy Fruit) -> 不喷
 # ID 1: 患病果实 (Diseased Fruit) -> 目标对象
-FRUIT_CLASS_NAMES = {0: 'healthy_fruit', 1: 'diseased_fruit'}
+FRUIT_CLASS_NAMES = {1: 'diseased_fruit'}
 
 
 def canonical_class_name(class_id, model_names):
@@ -47,7 +47,8 @@ def canonical_class_name(class_id, model_names):
     return f'cls{class_id}'
 
 
-def validate_yolo_model(model, expected_task, expected_names):
+def validate_yolo_model(
+        model, expected_task, expected_names, *, exact_names=False):
     """
     在节点初始化时强制校验 YOLO 模型的合规性（快速失败机制）。
 
@@ -60,6 +61,8 @@ def validate_yolo_model(model, expected_task, expected_names):
         model (ultralytics.YOLO): 已加载的 YOLO 模型对象。
         expected_task (str): 期望的任务类型 (如 'detect' 或 'segment')。
         expected_names (dict): 期望的类别 ID 到类别名称的映射字典。
+        exact_names (bool): 为 True 时要求模型类别表完全相等。实机
+            配置使用此严格模式，防止带有额外类别的权重被误部署。
 
     Raises:
         ValueError: 当模型的任务类型或类别名称与期望值不匹配时抛出异常。
@@ -69,7 +72,10 @@ def validate_yolo_model(model, expected_task, expected_names):
                     if isinstance(model.names, dict)
                     else {index: str(value) for index, value in enumerate(model.names)})
                     
-    if model.task != expected_task or actual_names != expected_names:
+    names_match = (
+        actual_names == expected_names if exact_names
+        else expected_names.items() <= actual_names.items())
+    if model.task != expected_task or not names_match:
         raise ValueError(
             f'YOLO model contract mismatch: expected task={expected_task}, '
             f'names={expected_names}; found task={model.task}, names={model.names}')
@@ -79,7 +85,7 @@ def resolve_yolo_model_path(path_value):
     """
     解析 YOLO 权重文件的绝对路径。
 
-    允许在 `vision_sim.yaml` 中通过相对路径（如 `wvcsc_tree_yolov8s.pt`）
+    允许在 `vision_sim.yaml` 中通过相对路径（如 `yolov8s_sim.pt`）
     引用位于该功能包 `share` 目录下的模型权重。
 
     Args:
@@ -93,6 +99,6 @@ def resolve_yolo_model_path(path_value):
     if path.is_absolute():
         return str(path)
     # 如果是相对路径，将其解析为 ROS 包共享目录下的 `models` 子目录
-    # 解析结果例如：/opt/ros/humble/share/wvcsc_rgb_vision/models/wvcsc_tree_yolov8s.pt
+    # 解析结果例如：/opt/ros/humble/share/wvcsc_rgb_vision/models/yolov8s_sim.pt
     return str(
         Path(get_package_share_directory('wvcsc_rgb_vision')) / 'models' / path)

@@ -19,6 +19,7 @@
 import math
 
 from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 import rclpy
@@ -26,6 +27,7 @@ from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.msg import (
@@ -57,6 +59,9 @@ class MissionManager(Node):
         self._declare_parameters()
         self.core = MissionCore()
         self._auto_start = bool(self.get_parameter('auto_start').value)
+        self._require_autonomy = bool(
+            self.get_parameter('require_autonomy_enabled').value)
+        self._autonomy_enabled = not self._require_autonomy
         self._map_frame = str(self.get_parameter('map_frame').value)
         self._road_center_y = float(self.get_parameter('road_center_y').value)
         self._road_yaw = float(self.get_parameter('road_yaw').value)
@@ -66,6 +71,22 @@ class MissionManager(Node):
             self.get_parameter('manual_tree_standoff').value)
         self._manual_tree_base_z = float(
             self.get_parameter('manual_tree_base_z').value)
+        self._require_docking_quality = bool(
+            self.get_parameter('require_docking_quality').value)
+        self._localization_max_age = float(
+            self.get_parameter('localization_max_age_sec').value)
+        self._max_localization_position_stddev = float(
+            self.get_parameter('max_localization_position_stddev_m').value)
+        self._max_localization_yaw_stddev = float(
+            self.get_parameter('max_localization_yaw_stddev_rad').value)
+        self._max_docking_position_error = float(
+            self.get_parameter('max_docking_position_error_m').value)
+        self._max_docking_yaw_error = float(
+            self.get_parameter('max_docking_yaw_error_rad').value)
+        self._docking_retry_limit = int(
+            self.get_parameter('docking_retry_limit').value)
+        self._localization_recovery_timeout = float(
+            self.get_parameter('localization_recovery_timeout_sec').value)
         self._nav_timeout = float(self.get_parameter('nav_goal_timeout_sec').value)
         self._nav_startup_retry_timeout = float(
             self.get_parameter('nav_startup_retry_timeout_sec').value)
@@ -88,6 +109,20 @@ class MissionManager(Node):
                 self._nav_startup_retry_timeout <= 0.0 or
                 self._nav_startup_retry_interval <= 0.0):
             raise ValueError('initial Nav2 retry timing must be finite and positive')
+        docking_thresholds = (
+            self._localization_max_age,
+            self._max_localization_position_stddev,
+            self._max_localization_yaw_stddev,
+            self._max_docking_position_error,
+            self._max_docking_yaw_error,
+            self._localization_recovery_timeout,
+        )
+        if not all(math.isfinite(value) and value > 0.0
+                   for value in docking_thresholds):
+            raise ValueError(
+                'docking quality thresholds must be finite and positive')
+        if self._docking_retry_limit < 0:
+            raise ValueError('docking_retry_limit must be non-negative')
         self._configured_return_home_after_finish = (
             self._return_home_after_finish)
         self._configured_home_pose = self._home_pose
@@ -116,6 +151,13 @@ class MissionManager(Node):
         self.create_subscription(
             DiseaseTreeArray, '/uav/disease_trees', self._on_mission, latched)
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
+        self.create_subscription(
+            PoseWithCovarianceStamped,
+            str(self.get_parameter('localization_pose_topic').value),
+            self._on_localization_pose, 10)
+        self.create_subscription(
+            Bool, str(self.get_parameter('autonomy_enabled_topic').value),
+            self._on_autonomy_enabled, latched)
 
         # 初始化 Action 客户端
         self._nav_client = ActionClient(
@@ -133,6 +175,11 @@ class MissionManager(Node):
         self._nav_retry_due = None
         self._spray_last_progress = None
         self._manual_return_home = False
+        self._localization_pose = None
+        self._localization_recovery_started = None
+        self._docking_retry_count = 0
+        self._docking_retry_target_index = None
+        self._last_docking_log_state = None
 
         # 对外暴露的高层操作服务
         self.create_service(Trigger, '/mission/start', self._start)
@@ -157,6 +204,8 @@ class MissionManager(Node):
         """声明 YAML 中定义的各项参数。"""
         parameters = {
             'auto_start': False,
+            'require_autonomy_enabled': False,
+            'autonomy_enabled_topic': '/safety/autonomy_enabled',
             'map_frame': 'map',
             'nav_action_name': '/navigate_to_pose',
             'spray_action_name': '/arm/execute_spray',
@@ -165,6 +214,15 @@ class MissionManager(Node):
             'docking_lateral_offset': DEFAULT_DOCKING_LATERAL_OFFSET,
             'manual_tree_standoff': 1.5,
             'manual_tree_base_z': 0.0,
+            'require_docking_quality': False,
+            'localization_pose_topic': '/amcl_pose',
+            'localization_max_age_sec': 1.0,
+            'max_localization_position_stddev_m': 0.12,
+            'max_localization_yaw_stddev_rad': 0.12,
+            'max_docking_position_error_m': 0.12,
+            'max_docking_yaw_error_rad': 0.12,
+            'docking_retry_limit': 1,
+            'localization_recovery_timeout_sec': 5.0,
             'nav_goal_timeout_sec': 120.0,
             'nav_startup_retry_timeout_sec': 30.0,
             'nav_startup_retry_interval_sec': 0.5,
@@ -206,6 +264,7 @@ class MissionManager(Node):
             self._restore_configured_mission_options()
             self._manual_return_home = False
             self._clear_nav_startup_retry()
+            self._reset_docking_verification()
             self.get_logger().info(
                 f'[MISSION] accepted mission={self.core.mission_id} '
                 f'targets={len(self.core.targets)}')
@@ -280,6 +339,7 @@ class MissionManager(Node):
             request.return_home_after_finish)
         self._manual_return_home = False
         self._clear_nav_startup_retry()
+        self._reset_docking_verification()
         self.get_logger().info(
             f'[MISSION] accepted manual mission={self.core.mission_id} '
             f'targets={len(self.core.targets)}')
@@ -288,9 +348,70 @@ class MissionManager(Node):
         return self._reply(response, True, 'manual mission loaded')
 
     def _validate_manual_request(self, request):
-        # 对人工任务的校验略去重复的数值检查代码，逻辑与 `_validate_message` 相似
-        # 但额外校验了 `home_pose` 等参数。
-        pass # 注释略 (代码此处省略，但原文已有详尽逻辑)
+        """Validate RViz/manual docking poses before loading a mission."""
+        if request.header.frame_id != self._map_frame:
+            raise ValueError(f'frame must be {self._map_frame}')
+        if not request.mission_id.strip() or not request.targets:
+            raise ValueError('mission_id and targets are required')
+        max_targets = int(self.get_parameter('max_targets').value)
+        if len(request.targets) > max_targets:
+            raise ValueError(f'target count exceeds limit {max_targets}')
+
+        bound = float(self.get_parameter('max_abs_coordinate').value)
+        min_duration = float(self.get_parameter('min_spray_duration').value)
+        max_duration = float(self.get_parameter('max_spray_duration').value)
+        home_pose = MissionManager._pose_to_xy_yaw(
+            request.home_pose, 'home_pose')
+        if abs(home_pose[0]) > bound or abs(home_pose[1]) > bound:
+            raise ValueError('home_pose is out of bounds')
+
+        seen = set()
+        targets = []
+        for item in request.targets:
+            target_id = item.target_id.strip()
+            if not target_id or target_id in seen:
+                raise ValueError('target_id must be non-empty and unique')
+            if item.spray_side not in ('left', 'right'):
+                raise ValueError(f'{target_id}: invalid spray_side')
+            duration = float(item.spray_duration)
+            if not math.isfinite(duration) or not min_duration <= duration <= max_duration:
+                raise ValueError(f'{target_id}: spray_duration out of range')
+            docking = MissionManager._pose_to_xy_yaw(
+                item.docking_pose, f'{target_id}.docking_pose')
+            if abs(docking[0]) > bound or abs(docking[1]) > bound:
+                raise ValueError(f'{target_id}: docking pose out of bounds')
+            tree_base_z = getattr(self, '_manual_tree_base_z', 0.0)
+            tree_standoff = getattr(self, '_manual_tree_standoff', 1.5)
+            explicit_hint = bool(getattr(
+                item, 'use_explicit_tree_hint', False))
+            if explicit_hint:
+                point = item.tree_hint
+                tree_hint = (
+                    float(point.x), float(point.y), float(point.z))
+                if not all(math.isfinite(value) for value in tree_hint):
+                    raise ValueError(f'{target_id}: non-finite tree_hint')
+                if abs(tree_hint[0]) > bound or abs(tree_hint[1]) > bound:
+                    raise ValueError(f'{target_id}: tree_hint out of bounds')
+                source = 'manual://measured'
+            else:
+                tree_hint = manual_tree_hint(
+                    docking, item.spray_side, tree_standoff, tree_base_z)
+                source = 'manual://inferred'
+            target = Target(
+                target_id,
+                tree_hint[0],
+                tree_hint[1],
+                tree_hint[2],
+                1.0,
+                item.spray_side,
+                duration,
+                source,
+                docking,
+                tree_hint if explicit_hint else None,
+            )
+            seen.add(target_id)
+            targets.append(target)
+        return targets, home_pose
 
     @staticmethod
     def _pose_to_xy_yaw(pose, label):
@@ -312,10 +433,20 @@ class MissionManager(Node):
         self._return_home_after_finish = (
             self._configured_return_home_after_finish)
 
+    def _reset_docking_verification(self, *, reset_retry=True):
+        self._localization_recovery_started = None
+        self._last_docking_log_state = None
+        if reset_retry:
+            self._docking_retry_count = 0
+            self._docking_retry_target_index = None
+
     # ---------- Service Callbacks (开始、暂停、取消、跳过、复位) ----------
     def _start(self, _request, response):
         if self.core.state != MissionState.READY:
             return self._reply(response, False, 'mission is not READY')
+        if (getattr(self, '_require_autonomy', False) and
+                not getattr(self, '_autonomy_enabled', False)):
+            return self._reply(response, False, 'autonomy mode is not enabled')
         if not self._servers_ready():
             return self._reply(response, False, 'Nav2 or spray Action server is not ready')
         self._begin_mission_navigation()
@@ -335,6 +466,9 @@ class MissionManager(Node):
             return self._reply(response, False, 'previous navigation goal is still canceling')
         if not self._nav_client.server_is_ready():
             return self._reply(response, False, 'Nav2 Action server is not ready')
+        if (getattr(self, '_require_autonomy', False) and
+                not getattr(self, '_autonomy_enabled', False)):
+            return self._reply(response, False, 'autonomy mode is not enabled')
         self.core.resume()
         self._send_nav_goal()
         return self._reply(response, True, 'mission resumed')
@@ -396,6 +530,7 @@ class MissionManager(Node):
         self._restore_configured_mission_options()
         self._manual_return_home = False
         self._clear_nav_startup_retry()
+        self._reset_docking_verification()
         self._publish_plan()
         self._publish_status()
         return self._reply(response, True, 'mission reset')
@@ -415,6 +550,7 @@ class MissionManager(Node):
 
     def _begin_mission_navigation(self):
         self.core.start()
+        self._reset_docking_verification()
         self._initial_nav_started = self._now()
         self._nav_retry_due = None
         self._send_nav_goal()
@@ -450,6 +586,9 @@ class MissionManager(Node):
             if target is None:
                 self._fail('no current navigation target')
                 return
+            if self._docking_retry_target_index != self.core.current_index:
+                self._docking_retry_target_index = self.core.current_index
+                self._docking_retry_count = 0
             x, y, yaw = navigation_pose(
                 target, self._road_center_y, self._road_yaw,
                 self._docking_lateral_offset)
@@ -512,6 +651,8 @@ class MissionManager(Node):
             self._publish_status()
             return
         self.core.nav_succeeded()
+        self._localization_recovery_started = None
+        self._last_docking_log_state = None
         self._phase_started = self._now()
         self._stop_detector.start(self._phase_started)
         self.get_logger().info(
@@ -522,6 +663,150 @@ class MissionManager(Node):
         linear = math.hypot(message.twist.twist.linear.x, message.twist.twist.linear.y)
         angular = abs(message.twist.twist.angular.z)
         self._stop_detector.update(self._now(), linear, angular)
+
+    @staticmethod
+    def _yaw_from_quaternion(quaternion):
+        norm = math.sqrt(
+            quaternion.x * quaternion.x + quaternion.y * quaternion.y +
+            quaternion.z * quaternion.z + quaternion.w * quaternion.w)
+        if not math.isfinite(norm) or norm < 1e-6:
+            return None
+        x = quaternion.x / norm
+        y = quaternion.y / norm
+        z = quaternion.z / norm
+        w = quaternion.w / norm
+        return math.atan2(
+            2.0 * (w * z + x * y),
+            1.0 - 2.0 * (y * y + z * z))
+
+    @staticmethod
+    def _angle_error(actual, desired):
+        return abs(math.atan2(
+            math.sin(actual - desired), math.cos(actual - desired)))
+
+    def _on_localization_pose(self, message):
+        """缓存AMCL在map中的实时位姿及协方差质量。"""
+        if str(message.header.frame_id).strip() != self._map_frame:
+            self._localization_pose = None
+            return
+        pose = message.pose.pose
+        yaw = self._yaw_from_quaternion(pose.orientation)
+        covariance = message.pose.covariance
+        values = (pose.position.x, pose.position.y, yaw)
+        if yaw is None or not all(math.isfinite(value) for value in values):
+            self._localization_pose = None
+            return
+        try:
+            x_variance = float(covariance[0])
+            y_variance = float(covariance[7])
+            yaw_variance = float(covariance[35])
+        except (IndexError, TypeError, ValueError):
+            self._localization_pose = None
+            return
+        if not all(math.isfinite(value) and value >= 0.0 for value in (
+                x_variance, y_variance, yaw_variance)):
+            self._localization_pose = None
+            return
+        self._localization_pose = (
+            self._now(), float(pose.position.x), float(pose.position.y), yaw,
+            max(math.sqrt(x_variance), math.sqrt(y_variance)),
+            math.sqrt(yaw_variance),
+        )
+
+    def _docking_quality(self, now):
+        target = self.core.current_target
+        localization = getattr(self, '_localization_pose', None)
+        if target is None or localization is None:
+            return 'unavailable', None
+        received_at, x, y, yaw, position_stddev, yaw_stddev = localization
+        age = max(0.0, now - received_at)
+        desired = navigation_pose(
+            target, self._road_center_y, self._road_yaw,
+            self._docking_lateral_offset)
+        position_error = math.hypot(x - desired[0], y - desired[1])
+        yaw_error = self._angle_error(yaw, desired[2])
+        details = {
+            'target': target.tree_id,
+            'desired': desired,
+            'actual': (x, y, yaw),
+            'position_error': position_error,
+            'yaw_error': yaw_error,
+            'position_stddev': position_stddev,
+            'yaw_stddev': yaw_stddev,
+            'age': age,
+        }
+        if age > self._localization_max_age:
+            return 'stale', details
+        if (position_stddev > self._max_localization_position_stddev or
+                yaw_stddev > self._max_localization_yaw_stddev):
+            return 'uncertain', details
+        if (position_error > self._max_docking_position_error or
+                yaw_error > self._max_docking_yaw_error):
+            return 'outside_tolerance', details
+        return 'ok', details
+
+    def _log_docking_quality(self, status, details):
+        if status == getattr(self, '_last_docking_log_state', None):
+            return
+        self._last_docking_log_state = status
+        if details is None:
+            self.get_logger().warn(
+                '[DOCK] AMCL pose is unavailable; arm motion remains inhibited')
+            return
+        desired = details['desired']
+        actual = details['actual']
+        message = (
+            f"[DOCK] target={details['target']} status={status} "
+            f"desired=({desired[0]:.3f},{desired[1]:.3f},{desired[2]:.3f}) "
+            f"actual=({actual[0]:.3f},{actual[1]:.3f},{actual[2]:.3f}) "
+            f"position_error={details['position_error']:.3f}m "
+            f"yaw_error={details['yaw_error']:.3f}rad "
+            f"position_stddev={details['position_stddev']:.3f}m "
+            f"yaw_stddev={details['yaw_stddev']:.3f}rad "
+            f"age={details['age']:.2f}s "
+            f"attempt={self._docking_retry_count + 1}/"
+            f"{self._docking_retry_limit + 1}")
+        if status == 'ok':
+            self.get_logger().info(message)
+        else:
+            self.get_logger().warn(message)
+
+    def _verify_docking_quality(self, now):
+        """Return true only after stop, AMCL quality and docking error pass."""
+        status, details = self._docking_quality(now)
+        self._log_docking_quality(status, details)
+        if status == 'ok':
+            self._localization_recovery_started = None
+            return True
+        if status in {'unavailable', 'stale', 'uncertain'}:
+            if self._localization_recovery_started is None:
+                self._localization_recovery_started = now
+            elif (now - self._localization_recovery_started >=
+                  self._localization_recovery_timeout):
+                self._fail(
+                    f'docking localization did not recover: {status}')
+            return False
+        self._localization_recovery_started = None
+        if self._docking_retry_count < self._docking_retry_limit:
+            self._docking_retry_count += 1
+            self._stop_detector.stop()
+            if not self.core.retry_navigation():
+                self._fail('cannot retry docking from current mission state')
+                return False
+            self._last_docking_log_state = None
+            self.get_logger().warn(
+                f'[DOCK] retrying target={self.core.current_target.tree_id} '
+                f'attempt={self._docking_retry_count + 1}/'
+                f'{self._docking_retry_limit + 1}')
+            self._send_nav_goal()
+            return False
+        self._fail(
+            'docking pose remains outside tolerance after retry')
+        return False
+
+    def _on_autonomy_enabled(self, message):
+        """Cache the latched hardware/operator autonomy permission."""
+        self._autonomy_enabled = bool(message.data)
 
     def _send_spray_goal(self):
         """构建并发送机械臂 Action 目标。"""
@@ -546,6 +831,8 @@ class MissionManager(Node):
         self._publish_status()
 
     def _tree_hint(self, target):
+        if target.tree_hint_override is not None:
+            return target.tree_hint_override
         if target.docking_pose_override is None:
             return target.x, target.y, target.z
         return manual_tree_hint(
@@ -660,7 +947,10 @@ class MissionManager(Node):
         3. 停稳检测的状态转换。
         4. 机械臂反馈进度的卡死检查 (progress_timeout)。
         """
-        if self.core.state == MissionState.READY and self._auto_start and self._servers_ready():
+        if (self.core.state == MissionState.READY and self._auto_start and
+                self._servers_ready() and
+                (getattr(self, '_autonomy_enabled', False) or
+                 not getattr(self, '_require_autonomy', False))):
             self._begin_mission_navigation()
             return
         now = self._now()
@@ -677,10 +967,13 @@ class MissionManager(Node):
         elif self.core.state == MissionState.VERIFYING_STOP:
             status = self._stop_detector.status(now)
             if status == StopDetector.STABLE:
-                self._stop_detector.stop()
-                self.core.stop_verified()
-                self.get_logger().info('[STOP_CHECK] vehicle is stable')
-                self._send_spray_goal()
+                if (not getattr(self, '_require_docking_quality', False) or
+                        self._verify_docking_quality(now)):
+                    self._stop_detector.stop()
+                    self.core.stop_verified()
+                    self.get_logger().info(
+                        '[STOP_CHECK] vehicle is stable and docking quality passed')
+                    self._send_spray_goal()
             elif status in (StopDetector.STALE, StopDetector.TIMEOUT):
                 self._fail(f'odom stop verification failed: {status}')
         elif self.core.state == MissionState.ARM_SPRAYING and self._phase_started is not None:

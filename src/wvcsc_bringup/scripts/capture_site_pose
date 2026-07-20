@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Capture a stable AMCL docking pose and measured tree offset into YAML."""
+
+import argparse
+import math
+from pathlib import Path
+import sys
+import time
+
+from geometry_msgs.msg import PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry
+import rclpy
+from rclpy.node import Node
+from rclpy.utilities import remove_ros_args
+from tf2_ros import Buffer, TransformException, TransformListener
+
+from wvcsc_bringup.site_mission import (
+    atomic_write_site,
+    load_site_document,
+    map_hashes,
+    new_site_document,
+    pose_sample_statistics,
+    tree_hint_from_offset,
+    validate_site_document,
+)
+
+
+class SitePoseCapture(Node):
+    def __init__(self):
+        super().__init__('wvcsc_site_pose_capture')
+        self._odom = None
+        self._amcl = None
+        self._stable_since = None
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+        self.create_subscription(Odometry, '/ekf_odom', self._on_odom, 20)
+        self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self._on_amcl, 10)
+
+    @staticmethod
+    def _yaw(quaternion):
+        norm = math.sqrt(sum(value * value for value in (
+            quaternion.x, quaternion.y, quaternion.z, quaternion.w)))
+        if not math.isfinite(norm) or norm < 1e-6:
+            raise ValueError('TF quaternion is invalid')
+        x, y, z, w = (
+            quaternion.x / norm, quaternion.y / norm,
+            quaternion.z / norm, quaternion.w / norm)
+        return math.atan2(
+            2.0 * (w * z + x * y),
+            1.0 - 2.0 * (y * y + z * z))
+
+    def _on_odom(self, message):
+        now = time.monotonic()
+        linear = math.hypot(
+            message.twist.twist.linear.x, message.twist.twist.linear.y)
+        angular = abs(message.twist.twist.angular.z)
+        self._odom = now, linear, angular
+        if linear <= 0.02 and angular <= 0.02:
+            if self._stable_since is None:
+                self._stable_since = now
+        else:
+            self._stable_since = None
+
+    def _on_amcl(self, message):
+        covariance = message.pose.covariance
+        try:
+            variances = (
+                float(covariance[0]), float(covariance[7]),
+                float(covariance[35]))
+        except (IndexError, TypeError, ValueError):
+            self._amcl = None
+            return
+        if not all(math.isfinite(value) and value >= 0.0 for value in variances):
+            self._amcl = None
+            return
+        self._amcl = (
+            time.monotonic(),
+            max(math.sqrt(variances[0]), math.sqrt(variances[1])),
+            math.sqrt(variances[2]),
+        )
+
+    def _inputs_ready(self, now):
+        if self._odom is None or now - self._odom[0] > 1.0:
+            return False
+        if self._amcl is None or now - self._amcl[0] > 1.0:
+            return False
+        return self._stable_since is not None and now - self._stable_since >= 1.0
+
+    def capture(self, timeout_sec=30.0):
+        deadline = time.monotonic() + timeout_sec
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            if self._inputs_ready(time.monotonic()):
+                break
+        else:
+            raise RuntimeError(
+                'timed out waiting for fresh AMCL, EKF odometry and 1 s stop')
+
+        samples = []
+        position_stddevs = []
+        yaw_stddevs = []
+        next_sample = time.monotonic()
+        sample_deadline = next_sample + 4.0
+        while rclpy.ok() and len(samples) < 30 and time.monotonic() < sample_deadline:
+            rclpy.spin_once(self, timeout_sec=0.02)
+            now = time.monotonic()
+            if now < next_sample:
+                continue
+            if not self._inputs_ready(now):
+                raise RuntimeError('vehicle or localization became unstable during capture')
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    'map', 'base_footprint', rclpy.time.Time())
+            except TransformException as error:
+                raise RuntimeError(
+                    f'map -> base_footprint TF unavailable: {error}') from error
+            translation = transform.transform.translation
+            yaw = self._yaw(transform.transform.rotation)
+            samples.append((translation.x, translation.y, yaw))
+            position_stddevs.append(self._amcl[1])
+            yaw_stddevs.append(self._amcl[2])
+            next_sample += 0.1
+        if len(samples) < 30:
+            raise RuntimeError(f'only captured {len(samples)}/30 valid samples')
+        x, y, yaw, position_spread, yaw_spread = pose_sample_statistics(samples)
+        quality = {
+            'samples': len(samples),
+            'position_spread_m': float(position_spread),
+            'yaw_spread_rad': float(yaw_spread),
+            'max_position_stddev_m': float(max(position_stddevs)),
+            'max_yaw_stddev_rad': float(max(yaw_stddevs)),
+        }
+        if position_spread > 0.03:
+            raise RuntimeError(
+                f'position spread {position_spread:.3f} m exceeds 0.03 m')
+        if yaw_spread > 0.03:
+            raise RuntimeError(
+                f'yaw spread {yaw_spread:.3f} rad exceeds 0.03 rad')
+        if quality['max_position_stddev_m'] > 0.08:
+            raise RuntimeError('AMCL position standard deviation exceeds 0.08 m')
+        if quality['max_yaw_stddev_rad'] > 0.08:
+            raise RuntimeError('AMCL yaw standard deviation exceeds 0.08 rad')
+        return (x, y, yaw), quality
+
+
+def _arguments(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--file', default='~/.ros/wvcsc_sites/corn_site.yaml')
+    parser.add_argument('--map', required=True)
+    operation = parser.add_mutually_exclusive_group(required=True)
+    operation.add_argument('--capture-home', action='store_true')
+    operation.add_argument('--target-id')
+    parser.add_argument('--tree-forward-m', type=float)
+    parser.add_argument('--tree-left-m', type=float)
+    parser.add_argument('--spray-duration', type=float, default=5.0)
+    parser.add_argument('--site-id', default='corn_site')
+    parser.add_argument('--mission-id', default='corn_measured_001')
+    parser.add_argument('--timeout-sec', type=float, default=30.0)
+    parser.add_argument('--update', action='store_true')
+    return parser.parse_args(argv)
+
+
+def _document(args):
+    path = Path(args.file).expanduser()
+    if path.exists():
+        document = load_site_document(path)
+        if document.get('map') != map_hashes(args.map):
+            raise ValueError('existing site file is bound to a different map')
+        return document
+    return new_site_document(args.site_id, args.mission_id, args.map)
+
+
+def main():
+    argv = remove_ros_args(args=sys.argv)[1:]
+    if argv and argv[0] == '--':
+        argv = argv[1:]
+    args = _arguments(argv)
+    if not math.isfinite(args.timeout_sec) or args.timeout_sec <= 0.0:
+        raise SystemExit('--timeout-sec must be finite and positive')
+    if args.target_id and (
+            args.tree_forward_m is None or args.tree_left_m is None):
+        raise SystemExit('target capture requires --tree-forward-m and --tree-left-m')
+
+    rclpy.init(args=sys.argv)
+    node = SitePoseCapture()
+    try:
+        pose, quality = node.capture(args.timeout_sec)
+        document = _document(args)
+        mission = document['mission']
+        pose_mapping = {'x': pose[0], 'y': pose[1], 'yaw': pose[2]}
+        if args.capture_home:
+            mission['home_pose'] = pose_mapping
+            mission['home_capture_quality'] = quality
+        else:
+            target_id = str(args.target_id).strip()
+            if not target_id:
+                raise ValueError('target_id must be non-empty')
+            targets = mission.setdefault('targets', [])
+            existing = next(
+                (item for item in targets if item.get('target_id') == target_id),
+                None)
+            if existing is not None and not args.update:
+                raise ValueError(
+                    f'{target_id} already exists; pass --update to replace it')
+            hint = tree_hint_from_offset(
+                pose, args.tree_forward_m, args.tree_left_m, 0.0)
+            target = {
+                'target_id': target_id,
+                'docking_pose': pose_mapping,
+                'tree_hint': {'x': hint[0], 'y': hint[1], 'z': hint[2]},
+                'measured_tree_offset': {
+                    'forward_m': float(args.tree_forward_m),
+                    'left_m': float(args.tree_left_m),
+                },
+                'spray_side': 'left' if args.tree_left_m > 0.0 else 'right',
+                'spray_duration': float(args.spray_duration),
+                'capture_quality': quality,
+            }
+            if existing is None:
+                targets.append(target)
+            else:
+                targets[targets.index(existing)] = target
+            validate_site_document(document, args.map)
+        atomic_write_site(args.file, document, backup=Path(args.file).expanduser().exists())
+        node.get_logger().info(
+            f'[SITE] captured {"HOME" if args.capture_home else args.target_id} '
+            f'pose=({pose[0]:.3f},{pose[1]:.3f},{pose[2]:.3f}) '
+            f'file={Path(args.file).expanduser()}')
+        return 0
+    except (RuntimeError, ValueError) as error:
+        node.get_logger().error(f'[SITE] capture rejected: {error}')
+        return 1
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

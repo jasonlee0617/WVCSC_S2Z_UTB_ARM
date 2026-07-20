@@ -1,0 +1,27 @@
+# Copy mutable measured missions to ~/.ros/wvcsc_sites/.  Empty hashes and
+# zero-valued placeholder poses intentionally fail validation until captured.
+schema_version: 1
+site_id: corn_site
+
+map:
+  frame_id: map
+  yaml_sha256: ""
+  image_sha256: ""
+
+mission:
+  mission_id: corn_measured_001
+  return_home_after_finish: false
+  home_pose: {x: 0.0, y: 0.0, yaw: 0.0}
+  targets:
+    - target_id: corn_01
+      docking_pose: {x: 0.0, y: 0.0, yaw: 0.0}
+      tree_hint: {x: 0.0, y: 0.0, z: 0.0}
+      measured_tree_offset: {forward_m: 0.0, left_m: 0.0}
+      spray_side: left
+      spray_duration: 5.0
+      capture_quality:
+        samples: 0
+        position_spread_m: 0.0
+        yaw_spread_rad: 0.0
+        max_position_stddev_m: 0.0
+        max_yaw_stddev_rad: 0.0

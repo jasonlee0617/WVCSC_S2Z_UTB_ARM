@@ -294,7 +294,11 @@ class AliciaMoveIt:
 
     def _allowed(self, epoch, allow_locked):
         """判断当前状态是否允许执行运动指令（安全锁与版本号双重检查）。"""
-        return (allow_locked or not self.state.locked) and epoch == self._epoch()
+        return (
+            not self.state.hard_stopped
+            and (allow_locked or not self.state.locked)
+            and epoch == self._epoch()
+        )
 
     def _plan(self, timeout=None, **kwargs):
         """底层的 MoveIt2 规划发起与同步提取。"""

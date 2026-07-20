@@ -147,6 +147,8 @@ def _manual_request(frame='map', x=3.0, count=1):
         docking_pose=_pose(x + index, 0.5, yaw=0.2 + index),
         spray_side='left',
         spray_duration=2.0,
+        tree_hint=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        use_explicit_tree_hint=False,
     ) for index in range(count)]
     return SimpleNamespace(
         header=SimpleNamespace(frame_id=frame),
@@ -375,6 +377,80 @@ def test_manual_targets_preserve_selected_pose_and_validate_input():
         except ValueError:
             continue
         raise AssertionError('invalid manual mission was accepted')
+
+
+def test_manual_target_can_supply_explicit_measured_tree_hint():
+    validator = _Validator()
+    request = _manual_request()
+    request.targets[0].tree_hint = SimpleNamespace(x=3.2, y=1.7, z=0.0)
+    request.targets[0].use_explicit_tree_hint = True
+
+    targets, _home = MissionManager._validate_manual_request(validator, request)
+
+    assert targets[0].tree_hint_override == (3.2, 1.7, 0.0)
+    assert targets[0].docking_pose_override[:2] == (3.0, 0.5)
+    assert targets[0].evidence_uri == 'manual://measured'
+    assert MissionManager._tree_hint(validator, targets[0]) == (3.2, 1.7, 0.0)
+
+
+def _docking_harness(actual, *, state=MissionState.VERIFYING_STOP):
+    harness = _Harness(state)
+    harness._road_center_y = 0.0
+    harness._road_yaw = 0.0
+    harness._docking_lateral_offset = 0.2
+    harness._localization_max_age = 1.0
+    harness._max_localization_position_stddev = 0.12
+    harness._max_localization_yaw_stddev = 0.12
+    harness._max_docking_position_error = 0.12
+    harness._max_docking_yaw_error = 0.12
+    harness._localization_recovery_timeout = 5.0
+    harness._localization_recovery_started = None
+    harness._docking_retry_limit = 1
+    harness._docking_retry_count = 0
+    harness._docking_retry_target_index = 0
+    harness._last_docking_log_state = None
+    harness._localization_pose = actual
+    harness._docking_quality = MissionManager._docking_quality.__get__(
+        harness, _Harness)
+    harness._log_docking_quality = MissionManager._log_docking_quality.__get__(
+        harness, _Harness)
+    harness._verify_docking_quality = (
+        MissionManager._verify_docking_quality.__get__(harness, _Harness))
+    harness._angle_error = MissionManager._angle_error
+    return harness
+
+
+def test_docking_quality_gate_passes_only_fresh_precise_localization():
+    harness = _docking_harness((5.8, 3.03, 0.22, 0.04, 0.05, 0.05))
+    # _Harness._now() is 6.0 and the automatic left docking pose is (3, 0.2, 0).
+    harness._localization_pose = (5.8, 3.03, 0.22, 0.04, 0.05, 0.05)
+    status, details = MissionManager._docking_quality(harness, 6.0)
+    assert status == 'ok'
+    assert details['position_error'] < 0.12
+
+    harness._localization_pose = (4.0, 3.03, 0.22, 0.04, 0.05, 0.05)
+    assert MissionManager._docking_quality(harness, 6.0)[0] == 'stale'
+    harness._localization_pose = (5.8, 3.03, 0.22, 0.04, 0.20, 0.05)
+    assert MissionManager._docking_quality(harness, 6.0)[0] == 'uncertain'
+
+
+def test_outside_docking_tolerance_retries_once_without_spraying():
+    harness = _docking_harness((5.8, 3.4, 0.2, 0.0, 0.05, 0.05))
+    harness.nav_sent = 0
+    harness._send_nav_goal = lambda: setattr(harness, 'nav_sent', harness.nav_sent + 1)
+
+    assert not MissionManager._verify_docking_quality(harness, 6.0)
+    assert harness.core.state == MissionState.NAVIGATING
+    assert harness.core.current_index == 0
+    assert harness._docking_retry_count == 1
+    assert harness.nav_sent == 1
+
+    harness.core.nav_succeeded()
+    harness._localization_pose = (6.1, 3.4, 0.2, 0.0, 0.05, 0.05)
+    assert not MissionManager._verify_docking_quality(harness, 6.2)
+    assert harness.core.state == MissionState.FAILED
+    assert harness.failures == [
+        'docking pose remains outside tolerance after retry']
 
 
 def test_start_rejects_when_action_servers_are_absent():

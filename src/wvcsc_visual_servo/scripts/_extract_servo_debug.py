@@ -18,7 +18,6 @@ def _db3_files(bag_dir):
 def _messages(db3_paths, topic):
     """Yield (timestamp_ns, topic_name, data_bytes) tuples using sqlite3."""
     import sqlite3
-    import struct
 
     for db3 in db3_paths:
         conn = sqlite3.connect(f'file:{db3}?mode=ro', uri=True)

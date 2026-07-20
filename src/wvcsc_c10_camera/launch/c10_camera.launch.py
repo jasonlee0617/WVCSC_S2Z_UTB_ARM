@@ -36,7 +36,10 @@ def generate_launch_description():
         executable='usb_cam_node_exe',
         name='c10_driver',                   # 节点名称
         namespace='/camera/color',    # 添加命名空间，生成的话题会是 /camera/color/image_raw
-        parameters=[config, {'video_device': device}], # 合并 YAML 配置与动态传入的设备路径
+        parameters=[config, {
+            'video_device': device,
+            'camera_info_url': LaunchConfiguration('camera_info_url'),
+        }], # 合并 YAML 配置与动态传入的设备路径
         output='screen',                     # 将驱动日志输出到终端屏幕
         respawn=True,                        # 【核心设计】如果因物理接触导致 USB 掉线，驱动节点崩溃，
                                              # ROS 会尝试自动重启该节点。
@@ -64,6 +67,14 @@ def generate_launch_description():
             'video_device',
             default_value='/dev/v4l/by-id/usb-Synria_C10-video-index0',
             description='Use the real persistent /dev/v4l/by-id path.'),
+        DeclareLaunchArgument(
+            'camera_info_url',
+            default_value=(
+                'package://wvcsc_c10_camera/config/'
+                'c10_reference_calibration.yaml'),
+            description=(
+                'CameraInfo URL. After calibration pass '
+                'file://$HOME/.ros/camera_info/c10.yaml explicitly.')),
         camera,
         watchdog,
     ])

@@ -37,8 +37,6 @@ from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithP
 from wvcsc_interfaces.msg import MissionStatus, Target2D
 
 from .model_utils import (
-    FRUIT_CLASS_NAMES,
-    TREE_CLASS_NAMES,
     canonical_class_name,
     resolve_yolo_model_path,
     validate_yolo_model,
@@ -304,13 +302,14 @@ def track_matches(instances, tracks, iou_threshold, center_distance_px):
 
 def reassociation_candidate(
         reference, instances, iou_threshold, center_distance_px,
-        iou_margin, distance_margin_px, equivalent_aim_distance_px):
+        iou_margin, distance_margin_px, equivalent_aim_distance_px,
+        target_class_name='diseased_fruit'):
     """
     当感知层 ID 漂移时，为选中的逻辑目标寻找物理层面的重关联候选。
     """
     scored = []
     for instance in instances:
-        if instance.class_name != 'diseased_fruit':
+        if instance.class_name != target_class_name:
             continue
         iou = instance.iou(reference)
         distance = instance.distance_to(reference)
@@ -444,6 +443,19 @@ class TwoStageYolo(Node):
     def __init__(self):
         super().__init__('wvcsc_two_stage_yolo')
         self._declare_parameters()
+        self._tree_class_names = {
+            int(self.get_parameter('tree_class_id').value):
+            str(self.get_parameter('tree_class_name').value).strip()}
+        self._target_class_name = str(
+            self.get_parameter('target_class_name').value).strip()
+        self._target_class_names = {
+            int(self.get_parameter('target_class_id').value):
+            self._target_class_name}
+        self._target_id_prefix = str(
+            self.get_parameter('target_id_prefix').value).strip()
+        if (not self._target_class_name or not self._target_id_prefix or
+                min(self._tree_class_names) < 0 or min(self._target_class_names) < 0):
+            raise ValueError('YOLO class names/prefix must be non-empty and IDs non-negative')
         self._bridge = CvBridge()
         self._mission_id = ''
         self._tree_id = ''
@@ -487,6 +499,22 @@ class TwoStageYolo(Node):
         self._perception_debug_pub = self.create_publisher(
             String, str(self.get_parameter('perception_debug_topic').value), 10)
 
+    @property
+    def _configured_target_name(self):
+        """Return the configured target class, including legacy test defaults."""
+        return getattr(self, '_target_class_name', 'diseased_fruit')
+
+    @property
+    def _configured_target_names(self):
+        """Return the class-id contract used by the segmentation model."""
+        return getattr(
+            self, '_target_class_names', {1: self._configured_target_name})
+
+    @property
+    def _configured_target_prefix(self):
+        """Return the configured logical target prefix."""
+        return getattr(self, '_target_id_prefix', 'fruit')
+
     def _declare_parameters(self):
         """声明并加载配置参数，与 `vision_sim.yaml` 对应。"""
         values = {
@@ -499,8 +527,15 @@ class TwoStageYolo(Node):
             'fruit_visualization_topic': '/vision/fruit_debug_image',
             'perception_debug_topic': '/vision/perception_debug',
             'perception_debug_rate_hz': 5.0,
-            'tree_model_path': 'wvcsc_tree_yolov8s.pt',
-            'fruit_model_path': 'wvcsc_fruit_yolov8s_seg.pt',
+            'tree_model_path': 'yolov8s_sim.pt',
+            'fruit_model_path': 'yolov8s_seg_sim.pt',
+            'profile': 'simulation_fruit',
+            'tree_class_id': 0,
+            'tree_class_name': 'tree',
+            'target_class_id': 1,
+            'target_class_name': 'diseased_fruit',
+            'target_id_prefix': 'fruit',
+            'strict_model_classes': False,
             'inference_mode_topic': '/vision/inference_mode',
             'tree_confidence': 0.10,
             'fruit_confidence': 0.10,
@@ -545,8 +580,11 @@ class TwoStageYolo(Node):
             raise FileNotFoundError(f'YOLO weight files are missing: {missing}')
         tree_model = YOLO(tree_path)
         fruit_model = YOLO(fruit_path)
-        validate_yolo_model(tree_model, 'detect', TREE_CLASS_NAMES)
-        validate_yolo_model(fruit_model, 'segment', FRUIT_CLASS_NAMES)
+        strict = bool(self.get_parameter('strict_model_classes').value)
+        validate_yolo_model(
+            tree_model, 'detect', self._tree_class_names, exact_names=strict)
+        validate_yolo_model(
+            fruit_model, 'segment', self._target_class_names, exact_names=strict)
         return tree_model, fruit_model
 
     def _on_status(self, message):
@@ -617,8 +655,8 @@ class TwoStageYolo(Node):
         elif tree is None:
             invalid_reason = 'no_tree'
         elif self._inference_mode == 'fruits' and not any(
-                item.class_name == 'diseased_fruit' for item in fruits):
-            invalid_reason = 'no_diseased_fruit'
+                item.class_name == self._configured_target_name for item in fruits):
+            invalid_reason = f'no_{self._configured_target_name}'
         self._publish_perception_debug(
             message, tree, fruits, target, invalid_reason, event)
 
@@ -630,7 +668,7 @@ class TwoStageYolo(Node):
         """
         result = self._tree_model(
             image, verbose=False, conf=float(self.get_parameter('tree_confidence').value))[0]
-        instances = self._box_instances(result, TREE_CLASS_NAMES)
+        instances = self._box_instances(result, self._tree_class_names)
         if not instances:
             return None
         height, width = image.shape[:2]
@@ -661,7 +699,7 @@ class TwoStageYolo(Node):
             conf=float(self.get_parameter('fruit_confidence').value),
             iou=0.45)[0]
         return deduplicate_instances(
-            self._seg_instances(result, x0, y0, FRUIT_CLASS_NAMES))
+            self._seg_instances(result, x0, y0, self._configured_target_names))
 
     @staticmethod
     def _box_instances(result, class_names):
@@ -719,7 +757,7 @@ class TwoStageYolo(Node):
             if index in matches:
                 target_id = self._tracks[matches[index]].instance.target_id
             else:
-                target_id = f'fruit-{self._next_target_number}'
+                target_id = f'{self._configured_target_prefix}-{self._next_target_number}'
                 self._next_target_number += 1
             assigned.append(Instance(target_id, instance.class_name, instance.confidence,
                                      instance.left, instance.top, instance.right,
@@ -781,7 +819,7 @@ class TwoStageYolo(Node):
         if reference is None:
             target = next((item for item in instances
                            if item.target_id == self._selected_target_id
-                           and item.class_name == 'diseased_fruit'), None)
+                           and item.class_name == self._configured_target_name), None)
             if target is None:
                 return None, 'selected_id_missing', 'target_invalid'
             self._selected_target_reference = target
@@ -790,7 +828,7 @@ class TwoStageYolo(Node):
             'target_reassociation_distance_px').value)
         exact = next((item for item in instances
                       if item.target_id == self._selected_target_id and
-                      item.class_name == 'diseased_fruit' and
+                      item.class_name == self._configured_target_name and
                       (item.iou(reference) >= float(self.get_parameter(
                           'track_iou_threshold').value) or
                        item.distance_to(reference) <= reassociation_distance)),
@@ -811,6 +849,7 @@ class TwoStageYolo(Node):
                 'target_reassociation_distance_margin_px').value),
             float(self.get_parameter(
                 'target_equivalent_aim_distance_px').value),
+            self._configured_target_name,
         )
         if target is not None:
             target = smoothed_target(
@@ -899,7 +938,7 @@ class TwoStageYolo(Node):
         message.target_id = self._selected_target_id
         message.image_width = image.width
         message.image_height = image.height
-        if target is not None and target.class_name == 'diseased_fruit':
+        if target is not None and target.class_name == self._configured_target_name:
             message.valid = True
             message.confidence = target.confidence
             message.center_u = target.aim_u
@@ -956,7 +995,7 @@ class TwoStageYolo(Node):
                 round(tree.left), round(tree.top), round(tree.right), round(tree.bottom)],
             fruit_count=len(fruits),
             diseased_count=sum(
-                item.class_name == 'diseased_fruit' for item in fruits),
+                item.class_name == self._configured_target_name for item in fruits),
             active_track_ids=sorted(
                 track.instance.target_id for track in self._tracks),
             selected_target_id=self._selected_target_id,
@@ -978,7 +1017,7 @@ class TwoStageYolo(Node):
     @staticmethod
     def _annotated_image(
             image, instances, *, draw_diseased_aim_point=False,
-            selected_target_id=''):
+            selected_target_id='', target_class_name='diseased_fruit'):
         annotated = image.copy()
         for instance in instances:
             selected = bool(
@@ -986,7 +1025,6 @@ class TwoStageYolo(Node):
                 instance.target_id == selected_target_id)
             color = ((255, 255, 0) if selected else
                      (0, 255, 0) if instance.class_name == 'tree' else
-                     (0, 0, 255) if instance.class_name == 'healthy_fruit' else
                      (0, 255, 255))
             thickness = 4 if selected else 2
             left, top = round(instance.left), round(instance.top)
@@ -996,7 +1034,8 @@ class TwoStageYolo(Node):
             cv2.putText(annotated, TwoStageYolo._label(instance),
                         (left, max(16, top - 5)), cv2.FONT_HERSHEY_SIMPLEX,
                         0.45, color, 1, cv2.LINE_AA)
-            if draw_diseased_aim_point and instance.class_name == 'diseased_fruit':
+            if (draw_diseased_aim_point and
+                    instance.class_name == target_class_name):
                 cv2.circle(annotated, (round(instance.aim_u), round(instance.aim_v)),
                            5 if selected else 3, color, -1)
         return annotated
@@ -1016,7 +1055,8 @@ class TwoStageYolo(Node):
             self._fruit_visualization_pub, image_message,
             self._annotated_image(
                 image, fruits, draw_diseased_aim_point=True,
-                selected_target_id=self._selected_target_id))
+                selected_target_id=self._selected_target_id,
+                target_class_name=self._configured_target_name))
 
 
 def main():

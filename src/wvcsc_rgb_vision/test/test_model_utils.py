@@ -28,7 +28,7 @@ from wvcsc_rgb_vision.two_stage_yolo import (
 
 def test_two_models_keep_independent_class_contracts():
     assert TREE_CLASS_NAMES == {0: 'tree'}
-    assert FRUIT_CLASS_NAMES == {0: 'healthy_fruit', 1: 'diseased_fruit'}
+    assert FRUIT_CLASS_NAMES == {1: 'diseased_fruit'}
     assert canonical_class_name(0, TREE_CLASS_NAMES) == 'tree'
     assert canonical_class_name(1, FRUIT_CLASS_NAMES) == 'diseased_fruit'
 
@@ -36,12 +36,24 @@ def test_two_models_keep_independent_class_contracts():
 def test_deployment_weight_must_match_task_and_classes():
     model = type('Model', (), {
         'task': 'segment',
-        'names': {0: 'healthy_fruit', 1: 'diseased_fruit'},
+        'names': {1: 'diseased_fruit'},
     })()
     validate_yolo_model(model, 'segment', FRUIT_CLASS_NAMES)
     model.names[1] = 'wrong_class'
     with pytest.raises(ValueError, match='contract mismatch'):
         validate_yolo_model(model, 'segment', FRUIT_CLASS_NAMES)
+
+
+def test_real_deployment_rejects_additional_model_classes():
+    model = type('Model', (), {
+        'task': 'segment',
+        'names': {0: 'disease_leaf', 1: 'healthy_leaf'},
+    })()
+
+    validate_yolo_model(model, 'segment', {0: 'disease_leaf'})
+    with pytest.raises(ValueError, match='contract mismatch'):
+        validate_yolo_model(
+            model, 'segment', {0: 'disease_leaf'}, exact_names=True)
 
 
 def test_fruit_tracks_survive_a_short_detector_dropout():

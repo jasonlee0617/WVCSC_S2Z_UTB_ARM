@@ -1,0 +1,21 @@
+wvcsc_safety_gate:
+  ros__parameters:
+    nav_cmd_topic: /cmd_vel_nav
+    base_cmd_topic: /cmd_vel
+    odom_topic: /ekf_odom
+    scan_topic: /scan
+    imu_topic: /imu
+    command_timeout_sec: 0.30
+    odom_timeout_sec: 0.50
+    scan_timeout_sec: 1.00
+    imu_timeout_sec: 1.00
+    publish_rate_hz: 20.0
+    linear_stop_threshold: 0.03
+    angular_stop_threshold: 0.03
+    stable_duration_sec: 1.0
+    reset_timeout_sec: 90.0
+    require_scan: true
+    require_imu: true
+    require_camera: true
+    camera_health_topic: /camera/healthy
+    camera_health_timeout_sec: 2.0

@@ -59,6 +59,15 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             self.get_parameter('downstream_result_margin_sec').value)
         self._camera_frame = str(self.get_parameter('camera_frame').value)
         self._base_frame = str(self.get_parameter('base_frame').value)
+        self._spray_working_distance = float(
+            self.get_parameter('spray_working_distance_m').value)
+        self._spray_working_distance_tolerance = float(
+            self.get_parameter('spray_working_distance_tolerance_m').value)
+        if (not math.isfinite(self._spray_working_distance)
+                or not math.isfinite(self._spray_working_distance_tolerance)
+                or self._spray_working_distance <= 0.0
+                or self._spray_working_distance_tolerance <= 0.0):
+            raise ValueError('spray working-distance parameters are invalid')
         self._observation_config = self._observation_parameters()
         self._recenter_config = self._target_recenter_parameters()
 
@@ -193,6 +202,10 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'motion_locked_topic': '/motion_control/locked',
             'tree_confidence': 0.10,
             'fruit_confidence': 0.20,
+            # 兼容话题仍名为 fruit；该参数区分仿真病果与实机病斑叶。
+            'target_class_name': 'diseased_fruit',
+            'spray_working_distance_m': 1.0,
+            'spray_working_distance_tolerance_m': 0.05,
             'confirmation_frames': 3,                # 连续 3 帧锁定目标，过滤单帧误检
             # 真实场景下 YOLO 检测有延迟，5秒超时确保足够的容错空间
             'scan_pose_detection_timeout_sec': 5.0,
@@ -248,12 +261,25 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         }
         for name, default in parameters.items():
             self.declare_parameter(name, default)
+        if not str(self.get_parameter('target_class_name').value).strip():
+            raise ValueError('target_class_name must be non-empty')
 
     def _joint_parameter(self, name):
         values = [float(value) for value in self.get_parameter(name).value]
         if len(values) != 6 or not all(math.isfinite(value) for value in values):
             raise ValueError(f'{name} must contain six finite joint positions')
         return values
+
+    def _working_distance_ready(self):
+        """Fail closed unless the selected observation is inside the spray band."""
+        return (
+            self._observation_distance is not None
+            and math.isfinite(float(self._observation_distance))
+            and abs(
+                float(self._observation_distance)
+                - self._spray_working_distance
+            ) <= self._spray_working_distance_tolerance
+        )
 
     def _observation_parameters(self):
         """解析观察位姿生成的网格参数与运动学安全阈值"""
@@ -668,6 +694,13 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
 
             attempt.count += 1
             alignment_attempts += 1
+            if not self._working_distance_ready():
+                return self._alignment_recovery_failure(
+                    'spray working distance is outside '
+                    f'{self._spray_working_distance:.2f}±'
+                    f'{self._spray_working_distance_tolerance:.2f} m; '
+                    f'actual={self._observation_distance}',
+                    cancel_requested)
             feedback(ExecuteSpray.Feedback.ALIGNING, 0.45, 'ALIGNING')
             self.get_logger().info(
                 f'[ARM][ALIGN] ENTER_VISUAL_SERVO target={target.target_id} '
@@ -729,6 +762,11 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 continue
 
             # 阶段 6: SPRAYING (调用下游喷洒 Action)
+            if not self._working_distance_ready():
+                return self._recover_failure(
+                    ExecuteSpray.Result.SPRAY_FAILED,
+                    'working-distance verification failed after alignment; '
+                    'spray was inhibited', cancel_requested)
             self._set_inference_mode('idle')
             feedback(ExecuteSpray.Feedback.SPRAYING, 0.60, 'SPRAYING')
             self.get_logger().info(

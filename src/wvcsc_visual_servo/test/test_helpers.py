@@ -5,6 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from wvcsc_visual_servo.aim_compensation import (
+    AimSolution,
+    plane_error_mm,
+    project_nozzle_axis,
+)
 from wvcsc_visual_servo.servo.pid_controller import (
     PIDController2D,
     ServoControlConfig,
@@ -146,6 +151,50 @@ def test_angular_ibvs_matches_camera_optical_axes():
     # u-right -> camera yaw-right (+Y); v-down -> camera pitch-down (-X).
     assert node._command_components(0.030, -0.020) == pytest.approx(
         (0.0, 0.0, 0.020, 0.030))
+
+
+def test_nozzle_axis_projection_uses_camera_tf_and_pixel_trim():
+    solution = project_nozzle_axis(
+        translation=(0.010, -0.020, 0.050),
+        quaternion=(0.0, 0.0, 0.0, 1.0),
+        camera=(500.0, 500.0, 640.0, 360.0, 1280, 720),
+        range_m=1.0,
+        trim=(2.0, -3.0),
+        image_margin_px=20.0,
+    )
+    assert solution.u_px == pytest.approx(647.0)
+    assert solution.v_px == pytest.approx(347.0)
+    assert solution.intersection == pytest.approx((0.010, -0.020, 1.0))
+    assert plane_error_mm(1.0, -1.0, 500.0, 500.0, 1.0) == pytest.approx(
+        math.sqrt(8.0))
+
+
+def test_compensated_aim_scales_to_target_message_dimensions():
+    node = object.__new__(VisualServo)
+    node._config = SimpleNamespace(
+        aim_compensation_enabled=True,
+        desired_offset_u_px=0.0,
+        desired_offset_v_px=0.0)
+    node._camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
+    node._aim_solution = AimSolution(
+        u_px=640.0, v_px=388.0, range_m=1.0,
+        intersection=(0.0, 0.056, 1.0), forward_axis=(0.0, 0.0, 1.0))
+    assert node._desired_target_pixel(640, 360) == pytest.approx((320.0, 194.0))
+
+
+@pytest.mark.parametrize(
+    'translation,quaternion,error', [
+        ((0.0, 0.0, 1.1), (0.0, 0.0, 0.0, 1.0), 'behind'),
+        ((0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), 'does not face'),
+        ((2.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), 'outside'),
+    ])
+def test_nozzle_axis_projection_rejects_unsafe_geometry(
+        translation, quaternion, error):
+    with pytest.raises(ValueError, match=error):
+        project_nozzle_axis(
+            translation, quaternion,
+            (500.0, 500.0, 640.0, 360.0, 1280, 720),
+            1.0, image_margin_px=20.0)
 
 
 def test_linear_command_mode_remains_available_for_direct_callers():
@@ -314,6 +363,7 @@ def test_invalid_matching_target_briefly_holds_zero_without_erasing_lock():
     node._active_target = 'fruit-1'
     node._config = SimpleNamespace(
         min_confidence=0.40,
+        aim_compensation_enabled=False,
         invalid_target_hold_sec=0.25,
         desired_offset_u_px=0.0,
         desired_offset_v_px=0.0,
@@ -551,7 +601,8 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
     node = object.__new__(VisualServo)
     node._config = SimpleNamespace(
         default_timeout_sec=8.0, control_rate_hz=30.0,
-        stale_timeout_sec=0.75)
+        stale_timeout_sec=0.75,
+        aim_compensation_enabled=False)
     node._command_mode = 'linear_xy'
     node._lock = threading.Lock()
     node._camera = object()

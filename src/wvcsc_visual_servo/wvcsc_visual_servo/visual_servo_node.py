@@ -27,12 +27,15 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, JointState
 from std_msgs.msg import Int8, String
 from std_srvs.srv import Trigger
+from tf2_ros import Buffer, TransformException, TransformListener
 from wvcsc_interfaces.action import AlignTarget
 from wvcsc_interfaces.msg import Target2D
 
+from .aim_compensation import plane_error_mm, project_nozzle_axis
 from .servo.alignment_progress import AlignmentProgress
 from .servo.math_utils import (bounded_control_dt, limit_xy_norm, slew,
                                 SimpleTargetPredictor2D)
@@ -128,9 +131,16 @@ class VisualServo(Node):
         self._active_target = ''
         self._goal_state = _GoalState()
         self._camera = None
+        self._aim_solution = None
+        self._aim_error = ''
         self._servo_status = 0
         self._joint_positions = []
         self._command_mode = self._config.command_mode
+
+        # 喷嘴外参由 URDF/robot_state_publisher 提供。每个 Action Goal 开始前
+        # 使用最新 CameraInfo 和 TF 计算一次固定工距喷嘴投影；标定缺失时拒绝伺服。
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
 
         # 4. 主要 ROS 接口初始化
         self._twist = self.create_publisher(
@@ -203,7 +213,14 @@ class VisualServo(Node):
             'progress_window_sec': 4.0,
             'min_progress_px': 1.0,
             'desired_offset_u_px': 0.0,
-            'desired_offset_v_px': 28.0,
+            'desired_offset_v_px': 0.0,
+            'aim_compensation_enabled': True,
+            'aim_range_source': 'fixed',
+            'aim_fixed_range_m': 1.0,
+            'aim_range_tolerance_m': 0.05,
+            'aim_nozzle_frame': 'spray_nozzle_link',
+            'aim_min_forward_axis_z': 0.2,
+            'aim_image_margin_px': 20.0,
             'fallback_fx': 507.872735,
             'fallback_fy': 507.872735,
             'require_camera_info': True,
@@ -266,7 +283,9 @@ class VisualServo(Node):
         fy = float(message.k[4])
         if fx > 0.0 and fy > 0.0:
             with self._lock:
-                self._camera = (fx, fy, int(message.width), int(message.height))
+                self._camera = (
+                    fx, fy, float(message.k[2]), float(message.k[5]),
+                    int(message.width), int(message.height))
 
     def _on_target(self, message):
         """将严格匹配当前 Goal 的 Target2D 分派给持有或有效处理路径。"""
@@ -276,6 +295,9 @@ class VisualServo(Node):
             if not (message.mission_id == self._active_mission
                     and message.tree_id == self._active_tree
                     and message.target_id == self._active_target):
+                return
+            if (self._config.aim_compensation_enabled
+                    and self._aim_solution is None):
                 return
             now = self._now()
             if self._target_is_valid(message):
@@ -321,11 +343,10 @@ class VisualServo(Node):
         reacquired = self._goal_state.target_unavailable_since is not None
         self._goal_state.target_unavailable_since = None
         
-        # 1. 计算像素误差（期望位置：图像中心 + 28px V轴偏置）
-        desired_u = (
-            message.image_width / 2.0 + self._config.desired_offset_u_px)
-        desired_v = (
-            message.image_height / 2.0 + self._config.desired_offset_v_px)
+        # 1. 计算相对喷嘴投影点的像素误差。粗重心仍只负责把目标拉入
+        # Servo工作区；最终喷洒基准由喷嘴几何决定，不再硬编码28px偏移。
+        desired_u, desired_v = self._desired_target_pixel(
+            message.image_width, message.image_height)
         error_u = float(message.center_u) - desired_u
         error_v = float(message.center_v) - desired_v
         if self._goal_state.initial_error_px is None:
@@ -371,6 +392,87 @@ class VisualServo(Node):
             'hold': False,
         }
         self._goal_state.last_valid_target = dict(self._goal_state.latest)
+
+    def _desired_target_pixel(self, image_width, image_height):
+        """Return the per-goal aim pixel in the Target2D image dimensions."""
+        if not self._config.aim_compensation_enabled:
+            return (
+                float(image_width) / 2.0 + self._config.desired_offset_u_px,
+                float(image_height) / 2.0 + self._config.desired_offset_v_px,
+            )
+        solution = self._aim_solution
+        camera = self._camera
+        if solution is None or camera is None:
+            raise RuntimeError('nozzle aim compensation is not ready')
+        camera_width, camera_height = float(camera[4]), float(camera[5])
+        return (
+            solution.u_px * float(image_width) / camera_width,
+            solution.v_px * float(image_height) / camera_height,
+        )
+
+    def _prepare_aim_compensation(self):
+        """Resolve CameraInfo and camera->nozzle TF before starting Servo."""
+        if not self._config.aim_compensation_enabled:
+            self._aim_solution = None
+            self._aim_error = ''
+            return True, ''
+        deadline = time.monotonic() + float(
+            self.get_parameter('service_timeout_sec').value)
+        last_error = 'CameraInfo unavailable'
+        while rclpy.ok() and time.monotonic() < deadline:
+            with self._lock:
+                camera = self._camera
+            if camera is None:
+                time.sleep(0.02)
+                continue
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    str(self.get_parameter('command_frame').value),
+                    self._config.aim_nozzle_frame,
+                    Time(),
+                ).transform
+                solution = project_nozzle_axis(
+                    (
+                        transform.translation.x,
+                        transform.translation.y,
+                        transform.translation.z,
+                    ),
+                    (
+                        transform.rotation.x,
+                        transform.rotation.y,
+                        transform.rotation.z,
+                        transform.rotation.w,
+                    ),
+                    camera,
+                    self._config.aim_fixed_range_m,
+                    trim=(
+                        self._config.desired_offset_u_px,
+                        self._config.desired_offset_v_px,
+                    ),
+                    min_forward_axis_z=self._config.aim_min_forward_axis_z,
+                    image_margin_px=self._config.aim_image_margin_px,
+                )
+            except (TransformException, ValueError) as error:
+                last_error = str(error)
+                time.sleep(0.02)
+                continue
+            with self._lock:
+                self._aim_solution = solution
+                self._aim_error = ''
+            self.get_logger().info(
+                '[AIM] source=fixed '
+                f'range={solution.range_m:.3f}m '
+                f'nozzle_frame={self._config.aim_nozzle_frame}')
+            self.get_logger().info(
+                f'[AIM] target_pixel=({solution.u_px:.1f},'
+                f'{solution.v_px:.1f}) '
+                f'trim=({self._config.desired_offset_u_px:.1f},'
+                f'{self._config.desired_offset_v_px:.1f})')
+            return True, ''
+        with self._lock:
+            self._aim_solution = None
+            self._aim_error = last_error
+        return False, last_error
 
     def _on_joint_state(self, message):
         positions = dict(zip(message.name, message.position))
@@ -425,6 +527,8 @@ class VisualServo(Node):
             self._predictor.reset()
             self._controller.reset()
             self._progress.reset()
+            self._aim_solution = None
+            self._aim_error = ''
         servo_started = False
         stop_attempted = False
         stop_result = (True, '')
@@ -470,6 +574,13 @@ class VisualServo(Node):
 
         try:
             self._publish_debug('goal_started', force=True)
+            aim_ready, aim_message = self._prepare_aim_compensation()
+            if not aim_ready:
+                return self._abort(
+                    goal_handle, result,
+                    AlignTarget.Result.SERVO_SAFETY_STOP,
+                    f'nozzle aim compensation unavailable: {aim_message}')
+            self._publish_debug('aim_ready', force=True)
             ok, message = self._call_trigger(self._start_client)
             if not ok:
                 return self._abort(
@@ -588,6 +699,16 @@ class VisualServo(Node):
                         f'error_px=({latest["error_u"]:.2f},'
                         f'{latest["error_v"]:.2f}) '
                         f'stable_duration={stable_duration:.3f}s')
+                    if self._config.aim_compensation_enabled:
+                        fx, fy = self._camera[:2]
+                        metric_error = plane_error_mm(
+                            latest['error_u'], latest['error_v'], fx, fy,
+                            self._config.aim_fixed_range_m)
+                        self.get_logger().info(
+                            '[AIM] aligned '
+                            f'error_px=({latest["error_u"]:.1f},'
+                            f'{latest["error_v"]:.1f}) '
+                            f'estimated_plane_error_mm={metric_error:.1f}')
                     stopped, stop_message = stop_servo('target_aligned')
                     if not stopped:
                         return self._abort(
@@ -597,7 +718,9 @@ class VisualServo(Node):
                             latest)
                     result.success = True
                     result.error_code = AlignTarget.Result.OK
-                    result.message = 'target aligned; fixed spray distance preserved'
+                    result.message = (
+                        'target aligned to compensated nozzle aim; '
+                        'fixed spray distance preserved')
                     result.final_error_u = latest['error_u']
                     result.final_error_v = latest['error_v']
                     goal_handle.succeed()
@@ -924,6 +1047,15 @@ class VisualServo(Node):
             confidence = 0.0
         linear_x, linear_y, angular_x, angular_y = (
             self._command_components(*command))
+        aim = self._aim_solution
+        estimated_error = 0.0
+        if (aim is not None and latest is not None and latest.get('valid')
+                and self._camera is not None):
+            estimated_error = plane_error_mm(
+                latest.get('error_u', 0.0), latest.get('error_v', 0.0),
+                self._camera[0], self._camera[1], aim.range_m)
+            if not math.isfinite(estimated_error):
+                estimated_error = 0.0
         payload = debug_json(
             event=event,
             mission_id=self._active_mission,
@@ -931,6 +1063,13 @@ class VisualServo(Node):
             target_id=self._active_target,
             elapsed_sec=0.0 if started is None else max(0.0, now - started),
             camera_ready=self._camera is not None,
+            aim_compensation_enabled=self._config.aim_compensation_enabled,
+            aim_ready=(
+                aim is not None or not self._config.aim_compensation_enabled),
+            aim_range_m=(0.0 if aim is None else aim.range_m),
+            aim_u_px=(0.0 if aim is None else aim.u_px),
+            aim_v_px=(0.0 if aim is None else aim.v_px),
+            estimated_plane_error_mm=estimated_error,
             target_valid=bool(
                 latest is not None and latest.get(
                     'terminal_target_valid', latest.get('valid'))),

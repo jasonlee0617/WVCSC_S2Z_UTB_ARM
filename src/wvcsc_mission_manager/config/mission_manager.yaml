@@ -16,6 +16,9 @@ mission_manager:
   ros__parameters:
     # 是否在接收到任务列表后立即自动开始执行。
     auto_start: false
+    # 仿真默认不依赖实机拨杆；实机配置会覆盖为 true。
+    require_autonomy_enabled: false
+    autonomy_enabled_topic: /safety/autonomy_enabled
 
     # 机器人导航与任务使用的全局坐标系 (必须与 Nav2 和 Cartographer 一致)
     map_frame: map
@@ -39,6 +42,17 @@ mission_manager:
     manual_tree_standoff: 1.5
     # 手动模式下树根的 Z 轴高度。
     manual_tree_base_z: 0.0
+
+    # 实机逐树实测任务启用；仿真保持 false，避免依赖 AMCL。
+    require_docking_quality: false
+    localization_pose_topic: /amcl_pose
+    localization_max_age_sec: 1.0
+    max_localization_position_stddev_m: 0.12
+    max_localization_yaw_stddev_rad: 0.12
+    max_docking_position_error_m: 0.12
+    max_docking_yaw_error_rad: 0.12
+    docking_retry_limit: 1
+    localization_recovery_timeout_sec: 5.0
 
     # ----------------------------------------------------------------
     # 通讯超时控制

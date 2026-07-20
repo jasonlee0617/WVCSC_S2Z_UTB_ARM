@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>wvcsc_calibration</name>
+  <version>0.1.0</version>
+  <description>C10 intrinsic and Alicia-M eye-in-hand calibration integration.</description>
+  <maintainer email="robot@example.com">robot</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>easy_handeye2</exec_depend>
+  <exec_depend>easy_handeye2_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>ros2_aruco</exec_depend>
+  <exec_depend>ros2_aruco_interfaces</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>wvcsc_bringup</exec_depend>
+  <exec_depend>wvcsc_arm_task</exec_depend>
+  <exec_depend>wvcsc_c10_camera</exec_depend>
+  <test_depend>ament_pytest</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>
