@@ -1,27 +1,51 @@
+# mock_targets.yaml
+# ============================================================================
+# 无人机模拟任务数据配置文件 (Mock Mode)
+# ============================================================================
+#
+# 用途：
+# 1. 在仿真或比赛演示中，代替真实无人机生成任务列表。
+# 2. 定义小车需要导航的树坐标、喷药时长、置信度等信息。
+# 3. 不依赖真实视频或图像识别，确保任务管理器能直接进入 "READY" 状态。
+#
+
 mission:
+  # 任务唯一标识符。
   mission_id: orchard_demo_001
+
+  # 数据来源模式，必须为 mock、replay 或 live。
   source_mode: mock
+
+  # 任务中坐标所处的参考坐标系 (必须是 map，与 Nav2 和 Cartographer 一致)。
   frame_id: map
+
+  # 模拟数据注入的延迟时间（秒）。
+  # 给 Gazebo 仿真、Nav2 及任务管理器预留充分的启动和初始化时间。
   publish_delay_sec: 8.0
+
+  # 具体的病树目标列表。
   trees:
     - tree_id: tree_01
-      confidence: 0.96
-      position: {x: 3.0, y: 2.0, z: 0.0}
-      spray_side: left
-      spray_duration: 5.0
-      evidence_uri: mock://tree_01
+      confidence: 0.96               # YOLO 识别的置信度
+      position: {x: 3.0, y: 2.0, z: 0.0}  # 树在 map 坐标系下的位置
+      spray_side: left               # 树位于道路左侧 (小车需偏移停靠)
+      spray_duration: 5.0            # 喷洒时长 (秒)
+      evidence_uri: mock://tree_01   # 证据图像 URI (Mock 模式仅为占位符)
+
     - tree_id: tree_02
       confidence: 0.94
       position: {x: 7.0, y: 2.0, z: 0.0}
       spray_side: left
       spray_duration: 5.0
       evidence_uri: mock://tree_02
+
     - tree_id: tree_03
       confidence: 0.96
       position: {x: 11.0, y: 2.0, z: 0.0}
       spray_side: left
       spray_duration: 5.0
       evidence_uri: mock://tree_03
+
     - tree_id: tree_04
       confidence: 0.94
       position: {x: 15.0, y: 2.0, z: 0.0}

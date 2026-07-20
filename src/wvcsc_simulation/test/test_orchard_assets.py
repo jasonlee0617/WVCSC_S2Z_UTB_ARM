@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 import pytest
 import yaml
 
-from wvcsc_simulation.orchard_assets import (
+from wvcsc_simulation.data_acquisition.orchard_assets import (
     CAMERA_FACING_CANDIDATE_COUNT,
     EXPECTED_COMPLETE_FRUIT_COUNT,
     EXPECTED_LEAF_COMPONENT_COUNT,

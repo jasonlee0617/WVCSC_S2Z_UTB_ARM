@@ -1,7 +1,18 @@
+# nav2_sim.yaml
+# ============================================================================
+# Nav2 (Navigation2) 仿真环境参数配置文件
+# ============================================================================
+#
+# 本文件定义了 Gazebo 仿真中阿克曼小车导航所需的所有参数。
+# 针对阿克曼转向特性，采用了 SmacPlannerHybrid (Reeds-Shepp) 规划器
+# 和 MPPI (模型预测路径积分) 控制器，以满足在果园道路间的精确停靠需求。
+# 所有模块启用了 `use_sim_time: true` 以与 Gazebo 仿真时钟同步。
+#
+
 map_server:
   ros__parameters:
     use_sim_time: true
-    yaml_filename: ""
+    yaml_filename: ""            # 地图文件路径，在 Launch 中动态传入
 
 bt_navigator:
   ros__parameters:
@@ -9,9 +20,11 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_footprint
     odom_topic: /odom
+    # 行为树 XML 文件：设定为“到达新目标时重新规划”，保证目标动态更新时路径即时刷新
     default_nav_to_pose_bt_xml: /opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_w_replanning_only_if_goal_is_updated.xml
     bt_loop_duration: 10
     default_server_timeout: 20
+    # Nav2 行为树插件库注册列表 (确保所有用到的插件均已加载)
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
@@ -56,9 +69,9 @@ bt_navigator:
 controller_server:
   ros__parameters:
     use_sim_time: true
-    controller_frequency: 20.0
+    controller_frequency: 20.0       # 20 Hz 控制频率
     odom_topic: /odom
-    min_x_velocity_threshold: 0.001
+    min_x_velocity_threshold: 0.001  # 最小线速度检测死区
     min_y_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
     failure_tolerance: 0.3
@@ -72,26 +85,28 @@ controller_server:
     general_goal_checker:
       plugin: nav2_controller::SimpleGoalChecker
       stateful: false
-      xy_goal_tolerance: 0.10
-      yaw_goal_tolerance: 0.10
+      xy_goal_tolerance: 0.10   # 10 cm 位置公差
+      yaw_goal_tolerance: 0.10  # 0.1 rad (约 5.7度) 角度公差
+    # 【核心控制器】MPPI (Model Predictive Path Integral)
+    # 针对阿克曼底盘非常有效的局部规划器
     FollowPath:
       plugin: nav2_mppi_controller::MPPIController
       time_steps: 56
-      model_dt: 0.05
-      batch_size: 2000
+      model_dt: 0.05             # 50ms 的预测步长
+      batch_size: 2000           # 批处理采样数
       vx_std: 0.2
       vy_std: 0.2
       wz_std: 0.4
-      vx_max: 0.35
-      vx_min: -0.15
-      vy_max: 0.0
-      wz_max: 0.30
+      vx_max: 0.35               # 最大前进速度 0.35 m/s
+      vx_min: -0.15              # 倒车速度限制
+      vy_max: 0.0                # 阿克曼车不允许横向移动 (0.0)
+      wz_max: 0.30               # 最大角速度 0.30 rad/s
       iteration_count: 1
       prune_distance: 1.7
       transform_tolerance: 0.3
       temperature: 0.3
       gamma: 0.015
-      motion_model: Ackermann
+      motion_model: Ackermann    # 运动模型：阿克曼模型
       visualize: false
       retry_attempt_limit: 1
       reset_period: 1.0
@@ -100,8 +115,10 @@ controller_server:
       inversion_xy_tolerance: 0.2
       inversion_yaw_tolerance: 0.3
       max_robot_pose_search_dist: 10.0
+      # 阿克曼结构约束参数 (最小转弯半径 1.3m)
       AckermannConstraints:
         min_turning_r: 1.3
+      # MPPI 的各类 Critic (代价/奖励函数权重)
       critics:
         - ConstraintCritic
         - CostCritic
@@ -115,7 +132,7 @@ controller_server:
         enabled: true
         cost_power: 1
         cost_weight: 4.0
-      CostCritic:
+      CostCritic:                 # 避障代价 (权重很高)
         enabled: true
         cost_power: 1
         cost_weight: 3.81
@@ -123,17 +140,17 @@ controller_server:
         consider_footprint: true
         collision_cost: 1000000.0
         near_goal_distance: 1.0
-      GoalCritic:
+      GoalCritic:                 # 接近目标点的代价
         enabled: true
         cost_power: 1
         cost_weight: 5.0
         threshold_to_consider: 1.4
-      GoalAngleCritic:
+      GoalAngleCritic:            # 接近目标航向角的代价
         enabled: true
         cost_power: 1
         cost_weight: 3.0
         threshold_to_consider: 0.5
-      PathAlignCritic:
+      PathAlignCritic:            # 与参考路径对齐的代价 (极高权重)
         enabled: true
         cost_power: 1
         cost_weight: 14.0
@@ -142,13 +159,13 @@ controller_server:
         threshold_to_consider: 0.5
         offset_from_furthest: 20
         use_path_orientations: true
-      PathFollowCritic:
+      PathFollowCritic:           # 沿着路径前进的代价
         enabled: true
         cost_power: 1
         cost_weight: 5.0
         offset_from_furthest: 5
         threshold_to_consider: 1.4
-      PathAngleCritic:
+      PathAngleCritic:            # 路径切向对齐的代价
         enabled: true
         cost_power: 1
         cost_weight: 2.0
@@ -156,12 +173,13 @@ controller_server:
         threshold_to_consider: 0.5
         max_angle_to_furthest: 1.0
         forward_preference: true
-      PreferForwardCritic:
+      PreferForwardCritic:        # 鼓励车辆前进的代价
         enabled: true
         cost_power: 1
         cost_weight: 5.0
         threshold_to_consider: 0.5
 
+# ---------------- 局部代价地图 (用于短距离实时避障) ----------------
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -170,11 +188,11 @@ local_costmap:
       publish_frequency: 5.0
       global_frame: odom
       robot_base_frame: base_footprint
-      rolling_window: true
-      width: 8
+      rolling_window: true           # 随车滑动的滚动窗口
+      width: 8                       # 8m x 8m 范围
       height: 8
-      resolution: 0.05
-      footprint: "[[0.8, -0.4], [0.8, 0.4], [-0.8, 0.4], [-0.8, -0.4]]"
+      resolution: 0.05               # 5cm/像素 的高精度地图
+      footprint: "[[0.8, -0.4], [0.8, 0.4], [-0.8, 0.4], [-0.8, -0.4]]" # 车身覆盖范围
       footprint_padding: 0.05
       plugins: [obstacle_layer, inflation_layer]
       obstacle_layer:
@@ -190,12 +208,13 @@ local_costmap:
           raytrace_max_range: 10.0
           obstacle_min_range: 0.15
           raytrace_min_range: 0.15
-      inflation_layer:
+      inflation_layer:                # 膨胀层 (增大障碍物使小车安全绕过)
         plugin: nav2_costmap_2d::InflationLayer
         inflation_radius: 0.55
         cost_scaling_factor: 2.0
       always_send_full_costmap: true
 
+# ---------------- 全局代价地图 (用于全局长程规划) ----------------
 global_costmap:
   global_costmap:
     ros__parameters:
@@ -205,7 +224,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_footprint
       resolution: 0.05
-      track_unknown_space: false
+      track_unknown_space: false      # 地图环境是已知的，不追踪未知空间
       footprint: "[[0.8, -0.4], [0.8, 0.4], [-0.8, 0.4], [-0.8, -0.4]]"
       footprint_padding: 0.05
       plugins: [static_layer, obstacle_layer, inflation_layer]
@@ -231,24 +250,25 @@ global_costmap:
         cost_scaling_factor: 2.0
       always_send_full_costmap: true
 
+# ---------------- 全局路径规划器 ----------------
 planner_server:
   ros__parameters:
     use_sim_time: true
     expected_planner_frequency: 5.0
     planner_plugins: [GridBased]
     GridBased:
-      plugin: nav2_smac_planner/SmacPlannerHybrid
+      plugin: nav2_smac_planner/SmacPlannerHybrid  # 混合状态 Smac 规划器
       tolerance: 0.0
       downsample_costmap: false
       allow_unknown: false
       max_iterations: 100000
       max_on_approach_iterations: 1000
       max_planning_time: 2.0
-      motion_model_for_search: REEDS_SHEPP
-      angle_quantization_bins: 72
-      analytic_expansion_ratio: 3.5
+      motion_model_for_search: REEDS_SHEPP        # 运动学模型：Reeds-Shepp (适配合并阿克曼的进退)
+      angle_quantization_bins: 72                  # 航向角离散化分桶
+      analytic_expansion_ratio: 3.5                # 解析扩展 (终点附近的运动学解析解)
       analytic_expansion_max_length: 6.5
-      minimum_turning_radius: 1.3
+      minimum_turning_radius: 1.3                 # 阿克曼底盘的最小转弯半径
       reverse_penalty: 2.0
       change_penalty: 0.2
       non_straight_penalty: 1.2
@@ -257,6 +277,7 @@ planner_server:
       cache_obstacle_heuristic: true
       smooth_path: true
 
+# ---------------- 轨迹平滑器 ----------------
 smoother_server:
   ros__parameters:
     use_sim_time: true
@@ -267,6 +288,7 @@ smoother_server:
       max_its: 1000
       do_refinement: true
 
+# ---------------- 行为服务器 (原地旋转/后退/等待) ----------------
 behavior_server:
   ros__parameters:
     use_sim_time: true
@@ -285,6 +307,7 @@ behavior_server:
     transform_tolerance: 0.3
     simulate_ahead_time: 2.0
 
+# ---------------- 路径点跟随器 ----------------
 waypoint_follower:
   ros__parameters:
     use_sim_time: true
@@ -296,13 +319,14 @@ waypoint_follower:
       enabled: true
       waypoint_pause_duration: 200
 
+# ---------------- 速度平滑器 ----------------
 velocity_smoother:
   ros__parameters:
     use_sim_time: true
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: CLOSED_LOOP
-    max_velocity: [0.35, 0.0, 0.30]
+    max_velocity: [0.35, 0.0, 0.30]     # [vx, vy, wz] 的最大限制
     min_velocity: [-0.15, 0.0, -0.30]
     max_accel: [0.5, 0.0, 0.5]
     max_decel: [-1.0, 0.0, -1.0]

@@ -24,7 +24,11 @@ from .target_flow import target_pixel_error, target_requires_recenter
 
 
 def transform_point(point, translation, quat_xyzw):
-    """对点应用刚体变换，避免在纯几何层引入 tf2_geometry 依赖。"""
+    """对点应用刚体变换，避免在纯几何层引入 tf2_geometry 依赖。
+    
+    此函数是纯数学层面的坐标变换，用于将目标物体从局部坐标系
+    变换到机械臂基座坐标系。在底层，通过旋转矩阵与平移向量实现。
+    """
     px, py, pz = (float(value) for value in point)
     tx, ty, tz = (float(value) for value in translation)
     quaternion = tuple(float(value) for value in quat_xyzw)
@@ -47,6 +51,10 @@ def camera_look_at_pose(
     ``tree_root`` 是病树根部在机械臂 base 下的位置。相机位于树与机械臂之间，
     ``observation_distance`` 为水平离树距离；树过近时直接拒绝，防止生成穿过树干
     或机械臂自身不可达的候选位姿。
+    
+    **工程意义**：机械臂末端相机不是末端工具点（tool0），而是挂载的深度相机。此函数
+    计算的是相机坐标系在机械臂基座下的绝对坐标和旋转，随后需要经过工具外参逆变换，
+    才能得到真正的 `tool0` 期望位置。
     """
     tx, ty, tz = (float(value) for value in tree_root)
     aim_height = float(aim_height)
@@ -63,9 +71,12 @@ def camera_look_at_pose(
     if horizontal_distance <= observation_distance + 0.05:
         raise ValueError('tree hint is too close for the requested observation distance')
 
+    # 计算方位角，并叠加扇扫偏置
     bearing = math.atan2(ty, tx) + math.radians(azimuth_offset_degrees)
     forward_x = math.cos(bearing)
     forward_y = math.sin(bearing)
+    
+    # 相机位于树与机械臂连线之间，保持固定作业距离
     camera = (
         tx - observation_distance * forward_x,
         ty - observation_distance * forward_y,
@@ -77,6 +88,8 @@ def camera_look_at_pose(
         tz + aim_height - camera[2],
     )
     target_distance = math.sqrt(sum(value * value for value in target_delta))
+    
+    # 构造相机的 Optical 姿态（+Z 指向目标）
     optical_z = tuple(value / target_distance for value in target_delta)
     optical_x = (forward_y, -forward_x, 0.0)
     optical_y = (
@@ -139,15 +152,21 @@ def recenter_camera_pose(
             fx <= 0.0 or fy <= 0.0 or width <= 0 or height <= 0 or
             max_angle_degrees <= 0.0 or residual_error_px < 0.0):
         raise ValueError('target recenter inputs are invalid')
+    
+    # 计算期望的目标像素点（图像正中心 + 人工设定的偏置）
     desired_u = float(width) / 2.0 + float(desired_offset_u_px)
     desired_v = float(height) / 2.0 + float(desired_offset_v_px)
     error_u = float(center_u) - desired_u
     error_v = float(center_v) - desired_v
     maximum_error = max(abs(error_u), abs(error_v))
+    
+    # 如果设置了残差，将一次大角度运动切割为预留残差的亚运动
     if residual_error_px > 0.0 and maximum_error > residual_error_px:
         residual_scale = float(residual_error_px) / maximum_error
         desired_u += residual_scale * error_u
         desired_v += residual_scale * error_v
+        
+    # 计算当前视线向量和期望视线向量
     current_ray = _unit_vector((
         (float(center_u) - float(cx)) / float(fx),
         (float(center_v) - float(cy)) / float(fy),
@@ -163,6 +182,7 @@ def recenter_camera_pose(
     if angle > float(max_angle_degrees) + 1e-9:
         raise ValueError('target recenter angle exceeds limit')
     camera_quat_xyzw = normalize_quaternion(camera_quat_xyzw)
+    # 计算在世界坐标系下旋转视线所需的四元数
     world_rotation = _quaternion_between_vectors(
         rotate_vector(desired_ray, camera_quat_xyzw),
         rotate_vector(current_ray, camera_quat_xyzw))
@@ -299,7 +319,6 @@ def _build_candidate(
         candidate_id, distance_m, camera_height_m, azimuth_deg,
         camera_position, camera_quat, tool_position, tool_quat,
         visible, visible_margin_px, rejection_reason=''):
-    """统一构造候选对象，避免普通观察和重心流程重复填写字段。"""
     return ObservationCandidate(
         candidate_id=candidate_id,
         distance_m=distance_m,
@@ -370,6 +389,8 @@ class ObservationOptimizer:
         self._tip_link = str(tip_link)
         self._joint_names = tuple(joint_names)
         self._config = dict(config)
+        
+        # 从 URDF 中提取从 base_link 到 tip_link 的关节链
         by_child = {joint.child: joint for joint in self._robot.joints}
         chain = []
         link = self._tip_link
@@ -381,6 +402,8 @@ class ObservationOptimizer:
             chain.append(joint)
             link = joint.parent
         self._chain = tuple(reversed(chain))
+        
+        # 提取关节限位（用于后续计算关节余量）
         self._limits = {
             joint.name: (float(joint.limit.lower), float(joint.limit.upper))
             for joint in self._chain
@@ -397,6 +420,7 @@ class ObservationOptimizer:
             float(self._config['fruit_zone_height_min_m']) +
             float(self._config['fruit_zone_height_max_m'])) / 2.0
         candidates = []
+        # 遍历距离、高度、方位角网格
         for distance in _values(
                 self._config['distance_min_m'], self._config['distance_max_m'],
                 self._config['distance_step_m']):
@@ -409,8 +433,10 @@ class ObservationOptimizer:
                 for azimuth in self._config['azimuth_offsets_deg']:
                     camera_position, camera_quat = camera_look_at_pose(
                         tree_in_base, aim_height, height, distance, azimuth)
+                    # 检查果实区域边界能否完整落在相机视野内
                     visible, margin = self._envelope_visible(
                         tree_in_base, camera_position, camera_quat, camera)
+                    # 转换相机位姿为 tool0 位姿
                     tool_position, tool_quat = tool_pose_from_camera_pose(
                         camera_position, camera_quat, camera_mount[0], camera_mount[1])
                     candidates.append(_build_candidate(
@@ -454,6 +480,7 @@ class ObservationOptimizer:
         preferred_margin = float(self._config.get(
             'preferred_joint_margin_rad',
             self._config['min_joint_margin_rad']))
+        # 排序逻辑：主要考量关节限位余量、雅可比矩阵条件数、距当前关节角距离
         return sorted(
             (candidate for candidate in candidates
              if candidate.visible and not candidate.rejection_reason),
@@ -501,6 +528,7 @@ class ObservationOptimizer:
                 local_axis = np.asarray(joint.axis if joint.axis else (0.0, 0.0, 1.0))
                 axes.append(transform[:3, :3] @ local_axis)
                 origins.append(transform[:3, 3].copy())
+                # 在雅可比计算中，需要累积当前关节的旋转
                 transform = transform @ _transform(
                     _axis_rotation(local_axis, positions[joint.name]), (0.0, 0.0, 0.0))
         end = transform[:3, 3]
@@ -516,6 +544,7 @@ class ObservationOptimizer:
         border_x = float(width) * float(self._config['image_margin_ratio'])
         border_y = float(height) * float(self._config['image_margin_ratio'])
         margins = []
+        # 在果实区域的高度上下边界和半径边界上采样 8 个点，并验证它们是否在图像视野内
         for height_m in (
                 float(self._config['fruit_zone_height_min_m']),
                 float(self._config['fruit_zone_height_max_m'])):
@@ -525,6 +554,7 @@ class ObservationOptimizer:
                     float(tree[1]) + float(self._config['fruit_zone_radius_m']) * math.sin(angle),
                     float(tree[2]) + height_m,
                 ))
+                # 从世界坐标系转换到相机光学坐标系 (optical frame)
                 optical = rotation.T @ (point - camera_position)
                 if optical[2] <= 1e-6:
                     return False, -math.inf
@@ -535,7 +565,9 @@ class ObservationOptimizer:
         margin = min(margins)
         return bool(margin >= 0.0), float(margin)
 
+
 class ObservationFlowMixin:
+    # --------- 扫描与确认树 ---------
     def _scan_for_tree(self, cancel_requested):
         while not self._aborted(cancel_requested):
             self._reset_tree_tracking()
@@ -562,6 +594,7 @@ class ObservationFlowMixin:
             time.sleep(0.02)
         return False
 
+    # --------- 目标重心与姿态修正 ---------
     def _recenter_target(self, target, attempt, cancel_requested):
         """使用掩膜安全瞄准点执行有限角度重心，并重新确认同一逻辑目标。
 
@@ -577,6 +610,8 @@ class ObservationFlowMixin:
             target.center_u, target.center_v, camera[4], camera[5],
             self._recenter_config['desired_offset_u_px'],
             self._recenter_config['desired_offset_v_px'])
+        
+        # 如果目标已经在视觉伺服的 48px 工作窗口内，则跳过重心动作
         if not target_requires_recenter(
                 target.center_u, target.center_v, camera[4], camera[5],
                 self._recenter_config['desired_offset_u_px'],
@@ -615,6 +650,8 @@ class ObservationFlowMixin:
                 post_error_v_px=post_error_v,
                 planned_angle_deg=0.0)
             return True, 'target already inside fine-servo workspace'
+        
+        # 若目标不在工作空间内，开始计算重心候选
         index = self._observation_candidate_index
         if index < 0 or index >= len(self._observation_candidates):
             return False, 'no active observation candidate for target recenter'
@@ -622,10 +659,8 @@ class ObservationFlowMixin:
             return False, 'target recenter already used at this observation'
         attempt.recentered_observation_indices.add(index)
         observation = self._observation_candidates[index]
-        # ``ObservationCandidate`` 保存的是规划时的理想相机位姿；执行后的关节
-        # 轨迹即使成功，也可能留下足以造成数像素偏差的实际末端残差。重心是一个
-        # 闭环步骤，因此必须以 TF 中真实的 C10 位姿作为下一次几何计算的起点，
-        # 不能把上一次请求的候选位姿当作已经到达。
+        
+        # 获取真实的相机位姿作为初始起点（不是规划的终点）
         camera_pose = self._current_camera_pose()
         if camera_pose is None:
             return False, 'actual camera pose unavailable for target recenter'
@@ -646,6 +681,7 @@ class ObservationFlowMixin:
                 planned_angle_deg=angle_deg,
                 rejection_reason='target_not_reconfirmed')
             return False, 'target was not reconfirmed after recenter'
+        
         confirmed = self._latest_target()
         post_error_u, post_error_v = target_pixel_error(
             confirmed.center_u, confirmed.center_v, camera[4], camera[5],
@@ -653,6 +689,8 @@ class ObservationFlowMixin:
             self._recenter_config['desired_offset_v_px'])
         total_angle_deg = angle_deg
         iterations = 1
+        
+        # 循环细化重心，直到误差小于 refine_goal_px 或达到最大迭代次数
         while (
                 iterations < self._recenter_config['max_iterations'] and
                 math.hypot(post_error_u, post_error_v) >
@@ -755,6 +793,7 @@ class ObservationFlowMixin:
         else:
             start_camera_position, start_camera_quat = camera_pose
         rejection_reason = 'no partial recenter candidate was feasible'
+        # 尝试不同的残差，以逐步逼近目标而不是一次超大幅运动
         for residual_px in self._recenter_config['residual_candidates_px']:
             try:
                 camera_position, camera_quat, angle_deg = recenter_camera_pose(
@@ -805,6 +844,7 @@ class ObservationFlowMixin:
         计算 IK，因此通过 ``validate_target_ik`` 保持两条原有路径的语义差异。
         两条路径共享计划轨迹、执行、最新关节状态和实际安全指标复核逻辑。
         """
+        # 1. 如果通过 IK 校验执行重心步骤，则计算当前状态下的 IK
         if validate_target_ik:
             ik = self.arm.compute_ik(
                 candidate.tool_position, candidate.tool_quat, current_joints)
@@ -821,6 +861,7 @@ class ObservationFlowMixin:
                 self._publish_observation_debug('candidate_rejected', candidate)
                 return False
 
+        # 2. 设置姿态公差并规划轨迹
         if tolerance_position is None or tolerance_orientation is None:
             tolerance_position = self._recenter_config['position_tolerance_m']
             tolerance_orientation = self._recenter_config[
@@ -835,16 +876,22 @@ class ObservationFlowMixin:
             candidate.rejection_reason = 'moveit_plan_failed'
             self._publish_observation_debug('candidate_rejected', candidate)
             return False
+        
+        # 3. 用规划预期的终点关节值评估运动学指标
         self._observation_optimizer.evaluate_ik(candidate, planned, planned)
         if candidate.rejection_reason:
             self._publish_observation_debug('candidate_rejected', candidate)
             return False
+        
+        # 4. 执行轨迹
         with self._state_mutex:
             joint_state_sequence = self._joint_state_sequence
         if not self.arm.execute_trajectory(trajectory):
             candidate.rejection_reason = 'moveit_execution_failed'
             self._publish_observation_debug('candidate_rejected', candidate)
             return False
+            
+        # 5. 执行完成后的实际状态复查（闭环安全确认）
         actual = self._wait_for_joint_state(joint_state_sequence)
         if actual is None:
             candidate.rejection_reason = 'joint_state_unavailable_after_motion'
@@ -874,11 +921,13 @@ class ObservationFlowMixin:
         point = tree_hint.point
         return all(math.isfinite(value) for value in (point.x, point.y, point.z))
 
+    # --------- 从 hint 走到观察位 ---------
     def _move_to_observation(self, tree_hint):
         if not self._hint_available(tree_hint):
             self.get_logger().error('[ARM] tree_hint is required for observation')
             return False
         try:
+            # 将 tree_hint 从目标坐标系（如 map）转换到机械臂基座坐标系 (alicia_base_link)
             transform = self._tf_buffer.lookup_transform(
                 self._base_frame, tree_hint.header.frame_id, rclpy.time.Time())
             translation = transform.transform.translation
@@ -887,6 +936,7 @@ class ObservationFlowMixin:
                 (tree_hint.point.x, tree_hint.point.y, tree_hint.point.z),
                 (translation.x, translation.y, translation.z),
                 (rotation.x, rotation.y, rotation.z, rotation.w))
+            # 获取 tool0 到 camera_link 的固定外参
             camera_transform = self._tf_buffer.lookup_transform(
                 'tool0', self._camera_frame, rclpy.time.Time())
         except (TransformException, ValueError) as error:

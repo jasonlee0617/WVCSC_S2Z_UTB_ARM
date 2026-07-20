@@ -1,4 +1,14 @@
-"""Small project-owned adapter around the upstream pymoveit2 API."""
+# alicia_moveit.py
+"""
+项目自有的 Alicia-M 机械臂运动控制适配器。
+
+职责：
+1. 在上游的 pymoveit2 库之上，提供面向任务的关节/末端位姿规划与执行接口。
+2. 集成 trajectory_retime_server 服务，对笛卡尔轨迹进行 TOTG（时间最优轨迹生成）重定时。
+3. 处理与 ros2_control 夹爪控制器的通信 (control_msgs/GripperCommand)。
+4. 提供线程安全的取消、急停及执行状态追踪能力。
+5. 输出的轨迹执行日志包含了规划耗时和实际耗时对比，辅助性能调优。
+"""
 
 import math
 import threading
@@ -17,12 +27,20 @@ from .motion_state import MotionControlState
 
 try:
     from trajectory_retime_server.srv import RetimeTrajectory
-except ImportError:  # Allows source-only tests before generated interfaces exist.
+except ImportError:  # 允许在接口未生成前进行源码级的测试
     RetimeTrajectory = None
 
 
 def _valid_retimed_trajectory(trajectory):
-    """Reject malformed retime replies before they reach the controller."""
+    """校验重定时服务返回的轨迹是否合法，防止坏数据送入控制器。
+
+    检查项包括：
+    - 关节名称是否为空
+    - 轨迹点是否至少包含2个点
+    - 关节位置数量是否与关节名称数量一致
+    - 所有位置和时刻是否为有限值（非 NaN/Inf）
+    - 轨迹点的时间戳是否严格单调递增
+    """
     joint_names = tuple(getattr(trajectory, 'joint_names', ()))
     points = tuple(getattr(trajectory, 'points', ()))
     if not joint_names or len(points) < 2:
@@ -47,7 +65,11 @@ def _valid_retimed_trajectory(trajectory):
 
 
 def _wait_for_future(future, timeout):
-    """Wait for an rclpy future without changing the node's executor state."""
+    """等待 rclpy Future 完成，不干扰节点的执行器状态。
+
+    注意：原生的 future.result(timeout) 在超时时会抛出异常。此函数提供了安全的
+    轮询式等待，并允许在超时后自行控制退出逻辑，避免阻塞主线程。
+    """
     deadline = time.monotonic() + float(timeout)
     while not future.done() and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -55,6 +77,8 @@ def _wait_for_future(future, timeout):
 
 
 class _GripperClient:
+    """对 ROS2 标准夹爪 Action (`GripperCommand`) 的线程安全封装。"""
+
     def __init__(self, node, action_name, callback_group=None):
         self._client = ActionClient(
             node, GripperCommand, action_name, callback_group=callback_group)
@@ -64,6 +88,7 @@ class _GripperClient:
         self._cancel_requested = False
 
     def command(self, position, max_effort, timeout):
+        """发送夹爪控制指令，并等待执行结果。"""
         if not self._client.wait_for_server(timeout_sec=timeout):
             return False
 
@@ -84,6 +109,7 @@ class _GripperClient:
             with self._mutex:
                 self._goal_handle = goal_handle
                 cancel_requested = self._cancel_requested
+            # 如果在发送目标后被外部标记了取消，则立即尝试取消
             if cancel_requested:
                 goal_handle.cancel_goal_async()
             result_future = goal_handle.get_result_async()
@@ -98,6 +124,7 @@ class _GripperClient:
                 self._active = False
 
     def cancel(self):
+        """取消当前正在执行的夹爪目标。"""
         with self._mutex:
             self._cancel_requested = True
             goal_handle = self._goal_handle
@@ -105,6 +132,7 @@ class _GripperClient:
             goal_handle.cancel_goal_async()
 
     def wait_idle(self, timeout):
+        """等待夹爪控制器进入非活跃状态。"""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self._mutex:
@@ -116,7 +144,10 @@ class _GripperClient:
 
 
 class _ActionStatusTracker:
-    """Observe whether any goal on an action server is still active."""
+    """订阅 Action 状态话题，监测是否仍有目标在活跃执行。
+
+    用于极速确认取消动作是否生效，而非依赖状态机的轮询。
+    """
 
     ACTIVE_STATUSES = {
         GoalStatus.STATUS_ACCEPTED,
@@ -142,7 +173,7 @@ class _ActionStatusTracker:
             self._active = active
 
     def wait_idle(self, timeout, settle_time=0.1):
-        """Require an idle status continuously for a short cancellation settle time."""
+        """要求状态在设定的持续时间内（settle_time）保持空闲，以确认取消已稳定。"""
         deadline = time.monotonic() + timeout
         idle_since = None
         while time.monotonic() < deadline:
@@ -159,7 +190,10 @@ class _ActionStatusTracker:
 
 
 class AliciaMoveIt:
-    """Synchronous task-level operations built only on public pymoveit2 APIs."""
+    """
+    基于公共 pymoveit2 API 构建的同步任务级运动操作类。
+    主要 API 已在节点的运动控制任务中被直接调用。
+    """
 
     JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
     HOME = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -176,6 +210,7 @@ class AliciaMoveIt:
             state=None, moveit=None, retime_client=None,
             retime_request_factory=None, gripper=None, arm_activity=None,
             gripper_activity=None):
+        # 参数校验
         if not 0.0 < float(velocity_scaling) <= 1.0:
             raise ValueError('velocity_scaling must be in (0, 1]')
         if not 0.0 < float(acceleration_scaling) <= 1.0:
@@ -206,7 +241,7 @@ class AliciaMoveIt:
         self._gripper_max_effort = float(gripper_max_effort)
         self.state = state or MotionControlState()
         self._cancel_mutex = threading.Lock()
-        self._cancel_epoch = 0
+        self._cancel_epoch = 0  # 取消版本号，用于实现原子性的状态控制
         self._planning_mutex = threading.Lock()
 
         self._moveit = moveit or MoveIt2(
@@ -232,6 +267,7 @@ class AliciaMoveIt:
         self._trajectory_event_pub = node.create_publisher(
             String, '/trajectory_execution_event', 1)
 
+        # 初始化轨迹重定时服务的客户端
         if retime_client is None and RetimeTrajectory is not None:
             retime_client = node.create_client(
                 RetimeTrajectory,
@@ -242,6 +278,7 @@ class AliciaMoveIt:
         self._retime_request_factory = retime_request_factory or (
             RetimeTrajectory.Request if RetimeTrajectory is not None else None)
 
+        # 初始化和运动状态相关的底层封装
         self._gripper = gripper or _GripperClient(
             node, gripper_action, callback_group=callback_group)
         self._arm_activity = arm_activity or _ActionStatusTracker(
@@ -256,9 +293,11 @@ class AliciaMoveIt:
             return self._cancel_epoch
 
     def _allowed(self, epoch, allow_locked):
+        """判断当前状态是否允许执行运动指令（安全锁与版本号双重检查）。"""
         return (allow_locked or not self.state.locked) and epoch == self._epoch()
 
     def _plan(self, timeout=None, **kwargs):
+        """底层的 MoveIt2 规划发起与同步提取。"""
         cartesian_fraction_threshold = float(
             kwargs.pop('cartesian_fraction_threshold', 0.0))
         future = self._moveit.plan_async(**kwargs)
@@ -281,6 +320,7 @@ class AliciaMoveIt:
     def _plan_with_scaling(
             self, *, max_velocity=None, max_acceleration=None,
             cartesian=False, **kwargs):
+        """设置临时缩放系数并执行规划，支持对笛卡尔运动进行轨迹重定时。"""
         velocity = self._scaling(
             max_velocity, self._velocity_scaling, 'max_velocity')
         acceleration = self._scaling(
@@ -292,6 +332,7 @@ class AliciaMoveIt:
                 self._moveit.max_velocity = velocity
                 self._moveit.max_acceleration = acceleration
                 trajectory = self._plan(cartesian=bool(cartesian), **kwargs)
+                # 只有笛卡尔运动需要调用重定时服务，关节运动直接信任 MoveIt 默认插补
                 if trajectory is not None and cartesian:
                     trajectory = self._retime(trajectory, velocity, acceleration)
                 return trajectory, velocity, acceleration
@@ -300,6 +341,7 @@ class AliciaMoveIt:
                 self._moveit.max_acceleration = previous_acceleration
 
     def _retime(self, trajectory, velocity_scaling, acceleration_scaling):
+        """调用外部 trajectory_retime_server 服务的 TOTG 算法重定时轨迹。"""
         if self._retime_client is None or self._retime_request_factory is None:
             self._node.get_logger().error(
                 'Cartesian motion requires trajectory_retime_server interfaces')
@@ -321,7 +363,7 @@ class AliciaMoveIt:
             return None
         try:
             response = future.result()
-        except Exception as error:  # Service transport exceptions are fail-closed.
+        except Exception as error:
             self._node.get_logger().error(
                 f'Cartesian trajectory retiming failed: {error}')
             return None
@@ -339,6 +381,14 @@ class AliciaMoveIt:
     def _execute(
             self, trajectory, epoch, allow_locked, velocity_scaling=None,
             acceleration_scaling=None):
+        """
+        核心执行循环：同步发送轨迹至 MoveIt2，并轮询执行状态。
+        
+        先调用 self._moveit.execute()（它是异步的，会通过 Action 发送轨迹），
+        然后利用 `self._moveit.query_state()` 和 `get_last_execution_error_code()`
+        轮询判定轨迹是否开始执行、执行过程中是否发生取消、执行是否完成。
+        相比单纯的 future.result() 本循环可以精确捕获执行过程的中断和性能数据。
+        """
         if trajectory is None or not self._allowed(epoch, allow_locked):
             return False
         velocity_scaling = self._velocity_scaling if velocity_scaling is None else float(
@@ -348,10 +398,12 @@ class AliciaMoveIt:
             else float(acceleration_scaling))
         planned_duration = self.trajectory_duration(trajectory)
         started = time.monotonic()
+
         def finish(result, success):
             return self._motion_result(
                 planned_duration, started, result, success,
                 velocity_scaling, acceleration_scaling)
+
         self._moveit.execute(trajectory)
         deadline = time.monotonic() + self._execution_timeout
         acceptance_deadline = time.monotonic() + min(5.0, self._execution_timeout)
@@ -365,8 +417,10 @@ class AliciaMoveIt:
                 success = error is not None and error.val == MoveItErrorCodes.SUCCESS
                 result = 'SUCCEEDED' if success else 'FAILED'
                 return finish(result, success)
+            # 检查轨迹是否被 MoveIt 控制器接受（极短超时防止因拒绝动作而长时间卡死）
             if not saw_motion and time.monotonic() >= acceptance_deadline:
                 return finish('NOT_STARTED', False)
+            # 如果在执行中被主节点叫停（如 motion_control 的 epoch 自增）
             if not self._allowed(epoch, allow_locked):
                 return finish('CANCELED', False)
             time.sleep(0.01)
@@ -378,6 +432,7 @@ class AliciaMoveIt:
     def _motion_result(
             self, planned_duration, started, result, success,
             velocity_scaling, acceleration_scaling):
+        """记录轨迹执行的性能统计信息（规划耗时 vs 实际耗时）。"""
         actual_duration = max(0.0, time.monotonic() - started)
         self._node.get_logger().info(
             '[ARM][MOTION] '
@@ -389,6 +444,7 @@ class AliciaMoveIt:
         return success
 
     def move_joints(self, positions, allow_locked=False):
+        """执行关节空间运动规划。"""
         if len(positions) != len(self.JOINT_NAMES):
             raise ValueError('Alicia-M requires exactly six joint positions')
         epoch = self._epoch()
@@ -406,6 +462,11 @@ class AliciaMoveIt:
             tolerance_position=0.001, tolerance_orientation=0.001,
             max_velocity=None, max_acceleration=None, cartesian=False,
             cartesian_max_step=0.0025, cartesian_fraction_threshold=1.0):
+        """执行笛卡尔空间末端位姿运动规划。
+
+        Args:
+            cartesian (bool): 若为 True，则走笛卡尔插补（带轨迹重定时）；若为 False，则走关节空间规划。
+        """
         cartesian_max_step = float(cartesian_max_step)
         cartesian_fraction_threshold = float(cartesian_fraction_threshold)
         if not math.isfinite(cartesian_max_step) or cartesian_max_step <= 0.0:
@@ -436,7 +497,10 @@ class AliciaMoveIt:
     def plan_pose(
             self, position, quat_xyzw, frame_id=None, allow_locked=False,
             tolerance_position=0.001, tolerance_orientation=0.001):
-        """Plan a pose without executing it so task code can inspect the endpoint."""
+        """
+        仅计算并返回规划轨迹（不执行）。
+        允许上层任务在执行前先检查轨迹终点的关节状态（例如用于Observation优化器的关节余量检查）。
+        """
         if self.state.locked and not allow_locked:
             return None
         trajectory, _velocity, _acceleration = self._plan_with_scaling(
@@ -450,12 +514,16 @@ class AliciaMoveIt:
         return trajectory
 
     def execute_trajectory(self, trajectory, allow_locked=False):
-        """Execute a trajectory returned by :meth:`plan_pose`."""
+        """执行由 plan_pose 已生成好的轨迹。"""
         epoch = self._epoch()
         return self._execute(trajectory, epoch, allow_locked)
 
     def compute_ik(self, position, quat_xyzw, start_joint_positions, timeout=0.2):
-        """Return a collision-aware IK state without emitting failures for rejects."""
+        """
+        在指定起始关节状态下，求取特定末端位姿的碰撞感知 IK（逆运动学解）。
+
+        用于目标重定位前的预检，如果无法求得有效解会提前返回 None，不触发实际的运动动作。
+        """
         if self.state.locked:
             return None
         future = self._moveit.compute_ik_async(
@@ -477,7 +545,7 @@ class AliciaMoveIt:
 
     @staticmethod
     def trajectory_final_positions(trajectory, joint_names):
-        """Extract the final arm joint vector from either MoveIt trajectory shape."""
+        """从 MoveIt 的 JointTrajectory 中提取轨迹最后一个点的关节角向量。"""
         joint_trajectory = getattr(trajectory, 'joint_trajectory', trajectory)
         points = getattr(joint_trajectory, 'points', ())
         names = getattr(joint_trajectory, 'joint_names', ())
@@ -491,7 +559,7 @@ class AliciaMoveIt:
 
     @staticmethod
     def trajectory_duration(trajectory):
-        """Return the final trajectory timestamp in seconds."""
+        """获取整个轨迹计划的预计耗时（秒）。"""
         joint_trajectory = getattr(trajectory, 'joint_trajectory', trajectory)
         points = getattr(joint_trajectory, 'points', ())
         if not points:
@@ -500,6 +568,7 @@ class AliciaMoveIt:
         return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
     def control_gripper(self, open_gripper=True, position=None, allow_locked=False):
+        """控制夹爪（可自定义位置，或通过布尔值控制开闭）。"""
         if position is None:
             position = (
                 self._gripper_open_position if open_gripper
@@ -524,18 +593,27 @@ class AliciaMoveIt:
         return success and self._allowed(epoch, allow_locked)
 
     def cancel(self):
-        """Cancel arm execution globally and the gripper goal owned by this adapter."""
+        """
+        全局强制取消：
+        1. 增加 cancel_epoch 版本号，使得正在轮询的执行循环立刻失效。
+        2. 发布运动停止事件（供上层日志记录）。
+        3. 取消目前正在执行的下游夹爪指令。
+        """
         with self._cancel_mutex:
             self._cancel_epoch += 1
         self._trajectory_event_pub.publish(String(data='stop'))
         self._gripper.cancel()
 
     def cancel_and_wait(self, timeout=None):
-        """Cancel arm and gripper, then verify both public execution states are idle."""
+        """
+        强制取消，并等待机械臂和夹爪真正进入空闲状态。
+        用于由 MotionControlState 发起的复位（Reset）流程或紧急中断。
+        """
         timeout = self._execution_timeout if timeout is None else float(timeout)
         self.cancel()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            # 确保 MoveIt2 执行器已退出执行状态
             if self._moveit.query_state() == MoveIt2State.IDLE:
                 remaining = max(0.0, deadline - time.monotonic())
                 if not self._gripper.wait_idle(remaining):

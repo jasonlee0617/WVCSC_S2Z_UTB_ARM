@@ -1,3 +1,15 @@
+# validation.py
+# ============================================================================
+# 无人机任务数据严格校验器 (Validation Guard)
+# ============================================================================
+#
+# 职责：
+# 1. 对 YAML 配置文件进行语法和逻辑解析。
+# 2. 校验坐标是否越界、置信度是否在 0~1 之间、时长是否合规。
+# 3. 确保回放模式的时间线是严格单调递增的。
+# 4. 在发生错误时，抛出明确的 `ValueError`，阻止坏数据进入任务调度。
+#
+
 import math
 
 import yaml
@@ -6,6 +18,9 @@ import yaml
 def load_and_validate(
         path, confidence_threshold=0.5, min_duration=0.2,
         max_duration=10.0, max_abs_coordinate=50.0):
+    """
+    加载并校验 Mock 模式的 YAML 配置文件。
+    """
     with open(path, encoding='utf-8') as stream:
         data = yaml.safe_load(stream)
     return validate_mission(
@@ -17,6 +32,9 @@ def validate_mission(
         data, confidence_threshold=0.5, min_duration=0.2,
         max_duration=10.0, max_abs_coordinate=50.0,
         expected_source_mode=None):
+    """
+    核心校验函数：对任务配置字典进行深度校验。
+    """
     mission = data.get('mission') if isinstance(data, dict) else None
     if not isinstance(mission, dict):
         raise ValueError('missing mission mapping')
@@ -89,6 +107,9 @@ def validate_mission(
 def load_and_validate_replay(
         path, confidence_threshold=0.5, min_duration=0.2,
         max_duration=10.0, max_abs_coordinate=50.0):
+    """
+    加载并校验 Replay 回放模式的 YAML 配置文件。
+    """
     with open(path, encoding='utf-8') as stream:
         data = yaml.safe_load(stream)
     replay = data.get('replay') if isinstance(data, dict) else None
@@ -132,6 +153,9 @@ def load_and_validate_replay(
 
 
 def _finite(value, name):
+    """
+    辅助函数：确保配置项是可以解析的有限浮点数。
+    """
     try:
         number = float(value)
     except (TypeError, ValueError) as error:

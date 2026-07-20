@@ -92,7 +92,7 @@
           </camera>
           <plugin name="c10_camera_plugin" filename="libgazebo_ros_camera.so">
             <ros>
-              <namespace>/camera/camera</namespace>
+              <namespace>/camera</namespace>
               <qos>
                 <topic name="color/image_raw">
                   <publisher>

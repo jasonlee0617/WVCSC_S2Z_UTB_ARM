@@ -1,44 +1,127 @@
-# Passed under the `moveit_servo` parameter namespace by system_sim.launch.py.
-# gazebo_ros2_control accepts the normal one-point Servo trajectory.  The
-# legacy Gazebo workaround expands every command to many points, which hides
-# the real controller cadence and delays visual feedback.
+# moveit_servo.yaml
+# ============================================================================
+# MoveIt Servo 核心节点参数配置文件
+# (供 `/servo_node` 节点使用)
+# ============================================================================
+#
+# 节点职责：接收视觉伺服节点发出的 "Twist" 速度指令，在机械臂工作空间内进行
+# 实时插补和奇异点防护，并转化为底层 `ros2_control` 能够执行的 JointTrajectory。
+# 该配置通过 `system_sim.launch.py` 传入 `moveit_servo` 参数命名空间。
+#
+
+# 仿真兼容性标志。
+# `false` 表示禁用旧版 Gazebo 的轨迹多点多发兼容层，采用 1 个轨迹点指令。
+# 这能让 MoveIt Servo 真实反映 100 Hz 的控制器节拍，避免视觉反馈延迟。
 use_gazebo: false
+
+# 接收的输入命令类型。
+# `speed_units` 表示接收速度/角速度指令；`position_units` 表示接收位置偏移指令。
 command_in_type: speed_units
+
+# 输入命令的缩放系数。
+# 限制视觉伺服节点 `visual_servo_node.py` 计算出的线速度和角速度最大值，
+# 防止指令过快导致机械臂冲击。
 scale:
-  linear: 0.10
-  rotational: 0.20
-  joint: 0.50
-# Gazebo profile optimized for sub-50 ms Servo cycle.  ``low_latency_mode``
-# removes non-critical synchronisation; the Butterworth filter is disabled
-# to avoid adding one frame of latency.  Collision checking remains off so
-# that the synchronous callback cannot starve the twist pipeline.
+  linear: 0.10       # 线速度缩放系数
+  rotational: 0.20   # 角速度缩放系数
+  joint: 0.50        # 关节速度缩放系数
+
+# 伺服更新频率设置（重要参数）。
+# 原值为 `0.05 s` (20 Hz)。
+# 根据您项目文档中 `11.9` 节 "MoveIt Servo 100 Hz 分层升级" 的说明，
+# 若升级到 100 Hz，此值应改为 `0.01`。
 publish_period: 0.05
+
+# 低延迟模式。
+# 关闭不必要的同步锁和校准，使伺服响应速度最快。
 low_latency_mode: true
+
+# 节点输出给控制器的数据类型。
+# 输出标准的 JointTrajectory（关节空间轨迹）。
 command_out_type: trajectory_msgs/JointTrajectory
+
+# 是否通过输出话题发布期望的关节位置和速度。
 publish_joint_positions: true
 publish_joint_velocities: false
 publish_joint_accelerations: false
+
+# 平滑滤波器。
+# 指定为 `ButterworthFilterPlugin`，但在低延迟模式下通常效果不大。
 smoothing_filter_plugin_name: online_signal_smoothing::ButterworthFilterPlugin
+
+# 是否充当主规划场景监视器。
+# 设置为 `false`，让 `move_group` 节点继续管理规划场景，避免冲突。
 is_primary_planning_scene_monitor: false
+
+# ----------------------------------------------------------------------
+# 机械臂运动学与坐标系配置 (必须与 URDF/TF 树严格一致)
+# ----------------------------------------------------------------------
+# MoveIt 规划组名称。
 move_group_name: arm
+# 机械臂运动学规划参考坐标系 (必须是机械臂基座)。
 planning_frame: alicia_base_link
+# 末端执行器 (EE) 坐标系。
+# 这里设定为 C10 相机的光学坐标系，因为我们的视觉伺服命令是相对于相机光轴的。
 ee_frame_name: camera_color_optical_frame
+# 接收到的 Twist 指令所在的坐标系。
+# 必须和 `visual_servo_node.py` 的 `command_frame` 保持一致。
 robot_link_command_frame: camera_color_optical_frame
+
+# ----------------------------------------------------------------------
+# 安全超时与报警机制
+# ----------------------------------------------------------------------
+# 输入指令的超时时间。如果超过 0.3 秒没有收到新的 Twist 指令，机械臂将自动刹车停止。
 incoming_command_timeout: 0.30
+# 停止指令发出时，向底层控制器发送的刹车消息数量，确保控制器停稳。
 num_outgoing_halt_msgs_to_publish: 5
+
+# ----------------------------------------------------------------------
+# 奇异点 (Singularity) 防护配置 (MoveIt Servo 核心功能)
+# ----------------------------------------------------------------------
+# 关节空间的雅可比矩阵条件数阈值。
+# - 当条件数 > 17.0 时 (接近奇异点)，MoveIt Servo 会自动减小缩放系数进行降速避让。
 lower_singularity_threshold: 17.0
+# 当条件数 > 30.0 时 (进入奇异点)，直接触发硬停止，彻底切断运动指令。
 hard_stop_singularity_threshold: 30.0
-joint_limit_margin: 0.10
+# 当条件数 < 17.0/2.0 时，认为机械臂已安全离开奇异区，恢复正常速度。
 leaving_singularity_threshold_multiplier: 2.0
+
+# 关节极限的安全余量。
+# 一旦超过关节物理限位，且余量小于 0.10 rad，将触发安全保护。
+joint_limit_margin: 0.10
+
+# ----------------------------------------------------------------------
+# 输入/输出话题配置
+# ----------------------------------------------------------------------
+# 接收来自 `wvcsc_visual_servo` 节点的笛卡尔 Twist 速度指令。
 cartesian_command_in_topic: /servo_node/delta_twist_cmds
+# 接收来自其他节点（如有）的关节空间增量指令。
 joint_command_in_topic: /servo_node/delta_joint_cmds
+
+# 获取机械臂当前的关节状态反馈。
 joint_topic: /joint_states
+# 发布 MoveIt Servo 自身的状态码和警告信息。
 status_topic: /servo_node/status
+# 输出给 `ros2_control` 控制器的最终轨迹。
 command_out_topic: /arm_controller/joint_trajectory
-# Gazebo-only profile: Humble's synchronous Servo collision callback blocks
-# Twist processing for ~0.5 s in this scene. Observation/recenter IK and MoveIt
-# trajectories still use collision checking. Re-enable and retune for hardware.
+
+# ----------------------------------------------------------------------
+# Gazebo 专用配置 (仅为保证仿真吞吐量而临时关闭的碰撞检查)
+# ----------------------------------------------------------------------
+# 是否启用底层碰撞检查 (非常重要)。
+# 在 Gazebo 仿真中，因为 Humble 版本的 `moveit_servo` 碰撞检查同步回调
+# 耗时约 0.5 秒，会严重阻塞视觉伺服环路 (视觉降频到 2 Hz)，
+# 因此当前设为 `false` 以保证仿真流畅度。
+#
+# 🚨 【重要安全警告】🚨
+# `check_collisions: false` 仅供 Gazebo 仿真验证算法！
+# 在【真实 Alicia-M 机械臂硬件】上联调时，**必须**将此项设为 `true`！
+# 否则如果机械臂视觉伺服发生未预料的大幅度偏移，会直接导致机械臂自碰撞或撞击环境！
 check_collisions: false
+
+# 碰撞检查频率 (Hz)，仅在 `check_collisions: true` 时生效。
 collision_check_rate: 10.0
+# 自碰撞安全距离阈值 (米)。当机械臂连杆间距小于 0.01m 时，判定为接近碰撞。
 self_collision_proximity_threshold: 0.01
+# 场景碰撞安全距离阈值 (米)。当机械臂与外部环境 (如仿真树) 间距小于 0.02m 时，判定为碰撞。
 scene_collision_proximity_threshold: 0.02

@@ -1,3 +1,17 @@
+# system_sim.launch.py
+# ============================================================================
+# WVCSC 系统仿真顶层启动脚本 (Gazebo Sim Launch)
+# ============================================================================
+#
+# 职责：
+# 1. 加载 `wvcsc_description` 描述的复合机器人 URDF 模型。
+# 2. 启动 Gazebo，动态生成带有病树的果园仿真世界。
+# 3. 通过严密的 `OnProcessExit` 触发和 `TimerAction` 延时，严格保证控制器
+#    (joint_state_broadcaster -> arm_controller -> gripper_controller) 顺序生成。
+# 4. 实现仿真零重力启动策略：先让控制器加载完毕，再恢复重力，防止机械臂坠落。
+# 5. 可选地启动 Nav2、YOLO 感知、视觉伺服、任务管理器等核心模块。
+#
+
 import os
 import socket
 import subprocess
@@ -30,10 +44,11 @@ from launch.substitutions import (
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 from launch_ros.parameter_descriptions import ParameterValue
-from wvcsc_simulation.orchard_assets import generate_orchard_assets
+from wvcsc_simulation.data_acquisition.orchard_assets import generate_orchard_assets
 
 
 def load_yaml(package, relative_path):
+    """辅助函数：加载 YAML 配置文件。"""
     path = os.path.join(get_package_share_directory(package), relative_path)
     with open(path, encoding='utf-8') as stream:
         return yaml.safe_load(stream)
@@ -41,7 +56,10 @@ def load_yaml(package, relative_path):
 
 def process_exit_actions(
         event, _context, *, process_name, success_actions):
-    """Continue a startup chain only after a process exits successfully."""
+    """
+    启动链式回调：仅当上一个进程成功退出（returncode == 0）时，
+    才执行后续成功动作列表。否则直接关闭整个 Launch。
+    """
     if event.returncode == 0:
         return list(success_actions)
     return [Shutdown(
@@ -49,7 +67,7 @@ def process_exit_actions(
 
 
 def validate_arm_scaling(context):
-    """Reject unsafe or malformed launch overrides before Gazebo starts."""
+    """OpaqueFunction：检查用户传入的机械臂运动速度/加速度缩放是否合法。"""
     for name in ('arm_velocity_scaling', 'arm_acceleration_scaling'):
         raw_value = LaunchConfiguration(name).perform(context)
         try:
@@ -62,7 +80,10 @@ def validate_arm_scaling(context):
 
 
 def ensure_fresh_gazebo_master(_context):
-    """Refuse to attach a new simulation launch to a stale local Gazebo."""
+    """
+    OpaqueFunction：在启动前检查 Gazebo 端口是否已被占用。
+    防止将新仿真进程错误地挂载到一个已经被终止的僵尸 Gazebo 实例上。
+    """
     master_uri = os.environ.get('GAZEBO_MASTER_URI', 'http://127.0.0.1:11345')
     parsed = urlparse(master_uri)
     host = parsed.hostname or '127.0.0.1'
@@ -85,7 +106,10 @@ def ensure_fresh_gazebo_master(_context):
 
 
 def check_yolo_runtime(context):
-    """Fail before Gazebo starts when the YOLO interpreter is unusable."""
+    """
+    OpaqueFunction：预检查 YOLO 运行时环境是否正常。
+    防止因为 PyTorch 版本不兼容导致 Gazebo 启动后延迟报错。
+    """
     interpreter = LaunchConfiguration('yolo_python_executable').perform(context)
     if not os.path.isfile(interpreter) or not os.access(interpreter, os.X_OK):
         raise RuntimeError(
@@ -116,6 +140,11 @@ def check_yolo_runtime(context):
 
 
 def prepare_orchard(context, simulation_share, base_model_path):
+    """
+    OpaqueFunction：动态生成果园 SDF 世界文件。
+    根据 `orchard_seed` 和 `diseased_fruit_ratio` 参数，
+    生成不同分布的病树。
+    """
     seed = LaunchConfiguration('orchard_seed').perform(context)
     ratio = LaunchConfiguration('diseased_fruit_ratio').perform(context)
     world = generate_orchard_assets(
@@ -135,6 +164,7 @@ def prepare_orchard(context, simulation_share, base_model_path):
 
 
 def generate_launch_description():
+    # ------------------------- 1. 声明所有 Launch 参数 -------------------------
     use_nav2 = LaunchConfiguration('use_nav2')
     use_rviz = LaunchConfiguration('use_rviz')
     gazebo_gui = LaunchConfiguration('gazebo_gui')
@@ -154,6 +184,8 @@ def generate_launch_description():
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
     mock_target_config = LaunchConfiguration('mock_target_config')
     replay_target_config = LaunchConfiguration('replay_target_config')
+
+    # 获取各个功能包的共享目录路径
     description_share = get_package_share_directory('wvcsc_description')
     simulation_share = get_package_share_directory('wvcsc_simulation')
     arm_task_share = get_package_share_directory('wvcsc_arm_task')
@@ -166,6 +198,8 @@ def generate_launch_description():
     gazebo_share = get_package_share_directory('gazebo_ros')
     nav2_share = get_package_share_directory('nav2_bringup')
     navigation_share = get_package_share_directory('my_navigation2')
+
+    # Gazebo 模型路径设置
     alicia_model_root = os.path.dirname(
         get_package_share_directory('alicia_m_descriptions'))
     gazebo_model_path = os.pathsep.join(filter(None, [
@@ -179,6 +213,8 @@ def generate_launch_description():
         '/usr/share/gazebo-11',
         '/opt/ros/humble/share',
     ]))
+
+    # ------------------------- 2. 机器人模型描述 (URDF & SRDF) -------------------------
     xacro_file = os.path.join(description_share, 'urdf', 'wvcsc_utb_alicia.urdf.xacro')
     robot_description = {
         'robot_description': ParameterValue(
@@ -197,6 +233,8 @@ def generate_launch_description():
         )
     }
 
+    # MoveIt 语义 SRDF 文件运行时补丁：
+    # 将机械臂的基座从 `base_link` 改写为 `alicia_base_link`，与整车模型匹配。
     srdf_path = os.path.join(moveit_share, 'config', 'alicia_m_v1_1_follower.srdf')
     with open(srdf_path, encoding='utf-8') as stream:
         semantic = stream.read()
@@ -206,6 +244,7 @@ def generate_launch_description():
     semantic = semantic.replace(
         '<virtual_joint name="virtual_joint" type="fixed" '
         'parent_frame="world" child_link="base_link"/>', '')
+    # 插入 C10 相机与机械臂末端的碰撞对排除配置，避免 MoveIt 视为自碰撞
     c10_disabled_collisions = '''
     <disable_collisions link1="tool0" link2="camera_link" reason="Adjacent"/>
     <disable_collisions link1="link6" link2="camera_link" reason="Mount"/>
@@ -216,6 +255,7 @@ def generate_launch_description():
         '</robot>', f'{c10_disabled_collisions}</robot>')
     robot_description_semantic = {'robot_description_semantic': semantic}
 
+    # 运动学求解器、关节限制、规划器与控制器配置加载
     kinematics = load_yaml('alicia_m_moveit_config', 'config/kinematics.yaml')
     kinematics['arm']['kinematics_solver_timeout'] = 0.05
     robot_description_kinematics = {
@@ -250,9 +290,8 @@ def generate_launch_description():
             'publish_transforms_updates': True,
         },
     ]
-    # MoveGroup keeps KDL for global planning.  MoveIt Servo deliberately does
-    # not receive robot_description_kinematics, so Humble uses its fast inverse
-    # Jacobian path instead of running a numerical IK search every control tick.
+    # MoveIt Servo 不加载 Kinematics (逆运动学) 求解器，
+    # 使得底层采用快速逆雅可比路径，而不是每个控制周期都跑数值 IK。
     servo_moveit = [
         robot_description,
         robot_description_semantic,
@@ -262,12 +301,13 @@ def generate_launch_description():
     servo_parameters = load_yaml(
         'wvcsc_visual_servo', 'config/moveit_servo.yaml')
 
+    # ------------------------- 3. 基础仿真组件 (Gazebo, Spawn, RSP) -------------------------
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(gazebo_share, 'launch', 'gazebo.launch.py')),
         launch_arguments={
             'world': orchard_world,
             'verbose': 'false',
-            'pause': 'true',
+            'pause': 'true',        # 必须从暂停状态启动，以便在零重力环境下加载控制器
             'gui': gazebo_gui,
         }.items(),
     )
@@ -281,6 +321,9 @@ def generate_launch_description():
                    '-x', '0', '-y', '0', '-z', '0'],
         output='screen',
     )
+
+    # ------------------------- 4. 仿真重力控制策略 (极其关键) -------------------------
+    # 为了防止机械臂在控制器未加载前因重力坠落，采用：设定零重力 -> 生成控制器 -> 恢复重力
     zero_gravity = ExecuteProcess(
         cmd=[
             'gz', 'topic', '-p', '/gazebo/orchard/physics',
@@ -307,6 +350,8 @@ def generate_launch_description():
         output='log',
         condition=UnlessCondition(enable_arm_control),
     )
+
+    # ------------------------- 5. 车辆仿真与机械臂控制节点 -------------------------
     vehicle_sim = Node(
         package='wvcsc_simulation', executable='ackermann_sim.py',
         parameters=[{
@@ -333,6 +378,7 @@ def generate_launch_description():
         ],
         condition=IfCondition(enable_arm_control), output='screen',
     )
+    # 机械臂基础参数传递
     arm_task_parameters = {
         'base_frame': 'alicia_base_link',
         'group_name': 'arm',
@@ -358,6 +404,7 @@ def generate_launch_description():
         parameters=[arm_task_parameters],
         condition=IfCondition(enable_arm_control), output='screen',
     )
+    # 控制器生成参数 (要求每个生成器必须在 30 秒内完成)
     spawner_arguments = [
         '--controller-manager', '/controller_manager',
         '--controller-manager-timeout', '30.0',
@@ -388,9 +435,9 @@ def generate_launch_description():
         ],
         condition=IfCondition(enable_arm_control), output='screen',
     )
-    # Keep Servo composable and API-compatible. Humble still puts its internal
-    # callbacks in one mutually-exclusive group, so the Gazebo profile disables
-    # the blocking online collision timer in moveit_servo.yaml.
+
+    # ------------------------- 6. 视觉伺服与 MoveIt Servo -------------------------
+    # 将 MoveIt Servo 打包成 ComposableNodeContainer (组合节点容器)
     moveit_servo = ComposableNodeContainer(
         name='moveit_servo_container',
         namespace='',
@@ -419,6 +466,19 @@ def generate_launch_description():
         ],
         condition=IfCondition(enable_arm_control), output='screen',
     )
+    # 喷洒仿真模拟器
+    spray_simulator = Node(
+        package='wvcsc_arm_task', executable='spray_simulator',
+        parameters=[
+            os.path.join(spray_share, 'config', 'spray_sim.yaml'),
+            {'use_sim_time': True},
+        ],
+        condition=IfCondition(enable_arm_control), output='screen',
+    )
+
+    # ------------------------- 7. 控制器顺序启动链 (事件驱动) -------------------------
+    # 使用 OnProcessExit 构建严格的链式依赖关系：
+    # joint_state_broadcaster 成功启动 -> arm_controller 启动
     start_arm_controller = RegisterEventHandler(OnProcessExit(
         target_action=joint_state_controller,
         on_exit=partial(
@@ -426,10 +486,12 @@ def generate_launch_description():
             process_name='joint_state_broadcaster spawner',
             success_actions=[arm_controller]),
     ))
+    # physics 在零重力下 unpause (取消暂停)
     start_zero_gravity_physics = RegisterEventHandler(OnProcessExit(
         target_action=zero_gravity,
         on_exit=[unpause_with_zero_gravity],
     ))
+    # arm_controller 成功启动 -> gripper_controller 启动
     start_gripper_controller = RegisterEventHandler(OnProcessExit(
         target_action=arm_controller,
         on_exit=partial(
@@ -437,16 +499,16 @@ def generate_launch_description():
             process_name='arm_controller spawner',
             success_actions=[gripper_controller]),
     ))
+    # gripper_controller 成功启动 -> 恢复重力 -> 启动喷洒任务节点
     start_spray_task = RegisterEventHandler(OnProcessExit(
         target_action=gripper_controller,
-        # Controller switching requires Gazebo's update loop. Physics therefore
-        # runs with zero gravity during startup, then normal gravity is restored
-        # only after every arm controller has been spawned.
         on_exit=partial(
             process_exit_actions,
             process_name='gripper_controller spawner',
             success_actions=[restore_gravity, spray_task]),
     ))
+
+    # ------------------------- 8. TF 静态变换 (世界坐标与地图对齐) -------------------------
     world_map = Node(
         package='tf2_ros', executable='static_transform_publisher',
         arguments=['--x', '0', '--y', '0', '--z', '0', '--roll', '0', '--pitch', '0', '--yaw', '0',
@@ -459,6 +521,8 @@ def generate_launch_description():
                    '--frame-id', 'map', '--child-frame-id', 'odom'],
         output='log',
     )
+
+    # ------------------------- 9. Nav2 导航栈 -------------------------
     nav2_params = os.path.join(simulation_share, 'config', 'nav2_sim.yaml')
     map_server = Node(
         package='nav2_map_server', executable='map_server', name='map_server',
@@ -488,6 +552,8 @@ def generate_launch_description():
         }.items(),
         condition=IfCondition(use_nav2),
     )
+
+    # ------------------------- 10. 任务管理与感知 (Mock UAV, YOLO) -------------------------
     mission_manager = Node(
         package='wvcsc_mission_manager', executable='mission_manager',
         parameters=[
@@ -536,17 +602,9 @@ def generate_launch_description():
             use_nav2_qt, "' != 'true'",
         ])), output='screen',
     )
-    spray_simulator = Node(
-        package='wvcsc_arm_task', executable='spray_simulator',
-        parameters=[
-            os.path.join(spray_share, 'config', 'spray_sim.yaml'),
-            {'use_sim_time': True},
-        ],
-        condition=IfCondition(enable_arm_control), output='screen',
-    )
     yolo_vision = Node(
         package='wvcsc_rgb_vision', executable='two_stage_yolo',
-        prefix=[yolo_python_executable],
+        prefix=[yolo_python_executable],  # 指定独立的 Python 虚拟环境解释器
         additional_env={
             'PYTHONNOUSERSITE': '1',
             'YOLO_CONFIG_DIR': '/tmp/wvcsc_ultralytics',
@@ -558,6 +616,8 @@ def generate_launch_description():
         on_exit=[Shutdown(reason='YOLO perception node exited')],
         output='screen',
     )
+
+    # ------------------------- 11. 可视化 (RViz2) -------------------------
     rviz = Node(
         package='rviz2', executable='rviz2',
         arguments=['-d', os.path.join(simulation_share, 'rviz', 'wvcsc.rviz')],
@@ -571,23 +631,26 @@ def generate_launch_description():
         ],
         condition=IfCondition(use_rviz), output='log',
     )
+
+    # ------------------------- 12. 后处理启动链 (OnProcessExit) -------------------------
     post_spawn = RegisterEventHandler(OnProcessExit(
         target_action=spawn,
         on_exit=[
-            zero_gravity,
-            unpause_without_arm,
-            TimerAction(period=0.5, actions=[vehicle_sim]),
-            TimerAction(period=0.75, actions=[yolo_vision]),
-            TimerAction(period=1.5, actions=[joint_state_controller]),
-            TimerAction(period=2.0, actions=[map_server, map_lifecycle]),
-            TimerAction(period=3.0, actions=[nav2]),
+            zero_gravity,                               # 生成模型后立刻将重力置零
+            unpause_without_arm,                       # 如果没有机械臂，直接取消暂停
+            TimerAction(period=0.5, actions=[vehicle_sim]),   # 0.5秒后启动里程计仿真
+            TimerAction(period=0.75, actions=[yolo_vision]),  # 0.75秒后启动 YOLO
+            TimerAction(period=1.5, actions=[joint_state_controller]), # 1.5秒后启动关节广播
+            TimerAction(period=2.0, actions=[map_server, map_lifecycle]), # 2.0秒后启动地图服务器
+            TimerAction(period=3.0, actions=[nav2]),    # 3.0秒后启动导航栈
             TimerAction(
                 period=6.0,
-                actions=[mission_manager, mock_uav, replay_uav, nav2_qt],
+                actions=[mission_manager, mock_uav, replay_uav, nav2_qt], # 6.0秒后启动任务调度和无人机Mock
             ),
         ],
     ))
 
+    # ------------------------- 13. LaunchDescription 组装 -------------------------
     return LaunchDescription([
         DeclareLaunchArgument('use_nav2', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='false'),
@@ -616,9 +679,11 @@ def generate_launch_description():
             default_value=os.path.join(uav_share, 'config', 'replay_targets.yaml')),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),
+        # 前置安全检查 (若检查失败，直接终止 Launch 启动)
         OpaqueFunction(function=validate_arm_scaling),
         OpaqueFunction(function=ensure_fresh_gazebo_master),
         OpaqueFunction(function=check_yolo_runtime),
+        # 动态生成果园世界
         OpaqueFunction(
             function=prepare_orchard,
             args=[simulation_share, gazebo_model_path],

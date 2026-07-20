@@ -1,43 +1,128 @@
+# vision_sim.yaml
+# ============================================================================
+# WVCSC 两阶段 YOLO 感知节点 (wvcsc_two_stage_yolo) 参数配置文件
+# ============================================================================
+#
+# 节点职责：
+# 1. 订阅 C10 相机图像，根据 `inference_mode` (idle/tree/fruits/target)
+#    执行轻量级推理。
+# 2. 输出 `/vision/tree_detections` 和 `/vision/fruit_detections`。
+# 3. 在目标锁定模式下，对特定病果的掩膜进行深度处理，获取安全喷洒点
+#    (`aim_u/v`)，并发布给视觉伺服节点。
+#
+
 wvcsc_two_stage_yolo:
   ros__parameters:
-    image_topic: /camera/camera/color/image_raw
+
+    # ----------------------------------------------------------------------
+    # 1. 话题与服务接口配置
+    # ----------------------------------------------------------------------
+    # 输入话题：C10 RGB 相机原始图像 (1280x720)
+    image_topic: /camera/color/image_raw
+
+    # 输入话题：从 `spray_task` 发来的“当前要锁定的目标 ID”
     selected_target_topic: /vision/selected_target_id
+
+    # 输出话题：第一阶段的树检测结果 (检测框)
     tree_detections_topic: /vision/tree_detections
+    # 输出话题：第二阶段的果实实例分割结果 (分割掩膜)
     fruit_detections_topic: /vision/fruit_detections
+    # 输出话题：最终发送给视觉伺服的 Target2D 目标 (包含用于喷洒的安全像素点)
     target_topic: /vision/target
+
+    # 调试可视化话题 (发布带标注的 OpenCV 图像)
     tree_visualization_topic: /vision/tree_debug_image
     fruit_visualization_topic: /vision/fruit_debug_image
+    # 调试 JSON 话题：包含 `aim_u/v` 和每个目标的 ID，用于 PlotJuggler 性能分析
     perception_debug_topic: /vision/perception_debug
     perception_debug_rate_hz: 5.0
-    tree_model_path: wvcsc_tree_yolov8s.pt
-    fruit_model_path: wvcsc_fruit_yolov8s_seg.pt
+
+    # 输入话题：控制感知阶段的推理模式 (idle/tree/fruits/target)
     inference_mode_topic: /vision/inference_mode
+
+    # ----------------------------------------------------------------------
+    # 2. 模型权重文件配置
+    # ----------------------------------------------------------------------
+    # 注：相对路径会解析到 `wvcsc_rgb_vision/models/` 目录下。
+    # `s` 代表 YOLOv8 Small 版本，在 NVIDIA 嵌入式平台(如 Jeston)上有较好平衡。
+    tree_model_path: wvcsc_tree_yolov8s1.pt
+    fruit_model_path: wvcsc_fruit_yolov8s_seg1.pt
+
+    # ----------------------------------------------------------------------
+    # 3. 推理与置信度阈值
+    # ----------------------------------------------------------------------
+    # 树检测的最低置信度 (0.10 允许部分遮挡的树通过)
     tree_confidence: 0.10
+    # 病果分割的最低置信度 (YOLO 的分割掩膜即使置信度低，仍具有较好的边界特征)
     fruit_confidence: 0.10
+
+    # 当在树区域内进行果实分割时，ROI 放大比例。
+    # 0.10 表示在树框外扩大 10% 的范围，确保边缘的病果不会被切掉。
     roi_padding: 0.10
+
+    # ----------------------------------------------------------------------
+    # 4. 短期目标跟踪 (Tracking) 配置
+    # ----------------------------------------------------------------------
+    # 连续两帧间如果 IoU > 0.20，判定为同一个目标，赋予相同的 `target_id`。
     track_iou_threshold: 0.20
+    # 如果由于相机镜头畸变导致 IoU 不再重叠，但中心距离 < 50px，也判定为同一目标。
     track_center_distance_px: 50.0
+    # 允许 YOLO 连续漏检的最大帧数。
+    # 设定为 5 帧，对应约 0.16 秒（~30Hz），可容纳 YOLO 短暂卡顿。
     track_max_missed_frames: 5
+
+    # ----------------------------------------------------------------------
+    # 5. 选中目标重关联 (Target Re-association) 配置
+    # ----------------------------------------------------------------------
+    # 当视觉伺服导致机械臂大幅运动（粗定位），目标在画面中明显漂移时，
+    # 使用更宽泛的距离容差 (160px) 重新关联锁定目标。
+    target_reassociation_distance_px: 160.0
+
+    # 重关联时的歧义防护：如果候选目标与参考目标的 IoU 差值小于 0.10，
+    # 则认为出现了重关联歧义（两个果实长得太像），此时节点会丢弃目标，
+    # 避免视觉伺服喷错病果。
     target_reassociation_iou_margin: 0.10
     target_reassociation_distance_margin_px: 8.0
-    # Wider than ordinary frame tracking to bridge the known camera motion
-    # introduced by one coarse target recenter; task selection remains explicit.
-    target_reassociation_distance_px: 160.0
-    # Merge only masks whose safe spray points are already within fine tolerance.
+
+    # 如果两个重关联候选的安全瞄准点 (aim_u/v) 非常接近（距离 < 8px），
+    # 则判定为等效目标，允许重关联。
     target_equivalent_aim_distance_px: 8.0
-    # Damp the safe-mask-point noise without adding more than about 0.2 s lag
-    # at the measured 25-30 Hz inference rate.
+
+    # ----------------------------------------------------------------------
+    # 6. 安全喷洒点 (Safe Aim Point) 平滑滤波
+    # ----------------------------------------------------------------------
+    # 由于 YOLO 的分割掩膜存在像素级抖动，导致直接计算的 `aim_u/v`
+    # 会发生高频跳变。使用 EMA (指数移动平均) 平滑最终的喷洒点坐标。
+    # 0.20 的 Alpha 值在约 30 Hz 的推理频率下，引入了约 0.2 秒的滞后，
+    # 有效滤除了掩膜边缘的噪声。
     target_lock_ema_alpha: 0.20
-    # Invalid YOLO frames already stop Servo and may recover for 0.75 s.  Do not
-    # replace a real segmentation point with template matching, which can lock
-    # onto nearby leaves and create a slow target drift.
-    # Bridge short YOLO dropouts while MoveIt recenters the camera. The arm-side
-    # fixed-radius stability gate must pass before Servo can start.
+
+    # ----------------------------------------------------------------------
+    # 7. 目标模板匹配 (Template Tracking) 配置
+    # ----------------------------------------------------------------------
+    # 是否启用在 YOLO 漏检时的临时模板匹配跟踪。
+    # 当 YOLO 漏检时，使用 OpenCV 的 `cv2.matchTemplate` 继续锁定目标，
+    # 防止视觉伺服因短暂漏检而发生剧烈抖动。
     target_template_tracking_enabled: true
+
+    # 只有当 YOLO 给出的置信度大于 0.30 时，才更新模板。
+    # 防止将低质量的“虚影”保存为模板，导致后续匹配偏移。
     target_template_update_min_confidence: 0.30
+    # 截取模板区域时，在检测框外侧向外扩展的比例 (50%) 和最小像素边界 (6px)
     target_template_padding_ratio: 0.50
     target_template_min_padding_px: 6.0
+
+    # 使用模板匹配时，在当前帧的搜索范围半径 (80px)。
     target_template_search_radius_px: 80.0
+    # 模板匹配的相似度阈值 (NCC, 0~1)。0.55 表示必须有较高相似度才确认目标。
     target_template_min_score: 0.55
+
+    # ----------------------------------------------------------------------
+    # 8. 树锁定与调试可视化
+    # ----------------------------------------------------------------------
+    # 当需要在多棵树之间切换时，如果新检测的树与上一棵锁定的树
+    # IoU 重叠 > 0.20，则认为还在同一棵树上。
     tree_lock_iou_threshold: 0.20
+
+    # 是否发布带有标注的调试图像 (黄色高亮为病果，绿色为树，红色健康果，蓝色为安全点)。
     publish_visualization: true

@@ -1,71 +1,180 @@
+# visual_servo.yaml
+# ============================================================================
+# 视觉伺服 (wvcsc_visual_servo) 节点参数配置文件
+# ============================================================================
+#
+# 节点职责：接收 C10 RGB 相机图像中目标 (Target2D) 的像素偏差，通过 PID 控制器
+# 计算速度指令 (Twist)，并发布给 MoveIt Servo 节点，实现对目标的实时伺服对准。
+# 本参数严格控制了控制频率、收敛精度、安全保护及底层的速度/加速度限制。
+#
+
 wvcsc_visual_servo:
   ros__parameters:
+
+    # ----------------------------------------------------------------------
+    # 1. ROS 话题与服务接口配置
+    # ----------------------------------------------------------------------
+    # 对外暴露的 Action 服务名称，供 `spray_task` 调用以锁定并执行单目标对准。
     action_name: /vision/align_target
+
+    # 输入话题：视觉感知模块发布的当前锁定目标像素信息。
     target_topic: /vision/target
-    camera_info_topic: /camera/camera/color/camera_info
+    # 输入话题：相机内参信息，用于将图像像素误差转换为真实角度误差。
+    camera_info_topic: /camera/color/camera_info
+    # 输出话题：计算出的笛卡尔速度指令，发布给 MoveIt Servo 节点。
     twist_topic: /servo_node/delta_twist_cmds
+    # 输入话题：MoveIt Servo 节点的工作状态和警告码（用于检测奇异点）。
     servo_status_topic: /servo_node/status
+    # 输入话题：机械臂的关节状态反馈（当前仅用于调试日志）。
     joint_state_topic: /joint_states
+
+    # 调试信息：以 JSON 格式发布的高频全状态诊断信息。
     debug_topic: /vision/visual_servo_debug
+    # 调试信息发布频率 (5 Hz 足够记录控制周期的状态，不影响主循环)。
     debug_rate_hz: 5.0
-    # Human-readable terminal progress only; it does not affect the 30 Hz loop.
+    # 终端控制台的人类可读日志更新频率。
     terminal_status_rate_hz: 1.0
+
+    # MoveIt Servo 的生命周期管理服务。
     start_servo_service: /servo_node/start_servo
     stop_servo_service: /servo_node/stop_servo
+
+    # 速度指令参考的坐标系 (必须是 C10 相机的光学坐标系)。
     command_frame: camera_color_optical_frame
-    # Performance-first Gazebo profile; retune conservatively before hardware.
+
+    # ----------------------------------------------------------------------
+    # 2. 控制频率与超时配置
+    # ----------------------------------------------------------------------
+    # 【核心参数】控制回路频率。
+    # 根据文档 `11.9` 节 "视觉控制 30 Hz 分层升级"，设定为 30 Hz。
+    # 这要求感知节点必须以不低于 30 Hz 的频率发布 Target2D。
     control_rate_hz: 30.0
+
+    # 全局默认对准超时时间（秒）。
     default_timeout_sec: 8.0
+    # 单个 Goal 允许的最大/最小超时限制。
     min_goal_timeout_sec: 0.5
     max_goal_timeout_sec: 30.0
+
+    # ----------------------------------------------------------------------
+    # 3. 目标状态与有效时限
+    # ----------------------------------------------------------------------
+    # 目标连续无效（未收到 Target2D）的最大容忍时间。
+    # 0.75 秒对应约 22 帧 YOLO 漏检。
     target_stale_timeout_sec: 0.75
+    # 无效信号保持时间：当收到无效目标时，保持命令输出 0.25 秒后再进入等待状态。
+    # 这防止一帧误检导致伺服剧烈抖动。
     target_invalid_hold_sec: 0.25
+
+    # YOLO 推理置信度的最低准入阈值。
     min_confidence: 0.10
+
+    # ----------------------------------------------------------------------
+    # 4. 像素对准精度与收敛容差（核心闭环指标）
+    # ----------------------------------------------------------------------
+    # 粗调阈值：当像素误差小于 20px 时，伺服进入减速区（配合近目标速度缩放）。
     coarse_tolerance_px: 20.0
-    # Leave margin to the stated < 2 px requirement and detector jitter.
+    # 【严格目标】最终对准精度：误差必须小于 1.5 像素，才能判定为对准成功。
+    # 在测量中，双轴均需小于该值。
     fine_tolerance_px: 1.5
-    # Once a target has entered the final tolerance, suppress PID commands
-    # until noise clearly exceeds the final radius. A wide 3 px band could
-    # hold zero forever at 2-3 px and make the strict 1.5 px success condition
-    # unreachable, so keep only a narrow 0.5 px hysteresis band.
+    # 控制恢复阈值（迟滞带）：当误差超过 2.0px 时，PID 才会重新介入控制。
+    # 这防止了在 1.5px 附近因像素抖动而反复“启动-停止”伺服。
     control_resume_tolerance_px: 2.0
+
+    # 稳定时间：误差连续保持在 `fine_tolerance_px` 内的秒数，达到此值才上报对齐成功。
     stable_duration_sec: 0.50
+
+    # 进度窗口与最小进度：如果在 4.0 秒内，误差缩小幅度少于 1.0px，
+    # 则认为伺服运动陷入卡顿（Stalled），触发超时退出并切换观察角度。
     progress_window_sec: 4.0
     min_progress_px: 1.0
+
+    # 图像期望偏置：指定目标在画面中的理想像素位置。
+    # V 轴设置为 +28px，意味着目标最终会落在图像中心偏下 28px 处。
+    # 这是为了给末端的喷洒喷头留出物理间隙，防止喷头完全遮挡相机视野。
     desired_offset_u_px: 0.0
-    # Camera is about 55 mm from the tool0 axis: fy * 0.055 / 1.0 m.
     desired_offset_v_px: 28.0
+
+    # ----------------------------------------------------------------------
+    # 5. 相机内参容错
+    # ----------------------------------------------------------------------
+    # 如果相机驱动没有及时发布 `CameraInfo`，使用以下默认值作为备用。
     fallback_fx: 507.872735
     fallback_fy: 507.872735
+    # 是否强制等待 CameraInfo。
     require_camera_info: true
+
+    # ----------------------------------------------------------------------
+    # 6. PID 控制器参数（图像平面 XY 轴独立控制）
+    # ----------------------------------------------------------------------
+    # 比例增益 (KP=4.0) 较高，以确保响应速度，让目标快速进入对准区域。
     pid_kp_xy: 4.00
+    # 积分增益 (KI=0.0) 关闭。在视觉伺服中，静差通常在 1.5px 以内，无需积分消除。
     pid_ki_xy: 0.0
+    # 微分增益 (KD=0.005) 很小，用于补偿视觉运动产生的微小阻尼。
     pid_kd_xy: 0.005
+
+    # 微分项 EMA 平滑滤波系数 (Alpha=0.65)，用于平滑单帧像素剧烈跳变带来的速度冲击。
     pid_d_ema_alpha: 0.65
+    # 微分项限幅 (2.0)，防止单帧像素跳变过大导致速度指令突变。
     derivative_clip_xy: 2.0
+    # 积分限幅 (0.10)，防止积分项在长时间无视觉反馈时无限累加。
     integral_limit_xy: 0.10
-    max_linear_speed: 0.08
-    max_linear_acceleration: 0.60
+
+    # ----------------------------------------------------------------------
+    # 7. 速度与加速度限制 (平移运动)
+    # ----------------------------------------------------------------------
+    # 视觉伺服 (眼睛在手 Eye-in-Hand) 模式下，相机光轴方向受姿态微调影响。
+    max_linear_speed: 0.08      # 最大线速度 0.08 m/s
+    max_linear_acceleration: 0.60 # 最大线加速度 0.60 m/s²
+
+    # 接近目标时的降速策略。
+    # 当处于近目标区 (`coarse_tolerance_px = 20px` 以内) 时，速度乘以 `1.0` (不降速)。
     near_target_speed_scale: 1.0
+    # 当误差小于 6.0px 时（非常接近最终目标），应用 `near_target_control_scale=0.35` 进行强力降速。
+    # 这个 0.35 的系数是为了防止 PID 在极小像素偏差下发生过冲和振荡。
     near_target_control_threshold_px: 6.0
     near_target_control_scale: 0.35
-    # MoveIt Servo already scales status-1 commands from condition 17 to 30.
-    # Do not apply a second 0.35 multiplier in the IBVS node.
+
+    # 当 MoveIt Servo 返回减速状态（如接近奇异点）时，是否对视觉命令应用缩放。
     warning_speed_scale: 1.0
-    # The target is already temporally filtered by perception. Extrapolating a
-    # one-frame mask fluctuation produced avoidable near-target overshoot.
+
+    # 目标位置预测参数 (Precision Control)。
+    # 目标经过视觉感知层（YOLO/Kalman）已经进行了平滑。这里不再进行预测 (lead=0.0)，
+    # 避免在接近 1.5px 的微调阶段产生过冲。
     predict_lead_sec: 0.0
     max_predict_horizon_sec: 0.05
-    # Eye-in-hand image alignment is angular: after MoveIt places the camera
-    # inside the 48 px work area, small pitch/yaw corrections move the target
-    # across the image faster than camera translation while preserving distance.
+
+    # ----------------------------------------------------------------------
+    # 8. 指令模式转换 (Angular vs Linear)
+    # ----------------------------------------------------------------------
+    # 命令模式：`angular_xy` 或 `linear_xy`。
+    # 本项目使用 `angular_xy` (图像平面上可调节 X/Y 轴的角速度)。
+    # 因为相机安装在机械臂末端 (Eye-in-Hand)，固定喷洒距离已由 MoveIt 规划保证，
+    # 本节点不控制深度，仅通过微小的俯仰/偏航旋转，将病果“拉”回图像中心。
     command_mode: angular_xy
-    max_angular_speed: 0.45
-    max_angular_acceleration: 3.00
-    # 8 / 30 Hz ~= 0.267 s: preserve the pre-stop zero-command duration.
+
+    # 角速度/角加速度限制。
+    max_angular_speed: 0.45          # 最大角速度 0.45 rad/s
+    max_angular_acceleration: 3.00   # 最大角加速度 3.00 rad/s²
+
+    # ----------------------------------------------------------------------
+    # 9. 停止与状态码管理
+    # ----------------------------------------------------------------------
+    # 停止前发送零速度指令的数量。
+    # 8 条零指令 / 30 Hz ≈ 0.267 秒。在执行 `stop_servo` 前，先发布足够的刹车指令，
+    # 确保底层控制器完全停车。
     zero_command_count: 8
+
+    # 服务通讯超时。
     service_timeout_sec: 2.0
+
+    # MoveIt Servo 状态码分类策略（需与 `servo_status_policy.py` 保持一致）。
+    # 减速码 (1, 3)：接近奇异点/碰撞，视觉节点降速但继续运行。
     servo_status_decel_codes: [1, 3]
+    # 透传码 (6)：离开奇异点的过渡状态，视觉节点可忽略，继续正常控制。
     servo_status_passthrough_codes: [6]
+    # 可恢复停止码 (2)：进入奇异点，视觉节点应立即停止运动并通知任务管理器切换视角。
     servo_singularity_status_code: 2
+    # 硬停止码 (4, 5)：撞到关节限位或严重碰撞，必须触发安全停止。
     servo_status_halt_codes: [4, 5]

@@ -1,13 +1,21 @@
-"""C10 两阶段 YOLO 感知、病果跟踪与视觉伺服目标发布节点。
+# two_stage_yolo.py
+"""
+C10 两阶段 YOLO 感知、病果跟踪与视觉伺服目标发布节点。
 
-图像数据流为：整帧树木检测 -> 扩展树木 ROI -> 健康/病果分割 -> 重复实例去除 ->
-跨帧 ID 关联。机械臂通过 ``/vision/selected_target_id`` 锁定一颗病果后，节点在
-``target`` 模式持续发布 ``Target2D``；其 ``center_u/v`` 是分割掩膜内距离边界最远
-的安全喷洒点，不是检测框中心。
+图像数据流如下：
+1. 全图 YOLO 树木检测 (`tree` 模式) -> 获得 Bounding Box。
+2. 在树木 Box 基础上按 ROI 扩边 -> 进行 YOLO 果实实例分割 (`fruits`/`target` 模式)。
+3. 对分割掩膜进行 Duplicate 去除、跨帧 ID 关联 (`assign_track_ids`)。
+4. 机械臂通过 `/vision/selected_target_id` 锁定病果 ID 后，持续计算掩膜的“安全喷洒点”
+   (`aim_u/v`) 并发布给视觉伺服节点。
 
-所有图像坐标和尺寸单位为像素，原点在左上角，``u`` 向右、``v`` 向下。感知层
-``Instance`` 只描述当前/短期跟踪实例，任务层会另外维护跨观察位的目标状态，二者
-不可合并。目标关联歧义时发布无效目标并停机等待，禁止为了连续性改喷邻近病果。
+重要工程概念：
+- 使用 `safe aim point` 代替检测框中心：通过 `cv2.distanceTransform` 计算掩膜内部
+  距离边界最远的核心点，将控制点从易变的边缘拉回稳定的果实内部，极大提升了伺服稳定性。
+- 任务层 ID 与感知层 ID 分离：感知层 ID 仅用于当前连续帧的短期跟踪；
+  任务层 ID 由 `spray_task` 管理，跨运动重置。
+- 模板匹配 (`template tracking`) 兜底：在 YOLO 由于光照或抖动短暂漏检时，
+  通过 OpenCV 模板匹配延续目标的视觉追踪，防止 30 Hz 控制环因 2 帧丢失而剧烈震荡。
 """
 
 from dataclasses import dataclass, replace
@@ -36,19 +44,29 @@ from .model_utils import (
     validate_yolo_model,
 )
 
+# ============================================================================
+# 第一部分：感知数据类定义与几何运算
+# ============================================================================
+
 
 @dataclass(frozen=True)
 class Instance:
-    """一帧中的树或果实实例；``aim_u/v`` 是掩膜安全瞄准点。"""
-    target_id: str
-    class_name: str
-    confidence: float
-    left: float
-    top: float
-    right: float
-    bottom: float
-    aim_u: float
-    aim_v: float
+    """
+    感知实例：一帧图像中检测到的树或果实。
+
+    注意：`aim_u` 和 `aim_v` 是分割掩膜的“安全瞄准点”，而不是检测框的中心点。
+    通过 `cv2.distanceTransform` 计算掩膜内部距离边界最远的点，确保伺服瞄准的是
+    果实的最核心区域，而非边缘。
+    """
+    target_id: str          # 感知层内部分配的跟踪 ID (如 fruit-1)
+    class_name: str         # 类别名称 (tree / healthy_fruit / diseased_fruit)
+    confidence: float       # YOLO 推理置信度
+    left: float             # 检测框左边界
+    top: float              # 检测框上边界
+    right: float            # 检测框右边界
+    bottom: float           # 检测框下边界
+    aim_u: float            # 安全瞄准点的图像 U 坐标 (列)
+    aim_v: float            # 安全瞄准点的图像 V 坐标 (行)
 
     @property
     def center_u(self):
@@ -67,6 +85,7 @@ class Instance:
         return self.bottom - self.top
 
     def iou(self, other):
+        """计算两个检测框的交并比 (IoU)。"""
         left, top = max(self.left, other.left), max(self.top, other.top)
         right, bottom = min(self.right, other.right), min(self.bottom, other.bottom)
         intersection = max(0.0, right - left) * max(0.0, bottom - top)
@@ -74,33 +93,54 @@ class Instance:
         return 0.0 if union <= 0.0 else intersection / union
 
     def distance_to(self, other):
+        """计算两个实例检测框中心的像素欧氏距离。"""
         return math.hypot(self.center_u - other.center_u,
                           self.center_v - other.center_v)
 
 
 @dataclass
 class Track:
-    """短期跨帧轨迹；允许少量漏检，但不会跨任务或树木复用。"""
-    instance: Instance
-    missed_frames: int = 0
+    """短期跨帧轨迹：记录某个实例在连续帧中的状态。"""
+    instance: Instance    # 当前帧的实例快照
+    missed_frames: int = 0  # 连续漏检的帧数（用于触发模板匹配兜底）
 
 
 @dataclass(frozen=True)
 class TargetTemplate:
-    """锁定病果的局部外观模板，用于短暂低置信度或 YOLO 空窗。"""
-    patch: np.ndarray
-    bbox_left: float
-    bbox_top: float
-    bbox_right: float
-    bbox_bottom: float
-    aim_u: float
-    aim_v: float
-    confidence: float
+    """
+    被锁定病果的局部外观模板。
 
+    当 YOLO 短暂漏检时，该模板用于通过 OpenCV 的模板匹配算法，
+    在 80px 范围内重新找回目标，保证伺服控制环不中断。
+    """
+    patch: np.ndarray           # 裁剪出的局部 RGB 图像块
+    bbox_left: float            # 模板中目标框的局部相对左坐标
+    bbox_top: float             # 模板中目标框的局部相对顶坐标
+    bbox_right: float           # 模板中目标框的局部相对右坐标
+    bbox_bottom: float          # 模板中目标框的局部相对底坐标
+    aim_u: float                # 模板中目标瞄准点的相对 U 坐标
+    aim_v: float                # 模板中目标瞄准点的相对 V 坐标
+    confidence: float           # 模板生成时目标的基础置信度
+
+
+# ============================================================================
+# 第二部分：模板匹配、去重与重关联算法
+# ============================================================================
 
 def capture_target_template(
         image, target, padding_ratio=0.50, min_padding_px=6.0):
-    """Capture a local appearance template after a YOLO target lock."""
+    """
+    在 YOLO 锁定目标后，截取并保存高质量的局部外观模板。
+
+    Args:
+        image: 原始 BGR 图像。
+        target (Instance): 当前 YOLO 锁定的病果实例。
+        padding_ratio (float): 外扩比例。
+        min_padding_px (float): 最小外扩像素。
+
+    Returns:
+        TargetTemplate: 包含裁剪图像块的模板数据，裁剪失败则返回 None。
+    """
     height, width = image.shape[:2]
     pad_x = max(float(min_padding_px), target.width * float(padding_ratio))
     pad_y = max(float(min_padding_px), target.height * float(padding_ratio))
@@ -125,7 +165,19 @@ def capture_target_template(
 def match_target_template(
         image, template, reference, search_radius_px=80.0,
         min_score=0.55):
-    """Track a locked target through a short YOLO dropout."""
+    """
+    在 YOLO 短暂漏检时，使用模板匹配找回目标。
+
+    Args:
+        image: 当前帧的 BGR 图像。
+        template (TargetTemplate): 之前保存的目标外观模板。
+        reference (Instance): 上一帧的参考实例。
+        search_radius_px (float): 在参考目标位置周围搜索的半径范围。
+        min_score (float): 归一化相关系数 (NCC) 的最小阈值 (0~1)。
+
+    Returns:
+        Instance: 根据模板匹配重建的实例，未匹配则返回 None。
+    """
     image_height, image_width = image.shape[:2]
     template_height, template_width = template.patch.shape[:2]
     previous_left = reference.left - template.bbox_left
@@ -166,7 +218,14 @@ def match_target_template(
 def deduplicate_instances(
         instances, iou_threshold=0.35, center_distance_px=10.0,
         class_confidence_margin=0.10):
-    """Collapse duplicate fruit masks and reject ambiguous class conflicts."""
+    """
+    消除果实分割中的重复实例，并拒绝类间置信度冲突。
+
+    由于 YOLOv8-seg 在多果实重叠时可能将同一个果实识别为不同的 ID，
+    因此使用 IoU 或中心距离进行并查集 (Union-Find) 去重。
+    若一个果实既被判定为 `healthy_fruit` 又被判定为 `diseased_fruit`，
+    且置信度差距极小 (< margin)，则直接丢弃该目标（避免误喷）。
+    """
     instances = list(instances)
     parents = list(range(len(instances)))
 
@@ -213,7 +272,11 @@ def deduplicate_instances(
 
 
 def track_matches(instances, tracks, iou_threshold, center_distance_px):
-    """Return a deterministic one-to-one instance-to-track association."""
+    """
+    将当前帧新实例与历史轨迹进行一一匹配。
+
+    优先使用 IoU 匹配；当框发生微小偏移但 IoU 归零时，降级到中心距离匹配。
+    """
     candidates = []
     for instance_index, instance in enumerate(instances):
         for track_index, track in enumerate(tracks):
@@ -222,8 +285,6 @@ def track_matches(instances, tracks, iou_threshold, center_distance_px):
             iou = instance.iou(track.instance)
             distance = instance.distance_to(track.instance)
             if iou >= iou_threshold or distance <= center_distance_px:
-                # Prefer overlap matches.  Centre distance is only the fallback
-                # for a detector jittering enough to lose box overlap.
                 candidates.append((
                     0 if iou >= iou_threshold else 1,
                     -iou,
@@ -244,7 +305,9 @@ def track_matches(instances, tracks, iou_threshold, center_distance_px):
 def reassociation_candidate(
         reference, instances, iou_threshold, center_distance_px,
         iou_margin, distance_margin_px, equivalent_aim_distance_px):
-    """Return a unique selected-target replacement, or a safe failure reason."""
+    """
+    当感知层 ID 漂移时，为选中的逻辑目标寻找物理层面的重关联候选。
+    """
     scored = []
     for instance in instances:
         if instance.class_name != 'diseased_fruit':
@@ -281,7 +344,12 @@ def reassociation_candidate(
 
 
 def smoothed_target(reference, target, alpha):
-    """Keep the detected geometry while damping only the spray point jitter."""
+    """
+    仅对安全瞄准点 (`aim_u/v`) 进行加权平滑。
+
+    保留 YOLO 提供的检测框尺寸，但使用 Alpha 指数移动平均 (EMA) 减轻
+    掩膜边界抖动带来的安全点跳变。
+    """
     alpha = float(alpha)
     return Instance(
         target.target_id, target.class_name, target.confidence,
@@ -290,6 +358,10 @@ def smoothed_target(reference, target, alpha):
         (1.0 - alpha) * reference.aim_v + alpha * target.aim_v,
     )
 
+
+# ============================================================================
+# 第三部分：调试数据结构与图像辅助工具
+# ============================================================================
 
 PERCEPTION_DEBUG_DEFAULTS = {
     'event': 'frame',
@@ -312,20 +384,20 @@ PERCEPTION_DEBUG_DEFAULTS = {
 
 
 def perception_debug_json(**values):
-    """Return a stable, machine-readable perception diagnostic payload."""
+    """发布结构稳定、机器可读的感知诊断 JSON 负载。"""
     payload = dict(PERCEPTION_DEBUG_DEFAULTS)
     payload.update(values)
     return json.dumps(payload, sort_keys=True, separators=(',', ':'))
 
 
 def perception_debug_due(last_time, now, rate_hz):
-    """Limit steady-state debug output while allowing the first sample."""
+    """限制稳态调试输出的频率，同时允许首帧立即发布。"""
     return (last_time is None or now - last_time >=
             1.0 / max(float(rate_hz), 1e-6) - 1e-9)
 
 
 def expanded_roi(left, top, right, bottom, image_width, image_height, padding):
-    """Return a clipped detector ROI with a proportional border."""
+    """按比例扩展检测框的 ROI，并在图像边界进行裁剪。"""
     width, height = right - left, bottom - top
     pad_x, pad_y = width * padding, height * padding
     return (
@@ -337,12 +409,15 @@ def expanded_roi(left, top, right, bottom, image_width, image_height, padding):
 
 
 def safest_mask_point(points, width, height):
-    """返回掩膜深部核心的稳定瞄准点，并保证结果仍位于果实内部。
+    """
+    【核心算法】返回掩膜内部距离边界最远的“安全瞄准点”。
 
-    距离变换的单个最大像素对分割轮廓的一像素变化非常敏感；圆形病果还可能有
-    多个等价最大值，``minMaxLoc`` 会任意选择其中一个。这里先取距离不小于最大值
-    80% 的安全核心，再选择最接近核心质心的真实核心像素。该点仍有足够边界余量，
-    同时避免视觉伺服因最大值在相邻像素间跳动而反复启停。
+    - 使用 `cv2.distanceTransform` 计算掩膜内部像素到最近轮廓边界的距离。
+    - 取出距离最大值 `maximum`。
+    - 选取距离大于 `0.80 * maximum` 的所有像素作为“安全核心区”。
+    - 计算安全核心区的质心，并寻找距离质心最近的真实核心像素点。
+    
+    该点拥有充足的边界余量，且不会在相邻像素间跳变，极大提升了视觉伺服的稳定性。
     """
     mask = np.zeros((height, width), dtype=np.uint8)
     cv2.fillPoly(mask, [np.asarray(points, dtype=np.int32)], 255)
@@ -357,11 +432,13 @@ def safest_mask_point(points, width, height):
     return float(column), float(row)
 
 
-class TwoStageYolo(Node):
-    """根据任务阶段切换推理负载，并维持单个选中病果的逻辑身份。
+# ============================================================================
+# 第四部分：ROS2 两阶段感知节点主体
+# ============================================================================
 
-    ``idle/tree/fruits/target`` 模式由机械臂节点控制。图像回调串行完成推理和发布；
-    MissionStatus 变化会清空树锁、轨迹和模板，避免上一棵树的 ID 污染下一棵树。
+class TwoStageYolo(Node):
+    """
+    根据任务阶段切换推理负载，并维持单个选中病果的逻辑身份。
     """
 
     def __init__(self):
@@ -411,8 +488,9 @@ class TwoStageYolo(Node):
             String, str(self.get_parameter('perception_debug_topic').value), 10)
 
     def _declare_parameters(self):
+        """声明并加载配置参数，与 `vision_sim.yaml` 对应。"""
         values = {
-            'image_topic': '/camera/camera/color/image_raw',
+            'image_topic': '/camera/color/image_raw',
             'selected_target_topic': '/vision/selected_target_id',
             'tree_detections_topic': '/vision/tree_detections',
             'fruit_detections_topic': '/vision/fruit_detections',
@@ -432,10 +510,8 @@ class TwoStageYolo(Node):
             'track_max_missed_frames': 5,
             'target_reassociation_iou_margin': 0.10,
             'target_reassociation_distance_margin_px': 8.0,
-            # Camera recentering can move a locked fruit farther than the
-            # ordinary frame-to-frame tracker gate.  This wider gate is used
-            # only while one explicit task target is selected; it is not used
-            # to merge unrelated fruits into the normal track set.
+            # 机械臂大幅度重心重定位可能使目标漂移超过 50px；
+            # 专用 160px 宽关口仅允许在同一明确任务目标下恢复关联。
             'target_reassociation_distance_px': 160.0,
             'target_equivalent_aim_distance_px': 8.0,
             'target_lock_ema_alpha': 0.20,
@@ -452,6 +528,7 @@ class TwoStageYolo(Node):
             self.declare_parameter(name, default)
 
     def _load_models(self):
+        """加载并校验两个 YOLO 模型权重 (检测 + 分割)。"""
         try:
             from ultralytics import YOLO
         except ImportError as error:
@@ -473,6 +550,7 @@ class TwoStageYolo(Node):
         return tree_model, fruit_model
 
     def _on_status(self, message):
+        """监听任务状态，当任务切换时重置所有视觉跟踪状态。"""
         active = message.state == MissionStatus.ARM_SPRAYING
         mission_id = message.mission_id if active else ''
         tree_id = message.current_tree_id if active else ''
@@ -486,7 +564,7 @@ class TwoStageYolo(Node):
             self._selected_target_template = None
 
     def _on_selected_target(self, message):
-        """幂等锁定逻辑目标；重复发布同一 ID 不得清空已有几何参考。"""
+        """接收来自 `spray_task` 的逻辑目标 ID 锁定指令。"""
         selected_target_id = message.data.strip()
         if (selected_target_id and
                 selected_target_id == self._selected_target_id and
@@ -500,6 +578,7 @@ class TwoStageYolo(Node):
         self._last_target_state = None
 
     def _on_inference_mode(self, message):
+        """切换推理模式 (idle/tree/fruits/target)。"""
         mode = message.data.strip()
         if mode not in {'idle', 'tree', 'fruits', 'target'}:
             self.get_logger().error(f'ignored invalid inference mode: {mode!r}')
@@ -509,7 +588,7 @@ class TwoStageYolo(Node):
         self._inference_mode = mode
 
     def _on_image(self, message):
-        """执行当前模式所需的最小推理链，并发布检测、目标和诊断。"""
+        """主推理循环：根据当前模式执行最小化的推理链条。"""
         if not self._tree_id or self._inference_mode == 'idle':
             return
         try:
@@ -544,6 +623,11 @@ class TwoStageYolo(Node):
             message, tree, fruits, target, invalid_reason, event)
 
     def _best_tree(self, image):
+        """
+        基于置信度和图像中心偏置权重，筛选出最佳病树。
+        
+        当 `_locked_tree` 存在时，强制通过 IoU 关联锁定同一棵树，防止相机移动时跳跃。
+        """
         result = self._tree_model(
             image, verbose=False, conf=float(self.get_parameter('tree_confidence').value))[0]
         instances = self._box_instances(result, TREE_CLASS_NAMES)
@@ -565,6 +649,7 @@ class TwoStageYolo(Node):
         return preferred
 
     def _fruit_instances(self, image, tree):
+        """在树检测框扩边 ROI 内进行果实实例分割。"""
         height, width = image.shape[:2]
         x0, y0, x1, y1 = expanded_roi(
             tree.left, tree.top, tree.right, tree.bottom, width, height,
@@ -580,6 +665,7 @@ class TwoStageYolo(Node):
 
     @staticmethod
     def _box_instances(result, class_names):
+        """将 YOLO 检测结果 (Boxes) 转换为 Instance 对象。"""
         if result.boxes is None:
             return []
         instances = []
@@ -596,6 +682,9 @@ class TwoStageYolo(Node):
 
     @staticmethod
     def _seg_instances(result, offset_x, offset_y, class_names):
+        """
+        将 YOLO 分割结果 (Masks) 转换为具有安全瞄准点 (`aim_u/v`) 的 Instance 对象。
+        """
         if result.boxes is None or result.masks is None:
             return []
         instances = []
@@ -609,6 +698,7 @@ class TwoStageYolo(Node):
                 continue
             local_width = max(1, int(math.ceil(polygon[:, 0].max())) + 1)
             local_height = max(1, int(math.ceil(polygon[:, 1].max())) + 1)
+            # 核心算法调用：将掩膜转换为果实内部的稳定瞄准点
             aim_u, aim_v = safest_mask_point(polygon, local_width, local_height)
             left, top, right, bottom = [float(value) for value in box.xyxy[0].tolist()]
             instances.append(Instance(
@@ -618,7 +708,9 @@ class TwoStageYolo(Node):
         return instances
 
     def _assign_track_ids(self, instances):
-        """进行确定性一对一关联，避免一个历史 ID 同时分配给多个实例。"""
+        """
+        通过跨帧 IoU/距离关联，为新实例分配连贯的 `track_id`。
+        """
         assigned = []
         threshold = float(self.get_parameter('track_iou_threshold').value)
         distance = float(self.get_parameter('track_center_distance_px').value)
@@ -652,6 +744,7 @@ class TwoStageYolo(Node):
 
     @staticmethod
     def _array(image, instances):
+        """将 Instance 列表转换为 Detection2DArray ROS 消息。"""
         array = Detection2DArray()
         array.header = image.header
         array.detections = [TwoStageYolo._detection(image.header, item) for item in instances]
@@ -659,6 +752,7 @@ class TwoStageYolo(Node):
 
     @staticmethod
     def _detection(header, instance):
+        """将单个 Instance 转换为 Detection2D ROS 消息。"""
         detection = Detection2D()
         detection.header = header
         detection.id = instance.target_id or 'tree'
@@ -673,10 +767,13 @@ class TwoStageYolo(Node):
         return detection
 
     def _resolve_selected_target(self, instances):
-        """在检测器 ID 变化时保持外部选中病果的逻辑身份。
-
-        只有重叠或中心距离满足阈值且最佳候选与次佳候选有足够间隔时才重关联；
-        歧义返回明确原因，不使用“离喷洒像素最近”之类可能选错目标的策略。
+        """
+        在感知跟踪 ID 变动时，通过重关联保持外部选中的逻辑目标不变。
+        
+        这是重关联算法的核心网关：
+        1. 优先查找感知层 ID 与逻辑 ID 相同的目标。
+        2. 若找不到（发生大幅漂移），则使用宽泛关联距离 (`160px`) 寻找物理候选。
+        3. 如果有多个候选且差值很小，直接判定歧义并返回 `target_invalid`，停止伺服。
         """
         if not self._selected_target_id:
             return None, 'no_selected_target', 'target_invalid'
@@ -691,10 +788,6 @@ class TwoStageYolo(Node):
             return target, 'none', 'target_valid'
         reassociation_distance = float(self.get_parameter(
             'target_reassociation_distance_px').value)
-        # When the tracker still reports the selected logical ID, keep that
-        # identity if it remains geometrically plausible.  The generic
-        # nearest-candidate rule is intentionally more conservative because a
-        # stale ID must not steal the locked target from a nearby fruit.
         exact = next((item for item in instances
                       if item.target_id == self._selected_target_id and
                       item.class_name == 'diseased_fruit' and
@@ -730,7 +823,9 @@ class TwoStageYolo(Node):
         return None, reason, 'target_invalid'
 
     def _resolve_or_track_selected_target(self, image, instances):
-        """优先使用 YOLO 几何关联，短时低置信度/漏检时才退化到模板跟踪。"""
+        """
+        优先使用 YOLO 进行几何关联，短时低置信度/漏检时则降级到模板跟踪兜底。
+        """
         target, invalid_reason, event = self._resolve_selected_target(instances)
         tracking_enabled = (
             image is not None and
@@ -787,7 +882,12 @@ class TwoStageYolo(Node):
         return tracked, 'none', 'target_template_tracked'
 
     def _publish_selected_target(self, image, instances, cv_image=None):
-        """以原逻辑 ID 发布 Target2D；无可靠候选时仍发布 ``valid=false``。"""
+        """
+        以任务层逻辑 ID 发布 Target2D 消息。
+        
+        如果无法找到可靠目标（歧义、漏检、模板丢失），仍然发布 `valid=false` 的 Target2D，
+        让视觉伺服节点安全停止并触发超时恢复。
+        """
         target, invalid_reason, event = self._resolve_or_track_selected_target(
             cv_image, instances)
         if not self._selected_target_id:
@@ -811,7 +911,7 @@ class TwoStageYolo(Node):
         return target, invalid_reason, event
 
     def _log_target_state(self, target, invalid_reason, event):
-        """仅在目标有效性或关联事件变化时输出，避免逐帧刷屏。"""
+        """仅在目标状态发生变化时输出终端日志，避免高频刷屏。"""
         state = (bool(target), invalid_reason, event)
         if state == self._last_target_state:
             return
@@ -827,7 +927,9 @@ class TwoStageYolo(Node):
 
     def _publish_perception_debug(
             self, image, tree, fruits, target, invalid_reason, event):
-        """发布限频 JSON，记录实际候选 ID、关联事件和图像处理延迟。"""
+        """
+        发布限频、结构稳定的 JSON 调试诊断数据，供上层可视化/调试使用。
+        """
         now = time.monotonic()
         state = (
             self._inference_mode, tree is not None, self._selected_target_id,

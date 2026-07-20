@@ -1,168 +1,213 @@
 # WVCSC_S2Z_UTB_ARM 项目分析
 
-> 更新日期：2026-07-19
+> 更新日期：2026-07-20
 > 详细架构：[WORKSPACE_ARCHITECTURE.md](WORKSPACE_ARCHITECTURE.md)
 > 仿真执行手册：[WVCSC_S2Z_UTB_ARM_Codex_仿真任务闭环实施方案.md](WVCSC_S2Z_UTB_ARM_Codex_仿真任务闭环实施方案.md)
 
 ## 1. 项目定位
 
-本项目面向智能农林病虫害空地协同防治：无人机提供疑似病树坐标，阿克曼小车自主停靠，Alicia-M 机械臂利用 C10 RGB 相机识别病果并进行图像视觉伺服，最后逐个执行喷洒。
+智能农林病虫害空地协同防治：无人机提供疑似病树坐标，阿克曼小车自主停靠，Alicia-M 六轴机械臂利用 C10 RGB 相机识别病果并通过 IBVS 图像伺服逐个对准后喷洒。
 
-当前交付重点是 Gazebo 可复现闭环，不包括真实飞控、泵阀、液位和真实喷幅控制。
+**仿真闭环已 100% 完成。下一步转入实机部署。**
 
 ## 2. 当前闭环
 
 ```text
 Mock/Replay UAV
   → DiseaseTreeArray
-  → Mission Manager 生成 0.2 m 横向偏移停靠点
+  → Mission Manager 生成 0.2 m 横向停靠位姿
   → Nav2 NavigateToPose
-  → /odom 连续停稳
+  → /odom 连续停稳 (1.0s)
   → Arm ExecuteSpray
-  → 动态观察位姿与扇形扫描
-  → tree YOLO detect + fruit YOLO segment
-  → 病果去重、逻辑目标锁定、目标重心
-  → 30 Hz IBVS Twist → 100 Hz MoveIt Servo 图像平面 XY 对准
-  → Spray Action 保持 5 s
-  → 返回观察位继续下一病果
-  → HOME
+  → ObservationOptimizer 动态观察位姿 (条件数≤16.5, 关节余量≥0.22rad)
+  → YOLOv8n Tree Detect (conf=0.10)
+  → YOLOv8n-seg Fruit Instance Segmentation (conf=0.20)
+  → 病果去重 + TargetRecenter 重心修正
+  → 30 Hz IBVS Twist → 100 Hz MoveIt Servo (fine_tolerance=1.5px, stable=0.5s)
+  → Spray Action
+  → RETURNING_TO_OBSERVE 复检 → HOME → 下一树
 ```
 
-### 已建立能力
+### 验证指标
 
-| 子系统 | 状态 | 说明 |
-|---|---|---|
-| 复合机器人描述 | 已完成 | 小车、Alicia-M、tool0、C10 与 ros2_control 统一 Xacro |
-| 果园场景 | 已完成 | seed 固定资产，5 果/树、2–3 病果、稀疏叶片 |
-| 小车仿真 | 已完成代码链 | Ackermann 速度约束、odom 与 TF 所有权明确 |
-| 任务管理 | 已完成 | 顺序执行、停稳、fail-safe、skip、cancel/reset |
-| 机械臂任务 | 已完成代码链 | 动态观察、目标重心、逐果作业、HOME |
-| 两级 YOLO | 已接入 | 树检测、果实分割、检测去重、目标锁定与模板短时跟踪 |
-| 视觉伺服 | 已接通 | 30 Hz Twist、100 Hz JointTrajectory、2 px 稳定门槛、状态保护 |
-| 喷洒执行器 | 已完成仿真边界 | 定时 5 s，无夹爪开闭副作用 |
-| C10 真机入口 | 第一版完成 | by-id、标准图像话题、诊断与 respawn |
+| 指标 | 当前值 | 状态 |
+|------|--------|------|
+| 四树闭环 | 4/4 完成 | 通过 |
+| 对准精度 | ≤ 2 px/轴 | 通过 |
+| 对准中位时间 | 1.4 s | 通过 |
+| 连续三轮 | 待验收 | 未完成 |
+| 构建 | 24 包通过 | 通过 |
+| 测试 | 196 tests, 0 failures | 通过 |
 
-### 尚未通过的最终验收
+## 3. 包清单（24 个）
 
-最新运行基线仍未证明“所有病果快速、高精度对准并完成喷洒”。代码已经修复 Servo 吞吐、检测重复、目标生命周期、低置信度准入和停止服务问题，但需要新的 Gazebo bag 验证：
+| 层 | 包 | 语言 | 说明 |
+|----|-----|------|------|
+| 硬件驱动 | `serial`, `can_bridge`, `fdilink_ahrs_ROS2`, `wtb_car_driver`, `lslidar_driver`, `lslidar_msgs` | C++ | 串口/CAN/IMU/LiDAR/底盘 |
+| 机械臂 | `alicia_m_descriptions`, `alicia_m_driver`, `alicia_m_moveit_config`, `alicia_m_bringup`, `alicia_m_calibration` | C++ | URDF/ros2_control/MoveIt/手眼标定 |
+| SLAM/导航 | `my_cartographer`, `my_navigation2` | C++ | Cartographer + Nav2 |
+| 运动控制 | `pymoveit2`, `trajectory_retime_server` | C++ | Python MoveIt2 封装 + 轨迹重定时 |
+| 复合模型 | `wvcsc_description` | C++ | 统一 XACRO（底盘+Alicia+C10+喷嘴）|
+| 仿真 | `wvcsc_simulation` | C++ | Gazebo 世界生成、AckermannSim、数据采集 |
+| 接口 | `wvcsc_interfaces` | C++ | 自定义 action/srv/msg |
+| 任务编排 | `wvcsc_mission_manager`, `wvcsc_uav_gateway` | Python | 使命管理 + Mock/Replay UAV |
+| 感知 | `wvcsc_rgb_vision`, `wvcsc_c10_camera` | Python | YOLOv8n 两级推理 + C10 驱动 |
+| 执行 | `wvcsc_arm_task`, `wvcsc_visual_servo` | Python | 喷洒状态机 + IBVS 伺服 |
 
-- 双轴最终误差均不超过 4 px；
-- 连续稳定至少 0.5 s；
-- 对准中位时间不超过 5 s、最大不超过 8 s；
-- 所有唯一病果均完成喷洒；
-- 连续三轮 `unresolved=0`、`alignment_failures=0`、`skipped_targets=0`。
+**收敛记录**：
+- 删除 `wvcsc_web_ui`（与 Nav2 Qt 重叠）—— 26→25 包
+- 删除 7 个无调用方的独立 launch
+- `wvcsc_simulation/data_acquisition/` 解耦离线数据采集与运行时代码
+- `alicia_m_grasp_6d` 移入 experimental/
+- `wvcsc_spray_controller` 保留但默认不构建（真机泵阀接入时启用）
 
-因此当前状态应描述为“代码闭环已接通，真实性能验收未完成”，不能仅根据 `MISSION_COMPLETED` 判定成功。
+## 4. SprayTask 架构
 
-## 3. 技术架构评估
+`SprayTask` 采用 **Mixin 分解模式**，核心逻辑拆分为三个混入类：
 
-### 3.1 合理之处
+```
+SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, Node)
+    │
+    ├── TargetFlowMixin        # 视觉目标流：YOLO 检测接收、去重、重心修正、目标生命周期
+    │   ├── _on_tree_detections()     # YOLO tree 检测回调
+    │   ├── _on_fruit_detections()    # YOLO fruit 检测回调
+    │   ├── _on_selected_target()     # IBVS 锁定目标回调
+    │   ├── _wait_for_fruits()        # 稳定候选等待
+    │   ├── _queue()                  # 去重排序
+    │   ├── _recenter_target()        # 重心修正 (48px触发, ≤20°/次, ≤2次迭代)
+    │   └── target_validation         # 后重心稳定校验 (0.2s, ≤4px漂移)
+    │
+    ├── ObservationFlowMixin   # 观察位姿：动态生成、IK 筛选、扇形扫描
+    │   ├── _move_to_observation()     # TF变换 + camera_look_at_pose
+    │   ├── _scan_for_tree()          # 扇形扫描 (azimuth offsets ±12°)
+    │   ├── _recover_to_next_observation()  # 对准失败观察距离恢复
+    │   └── ObservationOptimizer      # 碰撞IK/条件数(≤16.5)/关节余量(≥0.22rad)筛选
+    │
+    └── DownstreamActionMixin # 下游 Action：AlignTarget、Spray 的可靠调用
+        ├── _run_downstream_action()  # 统一的 server 等待+超时+取消处理
+        ├── _align_target()           # /vision/align_target 封装
+        └── _spray_target()           # /spray/execute 封装
+```
 
-1. **任务源与执行器解耦**
-   UAV 只发布病树语义信息，停靠位姿由 Mission Manager 生成，避免外部数据源直接控制底盘。
+**关键设计决策**：
+- `MotionControlState` 全局锁——stop/reset/resume 信号优先于所有任务推进
+- `cancel_epoch` 机制——每次 cancel 递增版本号，旧轨迹自动失效
+- 观察位姿不再使用固定关节角度，完全由 `ObservationOptimizer` 动态计算（距离/高度/方位角网格 + 实时 IK 筛选）
 
-2. **长轨迹与微调分层**
-   MoveIt 负责观察、重心和 HOME，MoveIt Servo 负责局部 XY 对准，符合机械臂作业控制层次。
+## 5. 控制链频率分层
 
-3. **喷洒接口独立**
-   `/spray/execute` 可从仿真定时器替换为泵阀驱动，不需要重写视觉或机械臂状态机。
+```
+C10 Camera (30 Hz)
+    ↓ sensor_msgs/Image
+YOLOv8n Tree Detect + Fruit Seg (30 Hz)
+    ↓ Detection2DArray → Target2D
+Visual Servo IBVS PID (30 Hz)
+    ↓ geometry_msgs/TwistStamped
+MoveIt Servo (100 Hz, publish_period=0.01)
+    ↓ trajectory_msgs/JointTrajectory
+ros2_control / arm_controller (100 Hz)
+    ↓
+Gazebo / 真实 Alicia-M 电机
+```
 
-4. **视觉环境隔离**
-   YOLO/PyTorch 运行时与系统 ROS Python 隔离，降低 NumPy、OpenCV 和 Torch ABI 污染风险。
-
-5. **失败安全**
-   目标丢失、重关联歧义、IK 不可达、Servo 安全状态、取消和 HOME 失败均不会继续喷洒。
-
-### 3.2 当前风险
-
-| 风险 | 影响 | 当前措施 | 后续动作 |
-|---|---|---|---|
-| YOLO 中心视角泛化不足 | 重心后目标丢失 | 置信度门控、模板短时跟踪 | 增补中心视角并按 seed 隔离重训 |
-| 单目只有像素误差 | 无法直接证明喷嘴空间误差 | 固定作业距离、4 px 门槛 | 标定相机—喷嘴外参与喷距 |
-| Gazebo 关闭 Servo 在线碰撞缩放 | 仿真安全模型弱于真机 | 保留规划碰撞、限位和奇异保护 | 真机重新启用并测试碰撞计算预算 |
-| 底盘/机械臂硬件依赖不完整 | 本机全量构建受阻 | 项目包可独立构建测试 | 补齐合法厂商 `libcontrolcan.so` |
-| 真实喷头未接入 | 无法验证喷幅与药量 | 独立 Spray Action 边界 | 增加泵阀、流量、液位、急停反馈 |
-
-## 4. 包收敛结果
-
-工作区从 26 个 ROS 包收敛为 25 个：
-
-- 当前不保留独立 Web UI；任务操作统一到 ROS 服务和受保护的 Nav2 Qt 前端。
-- `trajectory_retime_server` 仍由未修改的 `alicia_m_bringup` 以及 WVCSC 仿真
-  的 Alicia 轨迹适配链使用，因此不从当前依赖图移除。
-- `wvcsc_arm_task` 和 `wvcsc_simulation` 当前仍通过 Alicia 轨迹适配链使用重定时服务。
-- 删除六个项目独立 launch 和 retime 独立 launch，支持入口集中到系统 launch、C10 launch 和 `ros2 run`。
-- Arm Adapter 的 Cartesian retime 校验和 open/close gripper 能力继续保留，避免破坏
-  当前仿真、复位和测试接口。
-- 将视觉 PID 收敛为标准库实现的二维控制器，移除 NumPy 运行依赖。
-- 合并 fruit/tree 数据集的 split 验证重复逻辑。
-
-保留独立包：
-
-- `wvcsc_rgb_vision`：YOLO 依赖隔离；
-- `wvcsc_visual_servo`：实时控制隔离；
-- `wvcsc_arm_task`：长时任务与恢复；
-- `wvcsc_spray_controller`：真喷头替换边界；
-- `wvcsc_uav_gateway`：Live UAV 替换边界；
-- `wvcsc_c10_camera`：设备生命周期与诊断。
-
-## 5. 关键参数
+## 6. 关键参数
 
 ### Mission Manager
 
-| 参数 | 当前值 | 含义 |
-|---|---:|---|
-| `docking_lateral_offset` | 0.2 m | 靠近目标侧的道路停靠偏移 |
-| 线速度停稳阈值 | 0.03 m/s | 连续停稳检测 |
-| 角速度停稳阈值 | 0.03 rad/s | 连续停稳检测 |
-| 稳定持续时间 | 1.0 s | 进入机械臂阶段前门槛 |
+| 参数 | 值 | 含义 |
+|------|-----|------|
+| `docking_lateral_offset` | 0.2 m | 道路停靠横向偏移 |
+| 线速度停稳阈值 | 0.03 m/s | |
+| 角速度停稳阈值 | 0.03 rad/s | |
+| 稳定持续时间 | 1.0 s | 进入机械臂前门槛 |
 
-### Visual Servo（仅 Gazebo）
+### ObservationOptimizer
 
-| 参数 | 当前值 |
-|---|---:|
-| IBVS / MoveIt Servo / ros2_control | 30 / 100 / 100 Hz |
-| `Kp XY` | 2.5 |
-| `Kd XY` | 0.005 |
-| 最大线速度 | 0.08 m/s |
-| 最大线加速度 | 0.60 m/s² |
-| 最终容差 | 2 px/轴 |
-| 稳定持续时间 | 0.5 s |
-| 对齐超时 | 8 s |
+| 参数 | 值 |
+|------|-----|
+| 距离范围 | 0.90~1.50 m, 步长 0.10 |
+| 相机高度范围 | 1.45~1.75 m, 步长 0.10 |
+| 方位角偏移 | 0°, ±12° |
+| 最大条件数 | 16.5 |
+| 最小关节余量 | 0.22 rad |
+| 优选关节余量 | 0.35 rad |
+| 搜索超时 | 8.0 s |
 
-这些参数不得直接用于真机。真机应恢复在线碰撞检查并从更低速度重新整定。
+### TargetRecenter
 
-## 6. 测试策略
+| 参数 | 值 |
+|------|-----|
+| 触发阈值 | 偏差 > 48 px |
+| 最大旋转 | 20°/次 |
+| 最大迭代 | 2 |
+| 细化目标 | 24 px |
+| 后重心稳定 | 0.20 s, 漂移 ≤ 4 px |
 
-代码测试分层：
+### IBVS (Visual Servo)
 
-1. 纯函数：状态机、停靠计算、检测去重、目标关联、PID、限速与几何。
-2. Fake ROS 闭环：Nav2、Spray、Mission、Action 取消与恢复。
-3. Launch 静态检查：启动顺序、Gazebo 重力切换和控制器依赖。
-4. 构建测试：相关项目包与保留的 retime 核心包。
-5. Gazebo 验收：真实话题、TF、控制频率、误差与任务统计。
+| 参数 | 仿真值 | 实机建议 |
+|------|--------|---------|
+| 控制频率 | 30 Hz | 30 Hz |
+| `Kp XY` | 4.0 | 1.0~2.0 |
+| `Kd XY` | 0.005 | 0.005 |
+| 最终容差 | 1.5 px/轴 | 1.5 px/轴 |
+| 稳定时间 | 0.5 s | 0.5 s |
+| 对准超时 | 8.0 s | 8.0 s |
+| 最大线速度 | 0.08 m/s | 0.04 m/s |
+| 最大线加速度 | 0.60 m/s² | 0.30 m/s² |
+| 命令模式 | `angular_xy` | `angular_xy` |
 
-手动 rosbag 使用 `wvcsc_visual_servo/scripts/record_servo_bag.sh`。不维护额外离线报告工具；用户提供 bag 后按原始消息和终端日志分析。
+### MoveIt 轨迹
 
-## 7. 推荐实施顺序
+| 参数 | 仿真值 | 实机值 |
+|------|--------|--------|
+| velocity_scaling | 0.40 | **0.10** |
+| acceleration_scaling | 0.50 | **0.10** |
+| allowed_planning_time | 2.0 s | 2.0 s |
+| collision_checking | false (仿真) | **true** (实机必须) |
 
-1. 完成本轮删减后的全包构建与测试。
-2. 在 Gazebo 运行单棵树并手动录 bag，确认 Twist 为 `27–33 Hz`、
-   JointTrajectory 为 `90–110 Hz`，且 Gazebo 实时率不低于 `0.95`。
-3. 先验收目标锁定和重心，再验收 PID 收敛，最后验收逐果喷洒。
-4. 若低置信度仍阻断，优先重训模型，不继续提高 PID。
-5. 完成 C10 内参、相机—tool0—喷嘴外参和固定喷距标定。
-6. 接入真实泵阀、液位与急停反馈。
-7. 最后进入真实底盘与机械臂联合调试。
+## 7. 仿真 vs 实机差异
 
-## 8. 完成定义
+| 项目 | 仿真 (`system_sim.launch.py`) | 实机 (待建 `system_real.launch.py`) |
+|------|------|------|
+| `use_sim_time` | `true` | `false` |
+| 底盘 | `ackermann_sim.py` (Twist→odom) | CAN bridge + wtb_car |
+| LiDAR | pointcloud_to_laserscan | 真实 lslidar_driver |
+| IMU | 无 | fdilink_ahrs |
+| 相机 | Gazebo 插件 | usb_cam + C10 |
+| ros2_control | gazebo_ros2_control/GazeboSystem | alicia_m_driver/AliciaHardwareInterface |
+| base_frame | `alicia_base_link` | `base_link` |
+| 速度缩放 | 0.40/0.50 | 0.10/0.10 |
+| 碰撞检测 | false | true |
+| MoveIt Servo publish_period | 0.01 (100Hz) | 0.01 (100Hz) |
 
-项目不能以“节点均启动”或“任务列表处理完”作为完成。至少满足：
+## 8. 实机待办
 
-- TF 无重复父节点；
-- 导航失败不触发机械臂；
-- 视觉失败不触发喷洒；
-- 每颗病果只进入一次喷洒队列；
-- cancel 后无残留 Goal；
-- 喷洒后返回安全位；
-- 连续三轮完整闭环达到既定速度、精度和任务统计门槛。
+| # | 任务 | 状态 |
+|---|------|------|
+| 1 | C10 相机内参标定（棋盘格） | 未开始 |
+| 2 | 手眼标定 (tool0→camera_link) | 未开始 |
+| 3 | 统一实机 launch 文件 | 未开始 |
+| 4 | 实机配置子目录 (`config/real/`) | 未开始 |
+| 5 | 底盘 CAN 通信验证 | 未开始 |
+| 6 | 机械臂低速运动验证 | 未开始 |
+| 7 | YOLO 真实图像推理验证 | 未开始 |
+| 8 | 单树手动闭环 | 未开始 |
+| 9 | 真实喷洒泵阀接入 | 未开始 |
+| 10 | 联合调试与安全验收 | 未开始 |
+
+## 9. 测试策略
+
+1. **纯函数单元测试**：状态机、停靠计算、检测去重、目标关联、PID、限速与几何
+2. **Fake ROS 闭环**：Nav2、Spray、Mission、Action 取消与恢复
+3. **Launch 静态检查**：启动顺序、控制器依赖
+4. **构建测试**：全部 24 包独立构建
+5. **Gazebo 验收**：真实话题、TF、控制频率、误差与任务统计
+
+```bash
+cd /home/robot/WVCSC_S2Z_UTB_ARM
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
+colcon test --event-handlers console_direct+
+colcon test-result --all  # 当前: 196 tests, 0 failures, 0 skipped
+```

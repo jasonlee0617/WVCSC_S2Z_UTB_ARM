@@ -1,3 +1,18 @@
+# core.py
+# ============================================================================
+# WVCSC 任务编排核心状态机与数据类 (纯逻辑层，不依赖 ROS2)
+# ============================================================================
+#
+# 职责：
+# 1. 定义任务状态枚举 (`MissionState`)。
+# 2. 管理任务队列、当前进度与目标状态流转 (`MissionCore`)。
+# 3. 计算停车几何位置 (`docking_pose`)。
+# 4. 提供里程计停稳检测器 (`StopDetector`)。
+#
+# 设计目的：
+# 将 ROS2 通讯与核心业务逻辑解耦，便于进行单元测试，并降低状态异常转移的风险。
+#
+
 from dataclasses import dataclass
 from enum import IntEnum
 import math
@@ -7,39 +22,46 @@ DEFAULT_DOCKING_LATERAL_OFFSET = 0.2
 
 
 class MissionState(IntEnum):
-    IDLE = 0
-    WAITING_FOR_TASKS = 1
-    READY = 2
-    NAVIGATING = 3
-    VERIFYING_STOP = 4
-    ARM_SPRAYING = 5
-    TARGET_COMPLETED = 6
-    PAUSED = 7
-    MISSION_COMPLETED = 8
-    CANCELED = 9
-    FAILED = 10
-    RETURNING_HOME = 11
+    """任务执行状态枚举。"""
+    IDLE = 0                # 空闲
+    WAITING_FOR_TASKS = 1   # 等待任务列表注入
+    READY = 2               # 已加载任务，等待“开始”指令
+    NAVIGATING = 3          # 小车正在 Nav2 导航中
+    VERIFYING_STOP = 4      # 小车到达目标点，正在检测是否停稳
+    ARM_SPRAYING = 5        # 机械臂正在执行喷洒动作
+    TARGET_COMPLETED = 6    # 单棵树处理完毕 (内部中转态)
+    PAUSED = 7              # 任务暂停
+    MISSION_COMPLETED = 8   # 全部任务成功完成
+    CANCELED = 9            # 任务被取消
+    FAILED = 10             # 任务严重失败
+    RETURNING_HOME = 11     # 返回 HOME 位
 
 
 @dataclass(frozen=True)
 class Target:
+    """单棵目标病树的固定任务数据。"""
     tree_id: str
     x: float
     y: float
     z: float
     confidence: float
-    spray_side: str
+    spray_side: str         # 'left' 或 'right'
     spray_duration: float
     evidence_uri: str = ''
-    docking_pose_override: tuple | None = None
+    docking_pose_override: tuple | None = None  # 如果手动注入任务，可覆盖自动生成的停靠点
 
 
 class MissionCore:
-    PENDING = 'PENDING'
-    COMPLETED = 'COMPLETED'
-    PARTIAL = 'PARTIAL'
-    SKIPPED = 'SKIPPED'
-    FAILED = 'FAILED'
+    """线程安全的纯逻辑状态机。所有状态修改操作均应返回布尔值以指示是否成功。"""
+
+    # 树级任务结果状态
+    PENDING = 'PENDING'     # 未处理
+    COMPLETED = 'COMPLETED' # 成功喷洒
+    PARTIAL = 'PARTIAL'     # 部分喷洒/部分成功
+    SKIPPED = 'SKIPPED'     # 被主动跳过
+    FAILED = 'FAILED'       # 执行失败
+
+    # 活跃状态集合 (允许在这些状态下执行取消操作)
     ACTIVE = {
         MissionState.NAVIGATING,
         MissionState.VERIFYING_STOP,
@@ -47,6 +69,7 @@ class MissionCore:
         MissionState.PAUSED,
         MissionState.RETURNING_HOME,
     }
+    # 终端状态集合 (任务已彻底结束)
     TERMINAL = {
         MissionState.MISSION_COMPLETED,
         MissionState.CANCELED,
@@ -67,11 +90,13 @@ class MissionCore:
 
     @property
     def current_target(self):
+        """返回当前正在处理的目标树。"""
         if 0 <= self.current_index < len(self.targets):
             return self.targets[self.current_index]
         return None
 
     def load(self, mission_id, targets):
+        """加载任务列表，仅当状态为 WAITING_FOR_TASKS 时才接受。"""
         if mission_id and mission_id == self.mission_id:
             return 'duplicate'
         if self.state != MissionState.WAITING_FOR_TASKS:
@@ -109,6 +134,7 @@ class MissionCore:
             outcome == self.COMPLETED for outcome in self.target_outcomes)
 
     def _finish_after_current(self, return_home):
+        """处理完当前任务后，决定是否进入下一棵树、返回 Home 或完成任务。"""
         if self.current_index < len(self.targets):
             self.state = MissionState.NAVIGATING
         elif return_home:
@@ -119,6 +145,7 @@ class MissionCore:
             self.state = MissionState.FAILED
 
     def arm_succeeded(self, return_home=False, message=''):
+        """机械臂喷洒成功。"""
         if self.state != MissionState.ARM_SPRAYING:
             return False
         self.target_outcomes[self.current_index] = self.COMPLETED
@@ -129,7 +156,7 @@ class MissionCore:
         return True
 
     def arm_partial(self, message='', return_home=False):
-        """记录树级部分完成，并继续剩余树；最后必须以 FAILED 收尾。"""
+        """记录树级部分成功 (如只喷了一半的病果)，任务会继续但最终状态必须是 FAILED。"""
         if self.state != MissionState.ARM_SPRAYING:
             return False
         self.target_outcomes[self.current_index] = self.PARTIAL
@@ -142,6 +169,7 @@ class MissionCore:
         return True
 
     def skip_current(self, return_home=False):
+        """跳过当前任务。"""
         if self.state not in {
                 MissionState.READY,
                 MissionState.PAUSED,
@@ -223,6 +251,14 @@ class MissionCore:
 def docking_pose(
         target, road_center_y=0.0, road_yaw=0.0,
         lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET):
+    """
+    核心几何函数：根据树的坐标和方位，计算小车行驶的停靠位姿。
+    
+    算法：
+    - 如果病树在左侧 (spray_side=left)，小车需停在道路中心的左侧，车头朝向 YAW。
+    - 如果病树在右侧 (spray_side=right)，小车需停在道路中心的右侧。
+    - 确保横向偏移量 `lateral_offset` (0.2m) 使得小车外沿与树基部保持安全距离。
+    """
     values = (target.x, target.y, road_center_y, road_yaw, lateral_offset)
     if not all(math.isfinite(value) for value in values):
         raise ValueError(f'{target.tree_id}: non-finite docking pose')
@@ -250,7 +286,7 @@ def navigation_pose(
 
 
 def manual_tree_hint(docking, spray_side, standoff, tree_base_z=0.0):
-    """Infer a tree-root point from an operator-selected docking pose."""
+    """从手动选择的停靠点反向推算树根的世界坐标 (用于人工定义任务)。"""
     x, y, yaw = (float(value) for value in docking)
     standoff = float(standoff)
     tree_base_z = float(tree_base_z)
@@ -270,9 +306,16 @@ def manual_tree_hint(docking, spray_side, standoff, tree_base_z=0.0):
 
 
 class StopDetector:
+    """
+    小车停稳检测器。
+    
+    作用：根据 /odom 发来的线速度和角速度，判断小车是否已经完全静止。
+    这是一个严格的物理“刹车”检测，必须持续 `stable_duration` (1s) 都满足阈值，
+    才允许机械臂展开喷洒。这防止了小车在还没停稳的惯性滑动阶段机械臂意外展开。
+    """
     WAITING = 'waiting'
     STABLE = 'stable'
-    STALE = 'stale'
+    STALE = 'stale'    # 里程计数据长时间未更新 (断连)
     TIMEOUT = 'timeout'
 
     def __init__(

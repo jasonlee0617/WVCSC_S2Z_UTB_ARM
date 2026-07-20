@@ -1,21 +1,64 @@
-# Temporary simulation/reference intrinsics derived from horizontal_fov=1.8.
-# Replace with a real 1280x720 calibration before hardware acceptance.
+# c10_reference_calibration.yaml
+# ============================================================================
+# Synria C10 RGB 相机 ROS CameraInfo 仿真/参考内参标定文件
+# ============================================================================
+#
+# 用途：
+# 在真实 C10 相机尚未接入，或者尚未进行棋盘格真实标定前，
+# 供 `usb_cam` 节点和下游视觉节点（`wvcsc_two_stage_yolo`）使用的一套
+# 基于 1.8 弧度（约 103°）水平视场角推演的参考内参。
+#
+# 注意：
+# 在实际部署至真实果园/比赛场地前，**必须使用棋盘格（Checkboard）或
+# ArUco 码进行真实的内参标定**，并替换本文件中的矩阵参数。
+# 因为真实的 C10 镜头存在畸变，使用仿真参数会导致 `solvePnP` 或
+# 视觉伺服计算出的误差放大。
+#
+
+# 图像宽度 (像素)
 image_width: 1280
+
+# 图像高度 (像素)
 image_height: 720
+
+# 相机名称标识
 camera_name: c10_color
+
+# 相机内部参数矩阵 (3x3 行优先矩阵)。
+# 在 ROS 的 CameraInfo 中，矩阵格式为 [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+# - fx, fy: 归一化焦距（约为图像宽度 * 0.4 左右）
+# - cx: 光心在图像中的横坐标，通常为图像宽度的一半
+# - cy: 光心在图像中的纵坐标，通常为图像高度的一半
 camera_matrix:
   rows: 3
   cols: 3
   data: [507.872735, 0.0, 640.5, 0.0, 507.872735, 360.5, 0.0, 0.0, 1.0]
+
+# 畸变模型：`plumb_bob` 是 ROS image_pipeline 最常用的径向切向畸变模型。
 distortion_model: plumb_bob
+
+# 畸变系数 (5个参数: [k1, k2, p1, p2, k3] 行优先)
+# k1,k2,k3 为径向畸变系数；p1,p2 为切向畸变系数。
+# 仿真参考文件全填 0，意味着假设相机为完美的无畸变针孔模型。
+# 真实标定后，这几项会变成微小的非零值。
 distortion_coefficients:
   rows: 1
   cols: 5
   data: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+# 校正矩阵 (Rectification Matrix)
+# 通常由标定库 (如 OpenCV) 生成，用于将图像行对齐 (立体视觉用)。
+# 单目相机通常直接设为单位矩阵 [1 0 0; 0 1 0; 0 0 1]。
 rectification_matrix:
   rows: 3
   cols: 3
   data: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+# 投影矩阵 (Projection Matrix) - 3x4 矩阵。
+# 将 3D 世界坐标系点投影到 2D 校正图像平面的矩阵。
+# 对于单目相机（非立体），实际有效部分通常与 `camera_matrix` 一致。
+# 格式为 [fx', 0, cx', Tx; 0, fy', cy', Ty; 0, 0, 1, 0]
+# Tx, Ty 在立体视觉中用于表示基线距离，单目设为 0。
 projection_matrix:
   rows: 3
   cols: 4

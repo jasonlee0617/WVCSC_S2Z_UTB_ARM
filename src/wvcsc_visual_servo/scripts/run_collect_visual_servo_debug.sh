@@ -56,7 +56,7 @@ ros2 bag record --include-hidden-topics -o "$bag_dir/servo_debug" \
   /arm/execute_spray/_action/feedback \
   /spray/execute/_action/status \
   /spray/execute/_action/feedback \
-  /camera/camera/color/camera_info \
+  /camera/color/camera_info \
   /tf \
   /tf_static \
   /rosout

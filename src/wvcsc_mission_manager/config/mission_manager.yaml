@@ -1,34 +1,90 @@
+# mission_manager.yaml
+# ============================================================================
+# 任务调度核心节点 (wvcsc_mission_manager) 参数配置文件
+# ============================================================================
+#
+# 职责：
+# 控制空地协同任务的执行节奏：从接收无人机病树列表，到控制 Nav2 进行点到点
+# 导航，再到调用机械臂喷洒闭环，最后循环推进至任务完成。
+#
+# 核心原则：
+# 1. 树级任务管理器，仅负责排队、超时、状态汇报和跳转。
+# 2. 病果的具体识别、视觉对准和喷洒轨迹由 `wvcsc_spray_task` 负责。
+#
+
 mission_manager:
   ros__parameters:
+    # 是否在接收到任务列表后立即自动开始执行。
     auto_start: false
+
+    # 机器人导航与任务使用的全局坐标系 (必须与 Nav2 和 Cartographer 一致)
     map_frame: map
+
+    # Nav2 的 Action 服务名称。
     nav_action_name: /navigate_to_pose
+    # 机械臂喷洒动作的 Action 服务名称 (调用 `wvcsc_spray_task`)
     spray_action_name: /arm/execute_spray
+
+    # 道路中心在 map 坐标系中的 Y 轴坐标。
     road_center_y: 0.0
+    # 道路的航向角 (弧度)。
     road_yaw: 0.0
-    # Keep the chassis on the road so the eye-in-hand camera has a reachable
-    # 1.8 m observation baseline to the orchard row at y=2.0 m.
+
+    # 【核心几何参数】小车停靠点距离道路中心的横向偏移量。
+    # 确保小车停稳后，机械臂基座 (alicia_base_link) 与树的距离大约在 1.8m 以内，
+    # 满足 C10 相机观察基线 (observation_distance 1.0~1.5m) 的可达范围。
     docking_lateral_offset: 0.2
+
+    # 在手动模式(如 Manual Mission)下，推算树根位置时的前后距离。
     manual_tree_standoff: 1.5
+    # 手动模式下树根的 Z 轴高度。
     manual_tree_base_z: 0.0
+
+    # ----------------------------------------------------------------
+    # 通讯超时控制
+    # ----------------------------------------------------------------
+    # Nav2 单次导航任务的最大超时时间 (120秒)。
     nav_goal_timeout_sec: 120.0
-    # Nav2 advertises its Action before the lifecycle manager activates it.
-    # Retry only the first automatic/manual navigation goal within this window.
+    # 启动时 Nav2 可能处于生命周期(Lifecycle)激活过程中，专门给首次导航的宽容重试窗口。
     nav_startup_retry_timeout_sec: 30.0
     nav_startup_retry_interval_sec: 0.5
+
+    # 机械臂喷洒 Action 的超时时间。
     spray_goal_timeout_sec: 180.0
+    # 如果机械臂 Action 在 30 秒内没有发布任何进度反馈 (Feedback)，则认为卡死。
     spray_progress_timeout_sec: 30.0
+
+    # ----------------------------------------------------------------
+    # HOME (待命/充电) 位姿配置
+    # ----------------------------------------------------------------
+    # 任务完成后是否自动返回 HOME 点。
     return_home_after_finish: false
     home_x: 0.0
     home_y: 0.0
     home_yaw: 0.0
-    linear_stop_threshold: 0.03
-    angular_stop_threshold: 0.03
+
+    # ----------------------------------------------------------------
+    # 停稳检测 (Stop Detector) 阈值
+    # ----------------------------------------------------------------
+    # 线速度和角速度阈值，低于此值判定小车为静止。
+    linear_stop_threshold: 0.03      # 0.03 m/s
+    angular_stop_threshold: 0.03     # 0.03 rad/s
+    # 小车速度持续稳定在阈值以下必须持续 1.0 秒，才视为完全停稳。
     stop_stable_duration_sec: 1.0
+    # 如果 1.0 秒内没有收到新的 /odom 消息，视为里程计失联。
     odom_stale_timeout_sec: 1.0
+    # 等待小车停稳的最大总时间 (5秒后还未稳定，任务判定失败)。
     stop_verify_timeout_sec: 5.0
+
+    # ----------------------------------------------------------------
+    # 任务校验阈值
+    # ----------------------------------------------------------------
+    # 无人机传入的病树置信度阈值。
     confidence_threshold: 0.5
+    # 单次任务最多允许多少棵树。
     max_targets: 20
+    # 任务坐标的最大绝对值限制 (防止异常的坏数据导航到地图外)。
     max_abs_coordinate: 50.0
+    # 喷洒持续时间 (秒) 的安全边界。
     min_spray_duration: 0.2
     max_spray_duration: 10.0

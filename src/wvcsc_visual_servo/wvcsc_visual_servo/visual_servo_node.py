@@ -1,13 +1,18 @@
-"""病果图像平面 XY 视觉伺服 Action Server。
+# visual_servo_node.py
+"""
+病果图像平面 XY 视觉伺服 Action Server (Visual Servoing Action Server)。
 
-节点订阅 ``Target2D``、C10 ``CameraInfo``、MoveIt Servo 状态和机械臂关节状态，
-在 ``camera_color_optical_frame`` 中发布 ``TwistStamped``。默认的仿真配置采用相机
-optical X/Y 线速度；角速度模式仅保留给独立实验。IBVS 只校正图像平面，喷洒距离
-由先前观察位姿保持，不在本节点控制深度。
+节点职责：
+1. 订阅 `Target2D` (YOLO发布的目标锁定信息)、C10 `CameraInfo` 和 `MoveIt Servo` 状态。
+2. 在 `camera_color_optical_frame` 坐标系中计算并发布 `TwistStamped` 速度指令。
+3. 通过 PID 控制器闭环控制机械臂末端相机，使目标像素锁定在指定区域。
+4. 维护一个严格的稳定时间窗口（0.5s），仅当误差稳定低于 1.5px 时才向上层汇报成功。
 
-每个 ``AlignTarget`` Goal 独占控制器。目标丢失、取消、超时、奇异点或安全状态都会
-先发零速度，再且仅调用一次 ``stop_servo``。高频完整诊断发布到
-``/vision/visual_servo_debug``，终端只保留限频的人类可读状态和最终结果。
+**工程边界**：
+- 仅对图像平面 X/Y 轴进行伺服，不控制 Z 轴（深度）。
+- 喷洒距离由先前 `MoveIt` 规划的观察位姿保证，本节点不越权控制深度。
+- 完整的安全互锁：检测到目标丢失、超时、MoveIt Servo 奇异点或安全状态时，
+  立即发布零速度并调用 `stop_servo`，强制终止闭环。
 """
 
 from dataclasses import dataclass
@@ -39,27 +44,31 @@ from .servo.visual_servo_params import ServoRuntimeConfig
 
 @dataclass
 class _GoalState:
-    """Per-goal mutable state reset at the start of each AlignTarget execution."""
-    latest: dict | None = None
-    last_valid_target: dict | None = None
-    target_unavailable_since: float | None = None
-    initial_error_px: tuple | None = None
-    stable_frames: int = 0
-    last_command: tuple = (0.0, 0.0)
-    peak_command_norm: float = 0.0
-    last_control_dt: float = 0.0
-    control_cycles: int = 0
-    stop_code: int | None = None
-    stop_message: str = ''
-    alignment_started: float | None = None
-    last_debug_publish: float | None = None
-    last_terminal_status_log: float | None = None
-    last_terminal_phase: tuple | None = None
-    alignment_hold_latched: bool = False
+    """针对每个 `AlignTarget` Action Goal 的独立可变状态容器。
+
+    由于 `VisualServo` 是单线程串行处理目标的，但为了清晰管理
+    每个目标的跟踪、超时、停止等状态，将状态封装在此数据类中。
+    """
+    latest: dict | None = None                     # 最新接收到的视觉快照
+    last_valid_target: dict | None = None          # 最后一次有效的目标快照
+    target_unavailable_since: float | None = None  # 目标开始丢失的时间戳 (用于计算失联时长)
+    initial_error_px: tuple | None = None          # 进入本伺服阶段时的初始误差 (调试用)
+    stable_frames: int = 0                         # 当前已在最终容差区内的持续帧数
+    last_command: tuple = (0.0, 0.0)               # 上一次发布的速度指令
+    peak_command_norm: float = 0.0                 # 当前目标执行过程中的峰值速度 (用于诊断)
+    last_control_dt: float = 0.0                   # 最近一次控制循环的 dt
+    control_cycles: int = 0                        # 累计控制循环次数
+    stop_code: int | None = None                   # 触发停止时的错误码
+    stop_message: str = ''                         # 触发停止的错误信息
+    alignment_started: float | None = None         # 本次对准开始的时间戳
+    last_debug_publish: float | None = None        # 上次发布高频调试信息的时间
+    last_terminal_status_log: float | None = None  # 上次打印终端人类可读日志的时间
+    last_terminal_phase: tuple | None = None       # 上次记录的终端阶段状态
+    alignment_hold_latched: bool = False           # 收敛迟滞保持标志（防止误差在 1.5px 附近反复跳动）
 
 
 def _positive_finite_rate(node, name):
-    """读取日志频率参数，并拒绝会破坏限频器的零值、NaN 和 Inf。"""
+    """读取频率参数，确保其为正的有限浮点数，防止配置错误。"""
     value = float(node.get_parameter(name).value)
     if not math.isfinite(value) or value <= 0.0:
         raise ValueError(f'{name} must be finite and positive')
@@ -82,6 +91,8 @@ class VisualServo(Node):
         self._config = ServoRuntimeConfig.from_node(self)
         _positive_finite_rate(self, 'debug_rate_hz')
         _positive_finite_rate(self, 'terminal_status_rate_hz')
+
+        # 1. 实例化各个独立算法模块 (保持单一职责原则)
         self._controller = PIDController2D(ServoControlConfig(
             kp_xy=float(self.get_parameter('pid_kp_xy').value),
             ki_xy=float(self.get_parameter('pid_ki_xy').value),
@@ -105,7 +116,11 @@ class VisualServo(Node):
             self._config.min_progress_px,
             self._config.control_resume_tolerance_px,
         )
+
+        # 2. 多线程回调组 (允许并发执行)
         self._group = ReentrantCallbackGroup()
+
+        # 3. 线程安全的共享锁与状态变量
         self._lock = threading.Lock()
         self._busy = False
         self._active_mission = ''
@@ -117,10 +132,13 @@ class VisualServo(Node):
         self._joint_positions = []
         self._command_mode = self._config.command_mode
 
+        # 4. 主要 ROS 接口初始化
         self._twist = self.create_publisher(
             TwistStamped, str(self.get_parameter('twist_topic').value), 10)
         self._debug = self.create_publisher(
             String, str(self.get_parameter('debug_topic').value), 10)
+
+        # 5. 订阅话题 (视觉输入与状态)
         self.create_subscription(
             Target2D, str(self.get_parameter('target_topic').value),
             self._on_target, qos_profile_sensor_data,
@@ -136,12 +154,16 @@ class VisualServo(Node):
             JointState, str(self.get_parameter('joint_state_topic').value),
             self._on_joint_state, qos_profile_sensor_data,
             callback_group=self._group)
+
+        # 6. MoveIt Servo 的生命周期服务客户端
         self._start_client = self.create_client(
             Trigger, str(self.get_parameter('start_servo_service').value),
             callback_group=self._group)
         self._stop_client = self.create_client(
             Trigger, str(self.get_parameter('stop_servo_service').value),
             callback_group=self._group)
+
+        # 7. Action Server 接口 (供 `spray_task.py` 调用)
         self._action = ActionServer(
             self,
             AlignTarget,
@@ -153,10 +175,11 @@ class VisualServo(Node):
         )
 
     def _declare_parameters(self):
+        """声明所有 ROS2 参数（与 `visual_servo.yaml` 映射）。"""
         values = {
             'action_name': '/vision/align_target',
             'target_topic': '/vision/target',
-            'camera_info_topic': '/camera/camera/color/camera_info',
+            'camera_info_topic': '/camera/color/camera_info',
             'twist_topic': '/servo_node/delta_twist_cmds',
             'servo_status_topic': '/servo_node/status',
             'joint_state_topic': '/joint_states',
@@ -174,8 +197,6 @@ class VisualServo(Node):
             'target_invalid_hold_sec': 0.25,
             'min_confidence': 0.10,
             'coarse_tolerance_px': 20.0,
-            # Keep direct ``ros2 run`` behavior identical to the simulation
-            # profile and leave measurable margin below the strict 2 px goal.
             'fine_tolerance_px': 1.5,
             'control_resume_tolerance_px': 2.0,
             'stable_duration_sec': 0.50,
@@ -195,18 +216,11 @@ class VisualServo(Node):
             'max_linear_speed': 0.08,
             'max_linear_acceleration': 0.60,
             'near_target_speed_scale': 1.0,
-            # The last few pixels are dominated by mask-center jitter and the
-            # camera/arm response delay.  Keep the outer loop aggressive, but
-            # reduce only the command gain inside this small image-space band
-            # so a target does not oscillate around the strict 1.5 px gate.
             'near_target_control_threshold_px': 6.0,
             'near_target_control_scale': 0.35,
             'warning_speed_scale': 1.0,
             'predict_lead_sec': 0.0,
             'max_predict_horizon_sec': 0.05,
-            # ``angular_xy`` is the eye-in-hand profile used by the Gazebo
-            # spray task. ``linear_xy`` remains available for direct callers
-            # and hardware experiments.
             'command_mode': 'angular_xy',
             'max_angular_speed': 0.45,
             'max_angular_acceleration': 3.00,
@@ -220,7 +234,9 @@ class VisualServo(Node):
         for name, default in values.items():
             self.declare_parameter(name, default)
 
+    # ---------- Action Server 生命周期回调 ----------
     def _goal(self, request):
+        """对传入的 AlignTarget Goal 进行排他性校验与接受处理。"""
         timeout = float(request.timeout) or self._config.default_timeout_sec
         valid = (
             str(request.mission_id).strip()
@@ -232,6 +248,7 @@ class VisualServo(Node):
             <= float(self.get_parameter('max_goal_timeout_sec').value)
         )
         with self._lock:
+            # 如果当前 VisualServo 正在处理上一个目标 (Busy)，则直接拒绝新 Goal
             if not valid or self._busy:
                 return GoalResponse.REJECT
             self._busy = True
@@ -241,6 +258,7 @@ class VisualServo(Node):
     def _cancel(_goal_handle):
         return CancelResponse.ACCEPT
 
+    # ---------- 视觉与传感器回调 (只更新快照，不执行运算) ----------
     def _on_camera_info(self, message):
         if message.width <= 0 or message.height <= 0:
             return
@@ -271,10 +289,12 @@ class VisualServo(Node):
                 and message.image_width > 0 and message.image_height > 0)
 
     def _handle_invalid_target(self, message, now):
+        """处理无效的目标消息，利用短暂的 Hold 时间防止因为单帧丢失而中断控制。"""
         if self._goal_state.target_unavailable_since is None:
             self._goal_state.target_unavailable_since = now
             self._predictor.reset()
         latest = self._goal_state.latest
+        # 如果刚才是有效的，并且在 `invalid_target_hold_sec` (0.25s) 内，则保持之前的命令输出 0
         if (latest is not None and latest.get('valid') and
                 now - latest['received'] <= self._config.invalid_target_hold_sec):
             self._goal_state.stable_frames = 0
@@ -286,6 +306,7 @@ class VisualServo(Node):
             }
             self._publish_zero()
             return
+        # 超出短暂 Hold 时间，完全清空目标状态
         self._goal_state.stable_frames = 0
         self._progress.reset_stable()
         self._goal_state.latest = {
@@ -296,8 +317,11 @@ class VisualServo(Node):
         }
 
     def _handle_valid_target(self, message, now):
+        """处理有效的目标消息，进行误差计算、预测更新和稳定状态评估。"""
         reacquired = self._goal_state.target_unavailable_since is not None
         self._goal_state.target_unavailable_since = None
+        
+        # 1. 计算像素误差（期望位置：图像中心 + 28px V轴偏置）
         desired_u = (
             message.image_width / 2.0 + self._config.desired_offset_u_px)
         desired_v = (
@@ -306,12 +330,16 @@ class VisualServo(Node):
         error_v = float(message.center_v) - desired_v
         if self._goal_state.initial_error_px is None:
             self._goal_state.initial_error_px = (error_u, error_v)
+        
+        # 2. 归一化误差（转换像素误差为光学角度误差）用于 PID 计算
         if self._camera is not None:
             fx, fy = self._camera[:2]
         else:
             fx = float(self.get_parameter('fallback_fx').value)
             fy = float(self.get_parameter('fallback_fy').value)
         error = (error_u / fx, error_v / fy)
+        
+        # 3. 计算速度（预测器需要上一帧的误差和当前误差的差分）
         velocity = (0.0, 0.0)
         if (not reacquired and self._goal_state.latest is not None
                 and self._goal_state.latest.get('valid')):
@@ -321,6 +349,8 @@ class VisualServo(Node):
                     (value - previous) / dt
                     for value, previous in zip(error, self._goal_state.latest['error']))
         self._predictor.update(error, velocity, now)
+        
+        # 4. 更新稳定状态 (AlignmentProgress)
         if math.hypot(error_u, error_v) <= self._config.fine_tolerance_px:
             self._goal_state.stable_frames += 1
         else:
@@ -328,6 +358,8 @@ class VisualServo(Node):
         if reacquired:
             self._progress.restart_progress(error_u, error_v, now)
         self._progress.update(error_u, error_v, now)
+        
+        # 5. 更新快照缓存，供主线程读取
         self._goal_state.latest = {
             'valid': True,
             'received': now,
@@ -351,6 +383,7 @@ class VisualServo(Node):
             self._joint_positions = arm_positions
 
     def _on_servo_status(self, message):
+        """仲裁 MoveIt Servo 的安全状态，并将不可恢复的错误直接传递给主循环。"""
         code = int(message.data)
         decision = self._policy.decide(code)
         with self._lock:
@@ -371,6 +404,7 @@ class VisualServo(Node):
             self._publish_debug(
                 'servo_status_changed', message=decision.message, force=True)
 
+    # ---------- 核心动作执行器 (The Main Control Loop) ----------
     def _execute(self, goal_handle):
         """执行一个完整的 start -> TRACK/WAIT -> stop Action 生命周期。
 
@@ -397,6 +431,7 @@ class VisualServo(Node):
         result = AlignTarget.Result()
 
         def stop_servo(reason):
+            """闭包：安全停止 MoveIt Servo，保证停止服务最多被调用一次。"""
             nonlocal servo_started, stop_attempted, stop_result
             if stop_attempted:
                 return stop_result
@@ -419,6 +454,7 @@ class VisualServo(Node):
             return stop_result
 
         def abort_with_stop(code, message, latest=None):
+            """安全终止 Action 并停止 MoveIt Servo 的辅助函数。"""
             reason = {
                 AlignTarget.Result.TIMEOUT: 'timeout',
                 AlignTarget.Result.TARGET_STALE: 'target_stale',
@@ -448,11 +484,8 @@ class VisualServo(Node):
                 f'command_mode={self._command_mode} '
                 f'terminal_rate='
                 f'{float(self.get_parameter("terminal_status_rate_hz").value):.1f}Hz')
-            # Use monotonic wall time for the controller integration step.  Gazebo
-            # can publish several vision messages before advancing /clock, which
-            # previously collapsed dt to its 1 ms fallback and made slew limiting
-            # unnecessarily slow.  ROS time remains the authority for target
-            # freshness and action timeouts below.
+            
+            # 使用单调墙钟时间进行积分步长计算，避免 Gazebo /clock 回退时控制崩溃
             last_control_tick = time.monotonic()
             while rclpy.ok():
                 if goal_handle.is_cancel_requested:
@@ -470,6 +503,7 @@ class VisualServo(Node):
                         'canceled', result_code=result.error_code,
                         message=result.message, force=True)
                     return result
+                
                 now = self._now()
                 with self._lock:
                     latest = dict(self._goal_state.latest) if self._goal_state.latest is not None else None
@@ -478,10 +512,14 @@ class VisualServo(Node):
                     camera_ready = self._camera is not None
                     status = self._servo_status
                     unavailable_since = self._goal_state.target_unavailable_since
+                
+                # 1. 安全状态仲裁
                 if stop_code is not None:
                     return abort_with_stop(
                         stop_code, stop_message,
                         self._terminal_target_snapshot(now, latest))
+                
+                # 2. 超时检查
                 if now - started >= timeout:
                     code = (
                         AlignTarget.Result.TARGET_STALE
@@ -492,6 +530,8 @@ class VisualServo(Node):
                         'target unavailable/stale' if code == AlignTarget.Result.TARGET_STALE
                         else 'visual alignment timed out',
                         self._terminal_target_snapshot(now, latest))
+                
+                # 3. 目标有效性检查 (处理短时丢失)
                 target_fresh = (
                     latest is not None and latest.get('valid')
                     and not latest.get('hold')
@@ -520,6 +560,8 @@ class VisualServo(Node):
                             self._terminal_target_snapshot(now, latest))
                     time.sleep(period)
                     continue
+                
+                # 4. 相机内参准备
                 if not (
                         camera_ready or not bool(
                             self.get_parameter('require_camera_info').value)):
@@ -530,10 +572,13 @@ class VisualServo(Node):
                         'WAIT', now, latest, reason='camera_info_unavailable')
                     time.sleep(period)
                     continue
+                
+                # 5. 评估对准状态 (AlignmentProgress)
                 with self._lock:
                     aligned = self._progress.aligned
                     stalled = self._progress.stalled(now)
                     stable_duration = self._progress.stable_duration
+                
                 if aligned:
                     elapsed = max(0.0, now - started)
                     self.get_logger().info(
@@ -560,15 +605,14 @@ class VisualServo(Node):
                         'aligned', result_code=result.error_code,
                         message=result.message, force=True)
                     return result
+                
                 if stalled:
                     return abort_with_stop(
                         AlignTarget.Result.TIMEOUT,
                         'visual alignment stalled',
                         self._terminal_target_snapshot(now, latest))
-                # Schmitt-trigger hold: after the target first enters the
-                # strict radius, detector jitter in the 1.5-3 px band must not
-                # restart motion. Only a real excursion beyond the outer
-                # radius unlatches the hold and resumes closed-loop control.
+                
+                # 6. 迟滞带保持 (Schmitt-trigger 防抖动)
                 error_norm = math.hypot(
                     latest['error_u'], latest['error_v'])
                 (hold_alignment, self._goal_state.alignment_hold_latched) = (
@@ -584,6 +628,8 @@ class VisualServo(Node):
                     self._log_terminal_status('TRACK', now, latest)
                     time.sleep(period)
                     continue
+                
+                # 7. 执行控制计算与命令发布
                 control_now = time.monotonic()
                 control_dt = max(0.0, control_now - last_control_tick)
                 dt = bounded_control_dt(
@@ -591,11 +637,15 @@ class VisualServo(Node):
                 last_control_tick = control_now
                 self._goal_state.last_control_dt = control_dt
                 self._goal_state.control_cycles += 1
+                
+                # 预测 (实际配置为0，未启动预测)
                 predicted, _velocity = self._predictor.predict_to(
                     now + self._config.predict_lead_sec,
                     self._config.max_predict_horizon_sec)
                 if predicted is None:
                     predicted = latest['error']
+                
+                # PID 计算与指令合成
                 x, y, _debug = self._controller.step(predicted, dt)
                 scale = 1.0
                 if max(abs(latest['error_u']), abs(latest['error_v'])) <= (
@@ -624,6 +674,7 @@ class VisualServo(Node):
                 self._publish_debug('control')
                 self._log_terminal_status('TRACK', now, latest)
                 time.sleep(period)
+                
             return abort_with_stop(
                 AlignTarget.Result.CANCELED,
                 'ROS shutdown during visual alignment',
@@ -642,6 +693,7 @@ class VisualServo(Node):
                 self._active_target = ''
                 self._goal_state = _GoalState()
 
+    # ---------- 辅助函数 ----------
     def _publish_feedback(self, goal_handle, latest):
         feedback = AlignTarget.Feedback()
         if latest is not None and latest.get('valid'):
@@ -718,16 +770,7 @@ class VisualServo(Node):
         return snapshot
 
     def _call_trigger(self, client):
-        """Call a Servo Trigger service without recursively spinning this node.
-
-        ``VisualServo`` is already owned by a ``MultiThreadedExecutor``.  Calling
-        ``rclpy.spin_once(self)`` from its Action execution callback attempts a
-        second, nested spin of the same node.  In practice the start service may
-        happen to return, while the stop service can remain blocked; the Action
-        then never releases ``_busy`` and every later alignment Goal is rejected.
-        The executor has spare worker threads for client responses, so a short
-        sleep is sufficient and keeps this wait loop deterministic.
-        """
+        """调用 MoveIt Servo 的 Trigger 服务（启动/停止）。"""
         timeout = float(self.get_parameter('service_timeout_sec').value)
         if not client.wait_for_service(timeout_sec=timeout):
             return False, 'service unavailable'
@@ -757,7 +800,7 @@ class VisualServo(Node):
     def _alignment_hold_decision(
             error_norm_px, fine_tolerance_px,
             resume_tolerance_px, latched):
-        """Return ``(hold_zero, new_latch)`` for convergence hysteresis."""
+        """返回 `(hold_zero, new_latch)` 用于收敛迟滞逻辑。"""
         error = float(error_norm_px)
         fine = float(fine_tolerance_px)
         resume = float(resume_tolerance_px)
@@ -780,7 +823,7 @@ class VisualServo(Node):
         return x, y, 0.0, 0.0
 
     def _command_labels(self):
-        """Return ``(log_label, unit_suffix)`` for the active command mode."""
+        """返回 `(log_label, unit_suffix)` 用于日志输出。"""
         if self._command_mode == 'angular_xy':
             return 'cmd_angular_rps', 'rps'
         return 'cmd_velocity_mps', 'mps'
@@ -806,11 +849,7 @@ class VisualServo(Node):
             time.sleep(period)
 
     def _log_terminal_status(self, phase, now, latest, reason=''):
-        """输出低噪声终端状态；完整数值仍由 debug topic 承载。
-
-        同一 WAIT 阶段只打印一次，WAIT 原因变化视为新阶段；WAIT -> TRACK 恢复时
-        立即打印。连续 TRACK 才按 ``terminal_status_rate_hz`` 限频。
-        """
+        """输出低噪声终端状态；完整数值仍由 debug topic 承载。"""
         wall_now = time.monotonic()
         rate = float(self.get_parameter('terminal_status_rate_hz').value)
         phase = str(phase).upper()
@@ -860,7 +899,7 @@ class VisualServo(Node):
     def _publish_debug(
             self, event, result_code=-1, message='', force=False,
             target_snapshot=None):
-        """发布结构稳定的高频 JSON，并区分实际线速度和角速度字段。"""
+        """发布结构稳定的高频 JSON 调试数据。"""
         wall_now = time.monotonic()
         rate = float(self.get_parameter('debug_rate_hz').value)
         if not debug_publish_due(

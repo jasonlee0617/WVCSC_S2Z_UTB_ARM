@@ -1,4 +1,16 @@
-"""ROS task node for the Alicia-M orchard spraying workflow."""
+# spray_task.py
+"""
+ROS 任务节点：Alicia-M 机械臂果园喷洒作业工作流 (Orchard Spraying Workflow)。
+
+本节点是一个长时 Action Server，负责执行 `/arm/execute_spray` 接口。
+它集成了 `TargetFlowMixin` (视觉目标流)、`ObservationFlowMixin` (动态观察位姿生成)
+和 `DownstreamActionMixin` (下游 Action 通讯) 三个核心混入类。
+
+核心业务流程：
+MOVING_TO_OBSERVE (观察位姿) -> SCANNING_TREE (树检测) -> DETECTING_FRUITS (果实分割)
+-> QUEUING (去重排队) -> ALIGNING (重心+视觉伺服对准) -> SPRAYING (喷洒)
+-> RETURNING_TO_OBSERVE (返回观察位, 复检) -> RETURNING_HOME (任务结束归位)
+"""
 
 import math
 import threading
@@ -22,8 +34,10 @@ from .target_flow import (TargetAttempt, TargetFlowMixin,
                           completion_feedback_allowed, final_spray_outcome,
                           spray_summary, target_accounting_is_complete)
 
+
 class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, Node):
-    """协调 MoveIt、YOLO、视觉伺服和喷洒执行器的长时 Action Server。
+    """
+    协调 MoveIt、YOLO、视觉伺服和喷洒执行器的长时 Action Server。
 
     订阅回调只更新受互斥锁保护的最新视觉/关节快照，Action 执行线程运行状态机；
     ``MotionControlState`` 的锁定和 cancel epoch 始终优先于任务推进。失败恢复只会
@@ -33,6 +47,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
     def __init__(self):
         super().__init__('wvcsc_spray_task')
         self._declare_parameters()
+
+        # === 1. 运动学与动作基础配置 ===
         self._home = self._joint_parameter('home_pose')
         self._min_duration = float(self.get_parameter('min_spray_duration').value)
         self._max_duration = float(self.get_parameter('max_spray_duration').value)
@@ -45,25 +61,35 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self._base_frame = str(self.get_parameter('base_frame').value)
         self._observation_config = self._observation_parameters()
         self._recenter_config = self._target_recenter_parameters()
+
+        # 核心组件 1：观察优化器 (基于 URDF 和实时 IK 筛选安全观察位)
         self._observation_optimizer = ObservationOptimizer(
             self.get_parameter('robot_description').value,
             self._base_frame,
             'tool0',
             self.arm_joint_names,
             self._observation_config)
+
         if int(self.get_parameter('max_alignment_attempts').value) <= 0:
             raise ValueError('max_alignment_attempts must be positive')
 
+        # 核心组件 2：状态机安全锁与运动适配器
         self.state = MotionControlState()
         self.arm, self._callback_group = create_alicia_moveit(self, self.state)
+
+        # 核心组件 3：TF 变换缓冲
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
+
+        # 核心组件 4：下游动作客户端 (视觉对齐和喷洒)
         self._vision_client = ActionClient(
             self, AlignTarget, str(self.get_parameter('vision_action_name').value),
             callback_group=self._callback_group)
         self._spray_client = ActionClient(
             self, Spray, str(self.get_parameter('spray_action_name').value),
             callback_group=self._callback_group)
+
+        # 核心组件 5：话题发布与订阅
         self._selected_target_pub = self.create_publisher(
             String, str(self.get_parameter('selected_target_topic').value), 10)
         self._motion_command_pub = self.create_publisher(
@@ -71,6 +97,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self._observation_debug_pub = self.create_publisher(
             String, str(self.get_parameter('observation_debug_topic').value), 10)
 
+        # 推理模式切换 (用于省 GPU 资源，YOLO 在不同阶段推理不同模型)
         latched = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -78,6 +105,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         )
         self._inference_mode_pub = self.create_publisher(
             String, str(self.get_parameter('inference_mode_topic').value), latched)
+
+        # 视觉与传感器订阅 (数据由 `TargetFlowMixin` 和 `ObservationFlowMixin` 处理)
         self.create_subscription(
             Bool, str(self.get_parameter('motion_locked_topic').value),
             self._on_motion_locked, latched, callback_group=self._callback_group)
@@ -99,17 +128,20 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             self._on_joint_state, qos_profile_sensor_data,
             callback_group=self._callback_group)
 
+        # 核心组件 6：Action Server (由 `_execute_action` 驱动状态机)
         self._action_server = ActionServer(
             self, ExecuteSpray, '/arm/execute_spray',
             execute_callback=self._execute_action,
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
             callback_group=self._callback_group)
-        self._abort = threading.Event()
-        self._busy_mutex = threading.Lock()
+
+        # === 线程安全的状态变量 ===
+        self._abort = threading.Event()          # 取消/急停标志位
+        self._busy_mutex = threading.Lock()      # 保证同一时间只有一个 ExecuteSpray 在执行
         self._busy = False
-        self._vision_mutex = threading.Lock()
-        self._state_mutex = threading.Lock()
+        self._vision_mutex = threading.Lock()    # 保护 YOLO 检测结果的互斥锁
+        self._state_mutex = threading.Lock()     # 保护关节/相机模型快照的互斥锁
         self._tree_frames = 0
         self._fruit_frames = 0
         self._fruit_counts = {}
@@ -135,17 +167,21 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self._active_tree = ''
 
     @property
-
     def arm_joint_names(self):
+        # Alicia-M 专属六轴关节名称
         return ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6')
 
     def _declare_parameters(self):
+        """
+        声明所有 ROS2 参数。
+        注意：这里的默认值直接决定了整体系统在仿真/真机中的安全运动边界。
+        """
         parameters = {
-            'home_pose': [0.0] * 6,
+            'home_pose': [0.0] * 6,                  # 系统默认安全 HOME 位
             'min_spray_duration': 0.2,
             'max_spray_duration': 10.0,
             'vision_action_name': '/vision/align_target',
-            'vision_timeout_sec': 8.0,
+            'vision_timeout_sec': 8.0,               # 视觉伺服最长等待时间
             'spray_action_name': '/spray/execute',
             'downstream_server_timeout_sec': 2.0,
             'downstream_result_margin_sec': 2.0,
@@ -157,15 +193,13 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'motion_locked_topic': '/motion_control/locked',
             'tree_confidence': 0.10,
             'fruit_confidence': 0.20,
-            'confirmation_frames': 3,
-            # Real tree YOLO needs several frames to satisfy confirmation_frames.
-            # One second can expire before its first complete inference.
+            'confirmation_frames': 3,                # 连续 3 帧锁定目标，过滤单帧误检
+            # 真实场景下 YOLO 检测有延迟，5秒超时确保足够的容错空间
             'scan_pose_detection_timeout_sec': 5.0,
             'detection_timeout_sec': 2.0,
             'fruit_collection_settle_sec': 1.00,
             'max_alignment_attempts': 2,
-            # MoveIt owns coarse placement only outside the 48 px IBVS work
-            # area; continuous Servo owns final sub-pixel visual correction.
+            # 视觉伺服和重心的像素窗口边界
             'target_recenter_trigger_px': 48.0,
             'target_recenter_workspace_px': 48.0,
             'target_recenter_max_angle_deg': 20.0,
@@ -173,21 +207,14 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'target_recenter_max_iterations': 2,
             'target_recenter_residual_candidates_px': [
                 12.0, 16.0, 24.0, 8.0, 32.0, 40.0, 3.0, 1.0, 0.0],
-            # Observation search permits centimetre-level placement. The
-            # target recenter needs a tighter endpoint to meet <2 px.
             'target_recenter_position_tolerance_m': 0.002,
             'target_recenter_orientation_tolerance_rad': 0.002,
-            # Must match wvcsc_visual_servo/config/visual_servo.yaml.
             'target_recenter_desired_offset_u_px': 0.0,
             'target_recenter_desired_offset_v_px': 28.0,
             'target_post_recenter_stable_sec': 0.20,
             'target_post_recenter_max_drift_px': 4.0,
             'target_post_recenter_max_gap_sec': 0.20,
             'target_post_recenter_min_confidence': 0.30,
-            # After the last known target is treated, two independent empty
-            # observations are used to avoid silently accepting a fruit that
-            # is missed by the first view. A larger value is safer for deeply
-            # occluded real trees, but adds a full MoveIt trajectory per view.
             'completion_scan_empty_limit': 2,
             'processed_iou_threshold': 0.30,
             'processed_center_distance_px': 40.0,
@@ -195,7 +222,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'image_height': 720,
             'base_frame': 'alicia_base_link',
             'camera_frame': 'camera_color_optical_frame',
-            'camera_info_topic': '/camera/camera/color/camera_info',
+            'camera_info_topic': '/camera/color/camera_info',
             'joint_state_topic': '/joint_states',
             'robot_description': '',
             'observation_debug_topic': '/arm/observation_debug',
@@ -213,10 +240,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'camera_height_step_m': 0.10,
             'observation_azimuth_offsets_deg': [0.0, -12.0, 12.0],
             'observation_image_margin_ratio': 0.07,
-            # Keep a margin below MoveIt Servo's 17.0 singularity slowdown
-            # threshold while retaining a second physically distinct recovery view.
-            'observation_max_condition_number': 16.5,
-            'observation_min_joint_margin_rad': 0.22,
+            'observation_max_condition_number': 16.5,   # 雅可比条件数阈值（防止奇异点）
+            'observation_min_joint_margin_rad': 0.22,   # 关节限位最小余量（安全距离）
             'observation_preferred_joint_margin_rad': 0.35,
             'observation_position_tolerance_m': 0.01,
             'observation_orientation_tolerance_rad': 0.01,
@@ -231,6 +256,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         return values
 
     def _observation_parameters(self):
+        """解析观察位姿生成的网格参数与运动学安全阈值"""
         values = {
             'fruit_zone_height_min_m': float(
                 self.get_parameter('fruit_zone_height_min_m').value),
@@ -269,6 +295,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 self.get_parameter(
                     'observation_orientation_tolerance_rad').value),
         }
+        # 校验参数合法性
         positive = (
             'fruit_zone_height_min_m', 'fruit_zone_height_max_m',
             'fruit_zone_radius_m', 'distance_min_m', 'distance_max_m',
@@ -290,6 +317,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         return values
 
     def _target_recenter_parameters(self):
+        """解析目标重心修正的像素级参数（与大范围轨迹和小范围视觉伺服挂钩）"""
         values = {
             'trigger_px': float(self.get_parameter('target_recenter_trigger_px').value),
             'workspace_px': float(
@@ -320,6 +348,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 self.get_parameter(
                     'target_post_recenter_min_confidence').value),
         }
+        # 严格校验重心参数的逻辑性
         scalar_values = tuple(
             value for name, value in values.items()
             if name != 'residual_candidates_px')
@@ -344,7 +373,9 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             raise ValueError('target recenter parameters are invalid')
         return values
 
+    # ---------- 传感器与回调 ----------
     def _on_motion_locked(self, message):
+        """紧急锁定回调：由 `motion_control` 触发，强制阻断当前所有运动"""
         if message.data:
             self.state.stop()
             self._abort.set()
@@ -355,6 +386,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 self._abort.clear()
 
     def _on_camera_info(self, message):
+        """更新相机内参矩阵（用于像素坐标计算）"""
         if message.width <= 0 or message.height <= 0:
             return
         fx, fy, cx, cy = (
@@ -366,6 +398,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             self._camera_model = (fx, fy, cx, cy, int(message.width), int(message.height))
 
     def _on_joint_state(self, message):
+        """更新机械臂当前实际关节角，用于执行 IK 计算"""
         values = dict(zip(message.name, message.position))
         try:
             joints = tuple(float(values[name]) for name in self.arm_joint_names)
@@ -377,6 +410,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             self._joint_positions = joints
             self._joint_state_sequence += 1
 
+    # ---------- Action Server 生命周期回调 ----------
     def _goal_callback(self, request):
         error = self._validate_goal(request)
         if error or not self._claim():
@@ -391,6 +425,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         return CancelResponse.ACCEPT
 
     def _execute_action(self, goal_handle):
+        """Action Server 主执行线程"""
         request = goal_handle.request
         result = ExecuteSpray.Result()
         try:
@@ -426,8 +461,10 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             self._active_tree = ''
             self._release()
 
+    # ---------- 核心：七阶段闭环状态机 ----------
     def _run_sequence(self, request, cancel_requested, feedback):
-        """执行一棵树的完整闭环，并返回 ``ExecuteSpray`` 结果码和摘要。
+        """
+        执行一棵树的完整闭环，并返回 ``ExecuteSpray`` 结果码和摘要。
 
         每次喷洒后回到观察位重新检测，避免机械臂运动导致旧图像坐标失效。目标集合
         按几何关系跨轮合并；循环退出前强制满足
@@ -441,6 +478,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             f'side={request.spray_side} spray_duration={request.spray_duration:.1f}s')
         self._reset_vision()
         self._set_inference_mode('idle')
+
+        # 阶段 1: MOVING_TO_OBSERVE（动态计算观察位姿并执行）
         self.get_logger().info(f'[ARM][{tree}] OBSERVE computing look-at pose from tree_hint...')
         feedback(ExecuteSpray.Feedback.MOVING_TO_OBSERVE, 0.05, 'MOVING_TO_OBSERVE')
         if not self._move_to_observation(request.tree_hint):
@@ -454,6 +493,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             f'tree_in_base=({self._tree_in_base[0]:.2f},{self._tree_in_base[1]:.2f},'
             f'{self._tree_in_base[2]:.2f})')
 
+        # 阶段 2: SCANNING_TREE（扇形扫描YOLO识别病树）
         feedback(ExecuteSpray.Feedback.SCANNING_TREE, 0.15, 'SCANNING_TREE')
         self.get_logger().info(
             f'[ARM][{tree}] SCAN inference_mode=tree '
@@ -464,6 +504,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 'tree was not confirmed in the camera view', cancel_requested)
         self.get_logger().info(f'[ARM][{tree}] SCAN tree confirmed')
 
+        # 内部状态跟踪清单
         processed = []
         exhausted = []
         known_targets = []
@@ -477,6 +518,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         recenter_failures = 0
         alignment_attempts = 0
         completion_scan_empty_count = 0
+
+        # 阶段 3/4/5/6/7 循环：检测 - 排队 - 对准 - 喷洒 - 复检
         while True:
             self._set_inference_mode('fruits')
             feedback(ExecuteSpray.Feedback.DETECTING_FRUITS, 0.25, 'DETECTING_FRUITS')
@@ -484,6 +527,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 f'[ARM][{tree}] DETECT inference_mode=fruits '
                 f'timeout={float(self.get_parameter("detection_timeout_sec").value):.1f}s '
                 f'confirmation={int(self.get_parameter("confirmation_frames").value)}')
+            
+            # 等待 YOLO 返回稳定的果实检测帧
             candidates = self._wait_for_fruits(cancel_requested)
             if candidates is None:
                 return self._recover_failure(
@@ -493,11 +538,12 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 surveyed_observation_indices.add(
                     self._observation_candidate_index)
             saw_disease = saw_disease or bool(candidates)
+
+            # 阶段 4: QUEUING (基于 IoU 和中心距离去重排序)
             feedback(ExecuteSpray.Feedback.QUEUING, 0.35, 'QUEUING')
             queue = self._queue(candidates, processed + exhausted)
             if queue:
-                # A non-empty completion view found another target; require a
-                # fresh empty-view confirmation after that target is treated.
+                # 如果队列非空，重置清空计数器
                 completion_scan_empty_count = 0
             if pending_attempt is not None and queue:
                 target = min(
@@ -509,12 +555,15 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                     [candidate for candidate in candidates if candidate is not target])
             else:
                 self._remember_targets(known_targets, candidates)
+
             self.get_logger().info(
                 f'[ARM][{tree}] DETECT_QUEUE candidates={len(candidates)} '
                 f'ids=({",".join(c.target_id for c in candidates[:8])})'
                 f'{"..." if len(candidates) > 8 else ""} '
                 f'processed={len(processed)} exhausted={len(exhausted)} '
                 f'queued={len(queue)}')
+
+            # 若当前视野内无病果，进入逻辑检查：
             if not queue:
                 pending_targets = self._pending_targets(
                     known_targets, processed, exhausted)
@@ -560,6 +609,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                     f'[ARM][{tree}] DETECT queue empty '
                     f'(processed={len(processed)} exhausted={len(exhausted)}) → breaking loop')
                 break
+
+            # 阶段 5: ALIGNING (锁定目标，重心，IBVS 视觉伺服)
             if pending_attempt is not None:
                 attempt = pending_attempt
                 attempt.target = target
@@ -570,6 +621,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 if attempt is None:
                     attempt = TargetAttempt(target)
                     attempts.append(attempt)
+
             feedback(ExecuteSpray.Feedback.ALIGNING, 0.40, 'LOCKING_TARGET')
             locked_target = self._lock_target(target.target_id, cancel_requested)
             recenter_attempts += 1
@@ -580,6 +632,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 feedback(ExecuteSpray.Feedback.ALIGNING, 0.42, 'RECENTERING_TARGET')
                 recentered, recenter_message = self._recenter_target(
                     locked_target, attempt, cancel_requested)
+
             if not recentered:
                 if self._aborted(cancel_requested):
                     return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
@@ -597,9 +650,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                     self._reset_fruit_tracking()
                     continue
                 if moved:
-                    # A rejected candidate that is recovered at another safe
-                    # observation is a fallback, not a failed tree target.
-                    # Count only unrecoverable recenter failures in SUMMARY.
                     recenter_failures += 1
                     return self._alignment_recovery_failure(
                         f'target recenter failed: {recenter_message}; '
@@ -615,6 +665,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                         'observation recovery failed', cancel_requested)
                 self._reset_fruit_tracking()
                 continue
+
             attempt.count += 1
             alignment_attempts += 1
             feedback(ExecuteSpray.Feedback.ALIGNING, 0.45, 'ALIGNING')
@@ -626,9 +677,11 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 f'observation_distance={self._observation_distance}')
             ok, canceled, align_code, message = self._align_target(
                 request.mission_id, request.tree_id, target.target_id, cancel_requested)
+
             self.get_logger().debug(
                 f'[ARM][ALIGN] result target={target.target_id} '
                 f'code={align_code} message={message}')
+
             if not ok:
                 alignment_failures += 1
                 if canceled:
@@ -675,6 +728,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 self._reset_fruit_tracking()
                 continue
 
+            # 阶段 6: SPRAYING (调用下游喷洒 Action)
             self._set_inference_mode('idle')
             feedback(ExecuteSpray.Feedback.SPRAYING, 0.60, 'SPRAYING')
             self.get_logger().info(
@@ -694,6 +748,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             sprayed += 1
             processed.append(target)
             self._select_target('')
+
+            # 阶段 7: RETURNING_TO_OBSERVE (回到观察位，准备复检)
             feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.75,
                      'RETURNING_TO_OBSERVE')
             self.get_logger().info(
@@ -702,6 +758,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 return ExecuteSpray.Result.HOME_FAILED, 'observation return failed'
             self._reset_fruit_tracking()
 
+        # 队列处理后，强制校验逻辑一致性
         for target in self._pending_targets(
                 known_targets, processed, exhausted):
             self._mark_unresolved(target, exhausted)
@@ -715,12 +772,15 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             return self._recover_failure(
                 ExecuteSpray.Result.VISION_FAILED, message, cancel_requested)
 
+        # 阶段尾: RETURNING_HOME
         feedback(ExecuteSpray.Feedback.RETURNING_HOME, 0.90, 'RETURNING_HOME')
         self.get_logger().info(f'[ARM][{tree}] HOME returning to home_pose...')
         if not self._return_home(cancel_requested):
             return (ExecuteSpray.Result.CANCELED, 'spray goal canceled') if self._aborted(
                 cancel_requested) else (ExecuteSpray.Result.HOME_FAILED, 'HOME motion failed')
         self.get_logger().info(f'[ARM][{tree}] HOME reached')
+
+        # 生成任务摘要与结果
         summary = spray_summary(
             len(known_targets), sprayed, len(exhausted), alignment_failures,
             recenter_attempts, recenter_failures, alignment_attempts)
@@ -734,10 +794,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             feedback(ExecuteSpray.Feedback.COMPLETED, 1.0, 'COMPLETED')
         return code, message
 
-    def _recover_failure(
-            self, result_code, message, cancel_requested,
-            home_failure_message=None):
-        """Return a task failure only after attempting the mandatory HOME recovery."""
+    # ---------- 异常恢复与处理 ----------
+    def _recover_failure(self, result_code, message, cancel_requested, home_failure_message=None):
         if self._aborted(cancel_requested):
             return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
         if not self._return_home(cancel_requested):
@@ -759,7 +817,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         }
 
     def _rewind_for_untried_observation(self, attempt):
-        """Wrap once when a new target starts at the final observation view."""
         current = self._observation_candidate_index
         if current + 1 < len(self._observation_candidates):
             return
@@ -768,15 +825,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 for index in range(max(0, current))):
             self._observation_candidate_index = -1
 
-    def _recover_missing_target(
-            self, target, pending_attempt, attempts,
-            cancel_requested, feedback):
-        """在判定病果 unresolved 前，到尚未搜索的安全观察位重新检测。
-
-        单轮 YOLO 检测为空只能说明当前视角暂时漏检，不能证明病果已经消失。复用
-        现有观察候选和树木确认流程，使目标在所有安全视角耗尽后才进入
-        ``UNRESOLVED``。当前视角加入目标的已尝试集合，保证搜索有界。
-        """
+    def _recover_missing_target(self, target, pending_attempt, attempts, cancel_requested, feedback):
         attempt = pending_attempt or self._attempt_for(target, attempts)
         if attempt is None:
             attempt = TargetAttempt(target)
@@ -798,16 +847,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 f'index={self._observation_candidate_index}')
         return attempt, recovered, moved
 
-    def _recover_for_completion_scan(
-            self, surveyed_indices, cancel_requested, feedback):
-        """Search one unvisited safe view before declaring the tree complete.
-
-        A queue empty in one image does not prove that every diseased fruit is
-        visible: branches can occlude another fruit from the current azimuth.
-        The same collision-checked observation list used for target recovery is
-        therefore exhausted once at tree completion.  Previously surveyed views
-        are excluded, keeping the search finite and avoiding repeated motions.
-        """
+    def _recover_for_completion_scan(self, surveyed_indices, cancel_requested, feedback):
         if len(surveyed_indices) >= len(self._observation_candidates):
             return False, False
         current = self._observation_candidate_index
@@ -826,14 +866,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 f'index={self._observation_candidate_index}')
         return recovered, moved
 
-    def _recover_to_next_observation(
-            self, cancel_requested, feedback, excluded_indices=None):
-        """移至该病果尚未尝试过的下一个安全观察位。
-
-        ``TargetAttempt`` 记录每个已经执行过重心的观察位。恢复搜索发生回绕时必须
-        跳过这些索引，否则会在同一姿态再次得到 ``recenter already used``，既浪费
-        轨迹时间，也会提前耗尽恢复流程。
-        """
+    def _recover_to_next_observation(self, cancel_requested, feedback, excluded_indices=None):
         moved = False
         while not self._aborted(cancel_requested):
             feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
@@ -872,6 +905,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
     def _return_home(self, cancel_requested):
         return not self._aborted(cancel_requested) and self.arm.move_joints(self._home)
 
+    # ---------- 辅助/状态工具 ----------
     def _select_target(self, target_id):
         message = String()
         message.data = target_id
@@ -938,6 +972,8 @@ __all__ = ['SprayTask']
 def main():
     rclpy.init()
     node = SprayTask()
+    # 使用 4 线程的 MultiThreadedExecutor：
+    # 保证 Action Server 的长时循环（轴计算/等待 YOLO 推理）不会阻塞急停订阅或 TF 监听。
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:

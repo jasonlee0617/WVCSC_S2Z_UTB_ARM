@@ -6,13 +6,21 @@ find_package(ament_cmake_python REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
 
-install(DIRECTORY config launch maps models worlds rviz DESTINATION share/${PROJECT_NAME})
+# data_acquisition is imported as wvcsc_simulation.data_acquisition in launch files.
+# It must live alongside the wvcsc_simulation package (installed by ament_python_install_package).
+install(
+  DIRECTORY data_acquisition
+  DESTINATION local/lib/python3.10/dist-packages/wvcsc_simulation
+  PATTERN "scripts" EXCLUDE
+  PATTERN "__pycache__" EXCLUDE)
+
+install(DIRECTORY config data_acquisition launch maps models worlds rviz DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/ackermann_sim.py
-  scripts/capture_yolo_seed.py
-  scripts/capture_yolo_seed_direct.py
-  scripts/replace_yolo_seed_datasets.py
-  scripts/validate_yolo_seed.py
+  data_acquisition/scripts/capture_yolo_seed.py
+  data_acquisition/scripts/capture_yolo_seed_direct.py
+  data_acquisition/scripts/replace_yolo_seed_datasets.py
+  data_acquisition/scripts/validate_yolo_seed.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

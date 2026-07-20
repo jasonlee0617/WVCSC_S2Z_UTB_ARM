@@ -1,25 +1,80 @@
+# c10_usb_cam.yaml
+# ============================================================================
+# ROS2 `usb_cam` 节点驱动程序参数配置文件
+# ============================================================================
+#
+# 功能：
+# 该配置文件被 `c10_camera.launch.py` 加载，用于启动 C10 相机的 USB 驱动。
+# `usb_cam` 节点读取此配置，打开 Linux 的 V4L2 设备，获取视频流，
+# 并发布 `/camera/color/image_raw` 和 `/camera/color/camera_info`。
+#
+# 重要提示：
+# 1. 如果更换相机，或 U 盘端口变化，必须修改 `video_device` 的值。
+# 2. 必须先执行 `ls -l /dev/v4l/by-id/` 确认设备的持久化 ID。
+# 3. `frame_id` 必须与 `arm_task.yaml` 和 `visual_servo.yaml` 中的 `camera_frame`
+#    完全一致 (`camera_color_optical_frame`)，否则 TF 树会断裂。
+#
+
 /**:
   ros__parameters:
-    # Replace only this value with the actual by-id path reported by:
-    #   ls -l /dev/v4l/by-id/
+
+    # ----------------------------------------------------------------------
+    # 1. 硬件设备标识
+    # ----------------------------------------------------------------------
+    # 必须使用 /dev/v4l/by-id/ 下的持久化符号链接，而不是 /dev/video0。
+    # 因为插入多个 USB 摄像头时，/dev/videoX 的编号会因插入顺序随机变化。
+    # 使用持久化 ID 能保证系统重启后相机能够被准确识别。
     video_device: /dev/v4l/by-id/usb-Synria_C10-video-index0
+
+    # ----------------------------------------------------------------------
+    # 2. 采集与格式控制
+    # ----------------------------------------------------------------------
+    # 目标采集帧率。30Hz 是 YOLO 推理和视觉伺服 30Hz 控制环的基准。
     framerate: 30.0
+    # 输入输出方法：`mmap` 是 Linux V4L2 推荐的内存映射模式，效率高。
     io_method: mmap
+
+    # 相机坐标系 Frame ID。**必须严格匹配** TF 树中的相机 frame_id！
+    # 因为机械臂眼在手标定，以及 `visual_servo_node` 的 Twist 命令，
+    # 均依赖该 Frame 作为命令参考系。
     frame_id: camera_color_optical_frame
+
+    # 像素格式：`mjpeg2rgb` 表示让 `usb_cam` 读取 MJPG 压缩流后内部转换为 RGB。
+    # 这比 `yuyv` 原始格式带宽占用更小，且能够满足 1280x720@30fps 的需求。
     pixel_format: mjpeg2rgb
+
+    # 原始硬件设备格式：部分摄像头指定支持 YUV422 时更稳定。
     av_device_format: YUV422P
+
+    # 图像尺寸：必须与标定文件完全一致。
     image_width: 1280
     image_height: 720
+
+    # ----------------------------------------------------------------------
+    # 3. 相机内参与标定文件关联
+    # ----------------------------------------------------------------------
+    # 相机名称。
     camera_name: c10_color
+    # CameraInfo 的源文件 URL。`package://` 协议会被 ROS 自动解析为
+    # `install/wvcsc_c10_camera/share/wvcsc_c10_camera/config/...` 的绝对路径。
     camera_info_url: package://wvcsc_c10_camera/config/c10_reference_calibration.yaml
+
+    # ----------------------------------------------------------------------
+    # 4. 图像与曝光控制参数
+    # ----------------------------------------------------------------------
+    # 设定为 -1 表示使用摄像头的默认硬件自动调节。
     brightness: -1
     contrast: -1
     saturation: -1
     sharpness: -1
     gain: -1
+
+    # 自动白平衡：在比赛/真实果园光照多变的环境中，建议设为 true。
     auto_white_balance: true
-    white_balance: 4000
-    autoexposure: true
-    exposure: 100
+    white_balance: 4000      # 色温后备值，仅在手动模式生效
+    autoexposure: true       # 自动曝光，适应户外/室内光线变化
+    exposure: 100            # 曝光时间后备值 (取决于硬件单位)
+
+    # 自动对焦：C10 为定焦镜头，通常需要设为 false。
     autofocus: false
-    focus: -1
+    focus: -1                # 焦距设定（-1 表示硬件的默认值，注意前提是 autofocus=false）
