@@ -57,7 +57,7 @@ class Instance:
     果实的最核心区域，而非边缘。
     """
     target_id: str          # 感知层内部分配的跟踪 ID (如 fruit-1)
-    class_name: str         # 类别名称 (tree / healthy_fruit / diseased_fruit)
+    class_name: str         # 类别名称 (tree / diseased_fruit)
     confidence: float       # YOLO 推理置信度
     left: float             # 检测框左边界
     top: float              # 检测框上边界
@@ -214,15 +214,12 @@ def match_target_template(
 
 
 def deduplicate_instances(
-        instances, iou_threshold=0.35, center_distance_px=10.0,
-        class_confidence_margin=0.10):
+        instances, iou_threshold=0.35, center_distance_px=10.0):
     """
-    消除果实分割中的重复实例，并拒绝类间置信度冲突。
+    消除单类果实分割中的重复实例。
 
     由于 YOLOv8-seg 在多果实重叠时可能将同一个果实识别为不同的 ID，
     因此使用 IoU 或中心距离进行并查集 (Union-Find) 去重。
-    若一个果实既被判定为 `healthy_fruit` 又被判定为 `diseased_fruit`，
-    且置信度差距极小 (< margin)，则直接丢弃该目标（避免误喷）。
     """
     instances = list(instances)
     parents = list(range(len(instances)))
@@ -255,14 +252,7 @@ def deduplicate_instances(
             group,
             key=lambda item: (
                 -item.confidence, item.class_name, item.left, item.top))
-        best = ranked[0]
-        best_other_class = next(
-            (item for item in ranked if item.class_name != best.class_name), None)
-        if (best_other_class is not None and
-                best.confidence - best_other_class.confidence <
-                class_confidence_margin):
-            continue
-        kept.append(best)
+        kept.append(ranked[0])
     return sorted(
         kept,
         key=lambda item: (
@@ -529,7 +519,6 @@ class TwoStageYolo(Node):
             'perception_debug_rate_hz': 5.0,
             'tree_model_path': 'yolov8s_sim.pt',
             'fruit_model_path': 'yolov8s_seg_sim.pt',
-            'profile': 'simulation_fruit',
             'tree_class_id': 0,
             'tree_class_name': 'tree',
             'target_class_id': 1,

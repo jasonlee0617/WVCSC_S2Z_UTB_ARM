@@ -88,7 +88,7 @@ def test_real_orchestration_uses_real_leaf_and_measured_mission_contracts():
     vision = (PACKAGE.parent / 'wvcsc_rgb_vision' / 'config' /
               'vision_real.yaml').read_text(encoding='utf-8')
 
-    assert "executable='load_site_mission'" in source
+    assert "executable='load_site_mission.py'" in source
     assert "LaunchConfiguration('mission_source')" in source
     assert "'require_docking_quality': True" in source
     assert 'vision_real.yaml' in source

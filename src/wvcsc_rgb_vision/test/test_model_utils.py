@@ -28,18 +28,18 @@ from wvcsc_rgb_vision.two_stage_yolo import (
 
 def test_two_models_keep_independent_class_contracts():
     assert TREE_CLASS_NAMES == {0: 'tree'}
-    assert FRUIT_CLASS_NAMES == {1: 'diseased_fruit'}
+    assert FRUIT_CLASS_NAMES == {0: 'diseased_fruit'}
     assert canonical_class_name(0, TREE_CLASS_NAMES) == 'tree'
-    assert canonical_class_name(1, FRUIT_CLASS_NAMES) == 'diseased_fruit'
+    assert canonical_class_name(0, FRUIT_CLASS_NAMES) == 'diseased_fruit'
 
 
 def test_deployment_weight_must_match_task_and_classes():
     model = type('Model', (), {
         'task': 'segment',
-        'names': {1: 'diseased_fruit'},
+        'names': {0: 'diseased_fruit'},
     })()
     validate_yolo_model(model, 'segment', FRUIT_CLASS_NAMES)
-    model.names[1] = 'wrong_class'
+    model.names[0] = 'wrong_class'
     with pytest.raises(ValueError, match='contract mismatch'):
         validate_yolo_model(model, 'segment', FRUIT_CLASS_NAMES)
 
@@ -385,24 +385,6 @@ def test_fruit_inference_uses_stricter_nms_before_custom_deduplication():
     assert result == [stronger]
 
 
-def test_deduplication_drops_ambiguous_cross_class_instance():
-    healthy = Instance(
-        '', 'healthy_fruit', 0.61, 10, 10, 30, 30, 20, 20)
-    diseased = Instance(
-        '', 'diseased_fruit', 0.65, 11, 11, 31, 31, 21, 21)
-
-    assert deduplicate_instances([healthy, diseased]) == []
-
-
-def test_deduplication_keeps_clear_cross_class_winner():
-    healthy = Instance(
-        '', 'healthy_fruit', 0.40, 10, 10, 30, 30, 20, 20)
-    diseased = Instance(
-        '', 'diseased_fruit', 0.65, 11, 11, 31, 31, 21, 21)
-
-    assert deduplicate_instances([healthy, diseased]) == [diseased]
-
-
 def test_visualization_labels_include_id_class_and_confidence():
     instance = Instance(
         'fruit-7', 'diseased_fruit', 0.937,
@@ -411,7 +393,7 @@ def test_visualization_labels_include_id_class_and_confidence():
         'fruit-7 diseased_fruit 0.94')
 
 
-def test_fruit_visualization_draws_boxes_labels_and_only_diseased_aim_points(monkeypatch):
+def test_fruit_visualization_draws_diseased_box_label_and_aim_point(monkeypatch):
     calls = {'rectangles': [], 'labels': [], 'circles': []}
     monkeypatch.setattr('wvcsc_rgb_vision.two_stage_yolo.cv2.rectangle',
                         lambda *_args: calls['rectangles'].append(_args[1:]))
@@ -419,20 +401,17 @@ def test_fruit_visualization_draws_boxes_labels_and_only_diseased_aim_points(mon
                         lambda *_args: calls['labels'].append(_args[1:]))
     monkeypatch.setattr('wvcsc_rgb_vision.two_stage_yolo.cv2.circle',
                         lambda *_args: calls['circles'].append(_args[1:]))
-    healthy = Instance(
-        'fruit-1', 'healthy_fruit', 0.9, 1, 2, 11, 12, 6, 7)
     diseased = Instance(
         'fruit-2', 'diseased_fruit', 0.8, 20, 21, 40, 41, 30, 31)
 
     rendered = TwoStageYolo._annotated_image(
-        np.zeros((64, 64, 3), dtype=np.uint8), [healthy, diseased],
+        np.zeros((64, 64, 3), dtype=np.uint8), [diseased],
         draw_diseased_aim_point=True)
 
     assert rendered.shape == (64, 64, 3)
     assert [entry[0:2] for entry in calls['rectangles']] == [
-        ((1, 2), (11, 12)), ((20, 21), (40, 41))]
+        ((20, 21), (40, 41))]
     assert [entry[0] for entry in calls['labels']] == [
-        'fruit-1 healthy_fruit 0.90',
         'fruit-2 diseased_fruit 0.80',
     ]
     assert [entry[0] for entry in calls['circles']] == [(30, 31)]

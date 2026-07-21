@@ -145,7 +145,7 @@ def generate_launch_description():
         }],
         output='screen')
     measured_loader = Node(
-        package='wvcsc_bringup', executable='load_site_mission',
+        package='wvcsc_bringup', executable='load_site_mission.py',
         condition=IfCondition(PythonExpression([
             "'", LaunchConfiguration('mission_source'), "' == 'measured'",
         ])),
@@ -168,7 +168,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'mission_file',
             default_value=os.path.expanduser(
-                '~/.ros/wvcsc_sites/corn_site.yaml')),
+                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml')),
         DeclareLaunchArgument('map'),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),

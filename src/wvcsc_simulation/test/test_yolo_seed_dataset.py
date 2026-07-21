@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 import yaml
 
-from wvcsc_simulation.yolo_seed_dataset import (
+from data_acquisition.yolo_seed_dataset import (
     FRUIT_SEG_CLASS_NAMES,
     TREE_DETECT_CLASS_NAMES,
     copy_tree_detect_sample,

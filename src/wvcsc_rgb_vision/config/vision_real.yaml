@@ -1,6 +1,5 @@
 wvcsc_two_stage_yolo:
   ros__parameters:
-    profile: real_leaf
     image_topic: /camera/color/image_raw
     selected_target_topic: /vision/selected_target_id
     tree_detections_topic: /vision/tree_detections

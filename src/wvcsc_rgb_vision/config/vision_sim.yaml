@@ -47,14 +47,13 @@ wvcsc_two_stage_yolo:
     # `s` 代表 YOLOv8 Small 版本，在 NVIDIA 嵌入式平台(如 Jeston)上有较好平衡。
     tree_model_path: yolov8s_sim.pt
     fruit_model_path: yolov8s_seg_sim.pt
-    profile: simulation_fruit
     tree_class_id: 0
     tree_class_name: tree
-    target_class_id: 1
+    target_class_id: 0
     target_class_name: diseased_fruit
     target_id_prefix: fruit
-    # 仿真分割权重可同时包含健康果和病果类别。
-    strict_model_classes: false
+    # 仿真分割权重必须严格为 segment:{0: diseased_fruit}。
+    strict_model_classes: true
 
     # ----------------------------------------------------------------------
     # 3. 推理与置信度阈值

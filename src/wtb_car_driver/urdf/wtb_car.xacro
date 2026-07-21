@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <robot name="wtb_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
-  <xacro:property name="base_length" value="1.30"/>
-  <xacro:property name="base_width" value="0.80"/>
-  <xacro:property name="base_height" value="1.00"/>
+  <xacro:property name="base_length" value="1.45"/>
+  <xacro:property name="base_width" value="0.75"/>
+  <xacro:property name="base_height" value="1.35"/>
   <xacro:property name="base_z" value="0.20"/>
   <xacro:property name="wheel_radius" value="0.20"/>
   <xacro:property name="wheel_length" value="0.12"/>
@@ -93,7 +93,7 @@
       <inertial><mass value="0.5"/><inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>
     </link>
     <joint name="lidar_joint" type="fixed">
-      <parent link="base_link"/><child link="laser"/><origin xyz="0.36 0 0.5"/>
+      <parent link="base_link"/><child link="laser"/><origin xyz="0.4 0 0.725"/>
     </joint>
 
     <link name="gyro_link">

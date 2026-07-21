@@ -72,8 +72,8 @@ wvcsc_spray_task:
     tree_confidence: 0.10    # 树检测置信度阈值
     fruit_confidence: 0.20   # 病果分割置信度阈值
     target_class_name: diseased_fruit
-    spray_working_distance_m: 1.00
-    spray_working_distance_tolerance_m: 0.05
+    spray_working_distance_m: 1.30
+    spray_working_distance_tolerance_m: 0.20
 
     # 视觉确认帧数：连续 3 帧满足条件，才认为目标有效，防止单帧误检。
     confirmation_frames: 3
@@ -149,8 +149,8 @@ wvcsc_spray_task:
     fruit_zone_radius_m: 0.50          # 病斑水平散布半径（玉米叶片外展）
 
     # 观察候选网格的生成参数。
-    observation_distance_min_m: 1.00
-    observation_distance_max_m: 1.00
+    observation_distance_min_m: 1.10
+    observation_distance_max_m: 1.50
     observation_distance_step_m: 0.10
     camera_height_min_m: 1.50
     camera_height_max_m: 1.80
@@ -167,9 +167,9 @@ wvcsc_spray_task:
     # 12. 碰撞 IK、奇异点与关节限位安全保护
     # ----------------------------------------------------------------------
     # 雅可比矩阵条件数阈值。大于 16.5 意味着机械臂接近奇异点，该候选会被过滤。
-    observation_max_condition_number: 16.5
-    # 关节距离上限/下限的最小安全余量 (弧度)。小于 0.22 rad 表示关节快卡死。
-    observation_min_joint_margin_rad: 0.22
+    observation_max_condition_number: 20.0
+    # 关节距离上限/下限的最小安全余量 (弧度)。小于 0.18 rad 表示关节快卡死。
+    observation_min_joint_margin_rad: 0.18
     # 优选关节余量。大于 0.35 rad 说明该姿态非常舒展，排序优先级最高。
     observation_preferred_joint_margin_rad: 0.35
 

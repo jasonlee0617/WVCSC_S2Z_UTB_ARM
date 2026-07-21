@@ -3,7 +3,7 @@
 两阶段 YOLO 感知节点的模型路径解析与合规性检验工具。
 
 职责：
-1. 定义感知任务中使用的标准类别映射 (Tree / Healthy Fruit / Diseased Fruit)。
+1. 定义感知任务中使用的标准类别映射 (Tree / Diseased Fruit)。
 2. 在加载 YOLO 模型前进行“快速失败 (Fail-fast)”校验：确保模型的任务类型
     (detect/segment) 和类别名称完全符合预期。
 3. 统一处理模型权重文件的路径（支持绝对路径与 ROS 包共享目录的相对路径）。
@@ -18,9 +18,7 @@ from ament_index_python.packages import get_package_share_directory
 TREE_CLASS_NAMES = {0: 'tree'}
 
 # 第二阶段 (Fruit Segmentation) 的类别映射
-# ID 0: 健康果实 (Healthy Fruit) -> 不喷
-# ID 1: 患病果实 (Diseased Fruit) -> 目标对象
-FRUIT_CLASS_NAMES = {1: 'diseased_fruit'}
+FRUIT_CLASS_NAMES = {0: 'diseased_fruit'}
 
 
 def canonical_class_name(class_id, model_names):

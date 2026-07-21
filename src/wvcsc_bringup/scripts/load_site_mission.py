@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Validate and load a measured site mission through /mission/load_manual."""
+
+import argparse
+import math
+import sys
+
+import rclpy
+from rclpy.node import Node
+from rclpy.utilities import remove_ros_args
+from wvcsc_interfaces.msg import ManualMissionTarget
+from wvcsc_interfaces.srv import LoadManualMission
+
+from wvcsc_bringup.site_mission import load_site_document, validate_site_document
+
+
+def _set_pose(message, values):
+    message.position.x = float(values['x'])
+    message.position.y = float(values['y'])
+    yaw = float(values['yaw'])
+    message.orientation.z = math.sin(yaw / 2.0)
+    message.orientation.w = math.cos(yaw / 2.0)
+
+
+class SiteMissionLoader(Node):
+    def __init__(self):
+        super().__init__('wvcsc_site_mission_loader')
+        self._client = self.create_client(LoadManualMission, '/mission/load_manual')
+
+    def load(self, document, timeout_sec):
+        if not self._client.wait_for_service(timeout_sec=timeout_sec):
+            raise RuntimeError('/mission/load_manual service is unavailable')
+        mission = document['mission']
+        request = LoadManualMission.Request()
+        request.header.stamp = self.get_clock().now().to_msg()
+        request.header.frame_id = 'map'
+        request.mission_id = str(mission['mission_id'])
+        request.return_home_after_finish = bool(
+            mission.get('return_home_after_finish', False))
+        _set_pose(request.home_pose, mission['home_pose'])
+        for source in mission['targets']:
+            target = ManualMissionTarget()
+            target.target_id = str(source['target_id'])
+            _set_pose(target.docking_pose, source['docking_pose'])
+            target.spray_side = str(source['spray_side'])
+            target.spray_duration = float(source['spray_duration'])
+            target.tree_hint.x = float(source['tree_hint']['x'])
+            target.tree_hint.y = float(source['tree_hint']['y'])
+            target.tree_hint.z = float(source['tree_hint']['z'])
+            target.use_explicit_tree_hint = True
+            request.targets.append(target)
+        future = self._client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)
+        if not future.done():
+            raise RuntimeError('/mission/load_manual timed out')
+        response = future.result()
+        if response is None or not response.success:
+            message = response.message if response is not None else 'no response'
+            raise RuntimeError(f'mission manager rejected site mission: {message}')
+        return response.message
+
+
+def main():
+    argv = remove_ros_args(args=sys.argv)[1:]
+    if argv and argv[0] == '--':
+        argv = argv[1:]
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--file', default='~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml')
+    parser.add_argument('--map', required=True)
+    parser.add_argument('--service-timeout-sec', type=float, default=30.0)
+    args = parser.parse_args(argv)
+    rclpy.init(args=sys.argv)
+    node = SiteMissionLoader()
+    try:
+        document = load_site_document(args.file)
+        validate_site_document(document, args.map)
+        message = node.load(document, args.service_timeout_sec)
+        node.get_logger().info(
+            f"[SITE] loaded mission={document['mission']['mission_id']} "
+            f"targets={len(document['mission']['targets'])}: {message}")
+        return 0
+    except (RuntimeError, ValueError) as error:
+        node.get_logger().error(f'[SITE] mission load failed: {error}')
+        return 1
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

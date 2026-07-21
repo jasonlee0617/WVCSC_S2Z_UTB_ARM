@@ -35,12 +35,12 @@ AMCL稳定后，人工驾驶并停稳。卷尺必须从车体上标记的
 
 ```bash
 ros2 run wvcsc_bringup capture_site_pose -- \
-  --file ~/.ros/wvcsc_sites/corn_site.yaml \
+  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
   --map /home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml \
   --capture-home
 
 ros2 run wvcsc_bringup capture_site_pose -- \
-  --file ~/.ros/wvcsc_sites/corn_site.yaml \
+  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
   --map /home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml \
   --target-id corn_01 \
   --tree-forward-m <前向实测值> --tree-left-m <左向实测值> \
@@ -51,7 +51,7 @@ ros2 run wvcsc_bringup capture_site_pose -- \
 
 ```bash
 ros2 run wvcsc_bringup validate_site_mission -- \
-  --file ~/.ros/wvcsc_sites/corn_site.yaml \
+  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
   --map /home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml
 ```
 
@@ -62,7 +62,7 @@ ros2 run wvcsc_bringup validate_site_mission -- \
 ```bash
 ros2 launch wvcsc_bringup system_real.launch.py \
   mode:=localization operation:=mission mission_source:=measured \
-  mission_file:=~/.ros/wvcsc_sites/corn_site.yaml \
+  mission_file:=~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
   map:=/home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml
 ```
 

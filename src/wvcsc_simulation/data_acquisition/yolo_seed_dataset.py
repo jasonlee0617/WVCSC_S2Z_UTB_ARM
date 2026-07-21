@@ -11,8 +11,8 @@ import cv2
 import yaml
 
 
-CLASS_NAMES = {0: 'tree', 1: 'healthy_fruit', 2: 'diseased_fruit'}
-FRUIT_SEG_CLASS_NAMES = {0: 'healthy_fruit', 1: 'diseased_fruit'}
+CLASS_NAMES = {0: 'tree', 1: 'diseased_fruit'}
+FRUIT_SEG_CLASS_NAMES = {0: 'diseased_fruit'}
 TREE_DETECT_CLASS_NAMES = {0: 'tree'}
 IMAGE_SIZE = (1280, 720)
 
@@ -276,7 +276,7 @@ def _validate_split_dataset(
 
 
 def validate_fruit_seg_dataset(root, expected_train=24, expected_val=6):
-    """Validate a manual-annotation-ready healthy/diseased fruit dataset."""
+    """Validate a manual-annotation-ready diseased-fruit dataset."""
     root, images_by_split, samples, errors = _validate_split_dataset(
         root, FRUIT_SEG_CLASS_NAMES, _fruit_seg_manifest,
         expected_train, expected_val)

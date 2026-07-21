@@ -5,6 +5,31 @@
   <xacro:arg name="enable_gazebo_ros2_control" default="false"/>
   <xacro:arg name="enable_c10_camera" default="true"/>
   <xacro:arg name="enable_c10_gazebo" default="false"/>
+
+    <!-- 机械臂车顶安装参数 -->
+  <!--
+    Alicia 原始 URDF 默认把机械臂底座命名为 base_link，
+    会与小车 base_link 重名，因此覆盖为 alicia_base_link。
+  -->
+  <xacro:arg name="alicia_base_link" default="alicia_base_link"/>
+  <!--
+    小车车体高度为 1.35 m，base_link 位于车体几何中心，
+    因此车顶相对 base_link 的 Z 坐标为 1.35 / 2 = 0.675 m。
+  -->
+  <xacro:arg name="vehicle_roof_z" default="0.675"/>
+  <!--
+    机械臂相对于车顶安装坐标系的位置：
+    沿 base_link 正 X 方向平移 0.10 m。
+  -->
+  <xacro:arg name="arm_mount_xyz" default="-0.20 0 0"/>
+  <!--
+    绕 Z 轴旋转 180°，使机械臂底座 X 轴方向反转，
+    同时保持机械臂 Z 轴朝上。
+  -->
+  <xacro:arg
+    name="arm_mount_rpy"
+    default="0 0 3.141592653589793"/>
+
   <!-- Temporary eye-in-hand extrinsics. Recalibrate after the real bracket is fixed. -->
   <xacro:arg name="c10_mount_xyz" default="-0.055 0 -0.10"/>
   <xacro:arg name="c10_mount_rpy" default="0 -1.57079632679 0"/>
@@ -26,16 +51,39 @@
   <xacro:include filename="$(find alicia_m_descriptions)/urdf/Alicia_M_v1_1/Alicia_M_v1_1_follower.urdf"/>
   <xacro:include filename="$(find alicia_m_moveit_config)/config/alicia_m_v1_1_follower.ros2_control.xacro"/>
 
-  <link name="arm_mount_link">
-    <visual><geometry><box size="0.24 0.24 0.12"/></geometry><material name="mount_gray"><color rgba="0.3 0.3 0.3 1"/></material></visual>
-    <collision><geometry><box size="0.24 0.24 0.12"/></geometry></collision>
-    <inertial><mass value="5"/><inertia ixx="0.012" ixy="0" ixz="0" iyy="0.012" iyz="0" izz="0.012"/></inertial>
-  </link>
-  <joint name="arm_mount_joint" type="fixed">
-    <parent link="base_link"/><child link="arm_mount_link"/><origin xyz="0 0 0.56"/>
+  <!--
+    车顶安装坐标系。
+    wtb_car.xacro 中：
+      base_height = 1.35 m
+    base_link 位于车体几何中心，所以车顶位置为：
+      Z = 1.35 / 2 = 0.675 m
+  -->
+  <link name="arm_mount_link"/>
+
+  <joint name="arm_mount_frame_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="arm_mount_link"/>
+
+    <!-- arm_mount_link 原点位于小车车顶表面 -->
+    <origin
+      xyz="0 0 $(arg vehicle_roof_z)"
+      rpy="0 0 0"/>
   </joint>
+  <!--
+    机械臂与车顶安装坐标系之间的固定连接。
+    xyz="0.10 0 0"：
+      沿 base_link 正 X 方向移动 0.10 m。
+    rpy="0 0 pi"：
+      绕 Z 轴旋转 180°，机械臂底座 X 轴反向，
+      机械臂 Z 轴仍然保持朝上。
+  -->
   <joint name="alicia_mount_joint" type="fixed">
-    <parent link="arm_mount_link"/><child link="alicia_base_link"/><origin xyz="0 0 0.06"/>
+    <parent link="arm_mount_link"/>
+    <child link="$(arg alicia_base_link)"/>
+
+    <origin
+      xyz="$(arg arm_mount_xyz)"
+      rpy="$(arg arm_mount_rpy)"/>
   </joint>
 
   <link name="spray_nozzle_link"/>
