@@ -41,6 +41,10 @@ if(BUILD_TESTING)
     test_system_sim_launch test/test_system_sim_launch.py
     ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
+  ament_add_pytest_test(
+    test_calibration_sim_launch test/test_calibration_sim_launch.py
+    ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
 endif()
 
 ament_package()

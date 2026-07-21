@@ -1,159 +1,115 @@
-# C10 眼在手 (Eye-in-Hand) 手眼标定指南
+# C10 眼在手手眼标定指南
 
-> 适用环境：ROS 2 Humble + Gazebo Classic 11 / 真实 Alicia-M + C10 相机
-> 标定方法：easy_handeye2 + ArUco marker (DICT_5X5_250 id=1, 90×90 mm)
+适用：ROS 2 Humble、Alicia-M、C10 RGB、Gazebo Classic 11 与实机。标定类型固定为眼在手：`tool0 → camera_color_optical_frame`。
 
----
+## 仿真自动标定
 
-## 1. 仿真自动化标定
-
-### 1.1 一键启动
+终端一启动完整标定环境：
 
 ```bash
 cd /home/robot/WVCSC_S2Z_UTB_ARM
+source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch wvcsc_simulation calibration_sim.launch.py
 ```
 
-### 1.2 启动方式
+该 launch 使用 Gazebo Classic 的控制器启动链：
+
+```text
+spawn → unpause Gazebo (zero gravity) → joint_state_broadcaster
+      → arm_controller → gripper_controller
+      → motion_control + ArUco + marker TF + handeye server
+```
+
+控制器任一环节失败会停止 launch，不会继续执行采集。标定场景将重力固定为零：这使控制器在解除暂停后立即获得更新周期，同时避免未激活机械臂因重力跌落；该设置仅用于几何标定，不代表真实动力学。Gazebo场景中桌面为 `1.20 × 0.80 m`，四条桌腿可见；仿真和实机均使用70 mm编码区域、90 mm背板的ArUco码，位于桌面 `(0.45, 0, 0.752)`，朝上。仿真为严格3 mm外参基准使用无噪声图像和68.8度水平视场，使真实尺寸的平面码获得足够像素；这个相机FOV仅服务于几何基准，不替代实机内参标定。
+
+终端二运行与实机共用的采集器：
 
 ```bash
-# 终端 1: 仿真环境 (Gazebo + Robot + ArUco + handeye_server)
-ros2 launch wvcsc_simulation calibration_sim.launch.py
-
-# 终端 2: 标定采集器 (与实机操作完全相同)
-ros2 run wvcsc_calibration auto_calibration_collector
-# 按 s 开始，按 q 取消
+ros2 run wvcsc_calibration auto_calibration_collector --ros-args \
+  --params-file "$(ros2 pkg prefix wvcsc_calibration)/share/wvcsc_calibration/config/auto_handeye_alicia.yaml" \
+  --params-file "$(ros2 pkg prefix wvcsc_calibration)/share/wvcsc_calibration/config/auto_handeye_alicia_sim.yaml"
 ```
 
-### 1.3 自动化流程
+按键：
 
-```
-终端 1: Gazebo + Robot + ArUco + handeye_server 启动 (一次性)
-终端 2: 按 s → auto_calibration_collector:
-      1. 生成 17 个观察姿态 (覆盖 ±30° cone)
-      2. 每个姿态: MoveIt 移动 → ArUco 检测 → TakeSample
-      3. ComputeCalibration → SaveCalibration
-      4. 输出标定结果到 ~/.ros/easy_handeye2/
+```text
+s / Enter  开始新的自动采集会话
+q          取消当前会话并返回开始前关节姿态
+Ctrl+C     取消并退出
 ```
 
-### 1.4 标定码位置
-
-- ArUco marker: `model://aruco_marker`
-- 世界坐标: `(0.20, 0, 0.62)` — arm_mount_link 正前方 20cm
-- 尺寸: 90×90 mm, DICT_5X5_250 id=1
-
-### 1.5 输出文件
-
-```
-~/.ros/easy_handeye2/
-  handeye_calibration.yaml   ← 手眼变换矩阵 (tool0 → camera_color_optical_frame)
-  samples.yaml                ← 17 个采样点的原始数据
-```
-
----
-
-## 2. 实机标定
-
-### 2.1 准备工作
-
-1. **打印 ArUco 标定码**
-   - 字典: DICT_5X5_250, id=1
-   - 物理尺寸: 90×90 mm（贴于 100×100 mm 硬板上）
-   - 纸张: 哑光/无光面，避免反光
-
-2. **固定标定码**
-   - 位置: arm_mount_link 正前方 20cm (约机器人 base_link 前方 20cm)
-   - 高度: 与 C10 相机安装高度齐平 (~62cm 距地面)
-   - 固定: 使用三脚架或刚性支架，保证采样期间不移动
-
-3. **检查硬件连接**
-   ```bash
-   # C10 相机
-   ls /dev/v4l/by-id/usb-Synria_C10-video-index0
-   # Alicia-M 机械臂串口
-   ls /dev/ttyACM0
-   ```
-
-### 2.2 启动标定环境
+可选终端三用于安全介入：
 
 ```bash
-# 终端 1: 传感器 + 机械臂
-ros2 launch wvcsc_bringup real_sensors.launch.py
-ros2 launch wvcsc_bringup real_arm.launch.py
+ros2 run wvcsc_arm_task motion_control_keyboard
+```
 
-# 终端 2: ArUco 检测 + easy_handeye2
+`SPACE` stop并锁定，`h` reset并HOME，`r` resume。标定过程发生stop后，该轮会话作废，必须重新按`s`开始。
+
+采集器先进入Alicia官方参考姿态：
+
+```text
+[0.0, -1.09, -0.87, 0.0, -0.77, 0.0]
+```
+
+之后围绕实时识别的标定码生成21个候选姿态。每个候选均通过碰撞IK、雅可比条件数、关节余量、OMPL规划和RGB图像质量检查；目标为18个有效样本，最低15个。若21个广域候选的安全子集不足目标样本数，采集器先加入8个水平`yaw+roll`宽激励和8个`10°–12°`离轴视角，再加入12个`±3°/±15 mm`细粒度候选；总候选最多49个，仍逐个通过相同门控。宽激励和离轴视角避免水平桌面码下径向位移、纯roll和始终居中观察造成的旋转退化；细粒度候选只用于补足可达样本。标定期间允许标记偏离图像中心最多220 px，但仍要求角点边缘余量和稳定性，离轴姿态不会被重心步骤拉回中心。若官方参考姿态可见标定码但接近腕部奇异位形，采集器最多三次先移动到已通过全部门控的安全观察位，再围绕该位重新生成候选；重复锚定时会避开不改变姿态的`seed`候选，不会降低条件数或关节余量阈值。仿真额外向MoveIt添加机械臂前方桌面碰撞盒，避免候选从桌面下方穿越。仿真相机图像噪声固定为零，仅作为URDF外参的确定性几何基准；实机仍必须依赖RGB质量门控和重复标定。
+
+采集仍由 easy_handeye2 服务保存原始样本；WVCSC 求解器独立使用 ROS 的
+`base→tool0`、`camera→marker` 正向样本约定，并统一导出
+`tool0→camera_color_optical_frame`。这样仿真真值和实机输出使用同一条可测试的
+OpenCV求解链，而不依赖第三方服务端的保存格式。
+
+仿真输出：
+
+```text
+~/.ros/wvcsc_calibration/c10_handeye_sim.yaml
+```
+
+仿真会将求解外参与URDF中的已知 `tool0 → camera_color_optical_frame` 外参比较。硬门槛为平移不超过`3 mm`、旋转不超过`1°`；超限不会保存或覆盖输出文件。
+
+```text
+[CALIBRATION][GROUND_TRUTH] translation_error=...mm rotation_error=...deg
+```
+
+2026-07-22 已在 Gazebo Classic 11 完成一次完整回归：22 个有效样本，Park
+解的真值误差为 **2.72 mm / 0.38°**，三算法最大分歧为 `0.20 mm / 0.19°`，
+固定码残差 RMS 为 `0.47 mm / 0.43°`。这是无图像噪声、固定桌面标记条件下
+对 URDF 外参的基准结果；不代表真实 C10 或实际安装后的标定精度。
+
+## 实机自动标定
+
+将70 mm的编码区域打印在硬质90 mm背板上，固定在平整桌面且采样期间不可移动。每次 `take_sample` 前，采集器使用角点亚像素化后的质量合格 RGB 观测计算稳定 `camera→marker` 位姿，并临时发布给唯一的 `marker_tf` TF authority；原始 ArUco 话题仍用于实时就绪检查。这样不会在机械臂移动过程中取样，也不会产生第二个 TF 发布者。启动：
+
+```bash
 ros2 launch wvcsc_calibration c10_handeye.launch.py
 
-# 终端 3: 采集器
-ros2 run wvcsc_calibration auto_calibration_collector
+ros2 run wvcsc_calibration auto_calibration_collector --ros-args \
+  --params-file "$(ros2 pkg prefix wvcsc_calibration)/share/wvcsc_calibration/config/auto_handeye_alicia.yaml"
 ```
 
-### 2.3 手动采样（备选）
+实机同样使用RGB ArUco与CameraInfo估计六自由度marker位姿，不需要深度图。实机默认关闭仿真真值门槛；保留15个最小样本、18个目标样本、算法一致性和固定marker残差门槛。
 
-如果自动采样失败，可在 `auto_calibration_collector` 终端中按 `s` 手动触发单次采样：
-
-```
-  s / Enter  → 触发一次采样
-  q          → 取消当前 session
-  Ctrl-C     → 退出
-```
-
-每个采样点要求：
-- ArUco marker 在相机视野中且检测置信度 >0.8
-- 机械臂处于静止状态（joint_states 5 帧内变化 <0.01 rad）
-- 采集 17 个不同姿态（覆盖不同距离、角度）
-
-### 2.4 检查标定质量
-
-```bash
-ros2 run wvcsc_calibration calibration_quality \
-  ~/.ros/easy_handeye2/handeye_calibration.yaml
-```
-
-验收标准：
-- 平移残差 <5 mm
-- 旋转残差 <0.5°
-- 条件数 <100
-
----
-
-## 3. 标定结果接入
-
-### 3.1 更新 bringup 配置
-
-将标定结果写入 `wvcsc_bringup/config/real/c10_calibration.yaml`：
+如果实机桌面位于机械臂工作区内，应在启动采集器前用参数配置其相对 `alicia_base_link` 的位置和尺寸，并启用：
 
 ```yaml
-# c10_calibration.yaml — 手眼标定结果
-# tool0 → camera_color_optical_frame
-translation:
-  x: -0.055  # 来自标定
-  y: 0.0
-  z: -0.100
-rotation:     # xyzw quaternion
-  x: 0.0
-  y: -0.707
-  z: 0.0
-  w: 0.707
+calibration_surface_enabled: true
 ```
 
-### 3.2 验证标定接入
+最终实机部署文件：
+
+```text
+~/.ros/wvcsc_calibration/c10_handeye.yaml
+```
+
+## 运行前检查
 
 ```bash
-ros2 launch wvcsc_bringup system_real.launch.py
-# 检查 TF 树: tool0 → camera_color_optical_frame
-ros2 run tf2_tools view_frames
+ros2 control list_controllers
+ros2 topic hz /camera/color/image_raw
+ros2 topic echo /aruco_markers --once
+ros2 run tf2_ros tf2_echo tool0 camera_color_optical_frame
+ros2 run tf2_ros tf2_echo camera_color_optical_frame calibration_aruco
 ```
 
----
-
-## 4. 故障排查
-
-| 症状 | 原因 | 解决 |
-|------|------|------|
-| ArUco 检测不到 | 标定码反光/遮挡/尺寸不匹配 | 用哑光纸、确认 DICT_5X5_250 id=1、确认 marker_size=0.07 |
-| 采样 0/17 | auto_collector 没收到 ArUco 话题 | 检查 `/aruco_markers` 是否发布、topic 名称是否一致 |
-| ComputeCalibration 失败 | 样本姿态不够多样 | 增加采样数到 25、确保覆盖 ±30° 角度范围 |
-| 真机标定残差大 | 标定码移动了 / 相机内参不准 | 重新标定 C10 内参 (camera_calibration) |
-| TF 不连续 | tool0 → camera_link 用了临时值 | 确认 URDF 中 c10_mount_xyz 与标定一致 |
+所有控制器必须为`active`，ArUco码必须稳定可见后才按`s`。

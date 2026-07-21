@@ -64,10 +64,41 @@ def _camera_look_at(marker, camera, roll_deg, preferred_x):
     return quaternion_from_matrix(matrix)
 
 
+def _quaternion_multiply(left, right):
+    """Compose parent-to-local rotations stored as ``(x, y, z, w)``."""
+    lx, ly, lz, lw = (float(value) for value in left)
+    rx, ry, rz, rw = (float(value) for value in right)
+    return _unit((
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    ))
+
+
+def _local_tilt(quaternion, yaw_deg, pitch_deg):
+    """Offset the optical axis while retaining the marker inside C10's FOV."""
+    yaw = math.radians(float(yaw_deg)) * 0.5
+    pitch = math.radians(float(pitch_deg)) * 0.5
+    yaw_quaternion = (0.0, math.sin(yaw), 0.0, math.cos(yaw))
+    pitch_quaternion = (math.sin(pitch), 0.0, 0.0, math.cos(pitch))
+    return _quaternion_multiply(
+        quaternion, _quaternion_multiply(yaw_quaternion, pitch_quaternion))
+
+
 def generate_alicia_candidates(
         marker_position, current_camera_position, current_camera_quaternion,
-        tool_to_camera_translation, tool_to_camera_quaternion):
-    """Generate the requested 21 marker-relative views for Alicia-M."""
+        tool_to_camera_translation, tool_to_camera_quaternion,
+        include_fine=False):
+    """Generate baseline 21, or 49 excitation-expanded, marker-relative views.
+
+    ``include_fine`` is intentionally opt-in.  The default set mirrors the
+    documented 21 broad calibration views.  The collector only enables the
+    expansion when the strict Alicia-M safety gate leaves too few candidates.
+    The expansion first adds 16 wider, two-axis and off-axis views.  They add
+    the rotational excitation that an eye-in-hand solve needs; the final
+    twelve small perturbations are then only a reachability fallback.
+    """
     marker = tuple(float(value) for value in marker_position)
     current = tuple(float(value) for value in current_camera_position)
     relative = tuple(current[index] - marker[index] for index in range(3))
@@ -98,9 +129,56 @@ def generate_alicia_candidates(
         ('combo_right_low', 0.0, 6.0, -6.0, 5.0),
         ('combo_right_high', 0.0, 6.0, 6.0, -5.0),
     ))
+    if include_fine:
+        # A horizontal desktop marker makes radial motion and camera roll alone
+        # poorly conditioned for AX=XB.  Alicia-M cannot safely use every
+        # vertical view, so first try reachable yaw+roll orbits around the
+        # marker before consuming small near-duplicate views.
+        excitation_specs = (
+            ('wide_roll_-24', 0.0, 0.0, 0.0, -24.0),
+            ('wide_roll_+24', 0.0, 0.0, 0.0, 24.0),
+            ('wide_orbit_left', 0.0, -18.0, 0.0, -12.0),
+            ('wide_orbit_right', 0.0, 18.0, 0.0, 12.0),
+            ('wide_orbit_left_outer', 0.0, -24.0, 0.0, -16.0),
+            ('wide_orbit_right_outer', 0.0, 24.0, 0.0, 16.0),
+            ('wide_orbit_left_high', 0.0, -14.0, 4.0, -10.0),
+            ('wide_orbit_right_high', 0.0, 14.0, 4.0, 10.0),
+            ('wide_tilt_left', 0.0, 0.0, 0.0, 0.0, 12.0, 0.0),
+            ('wide_tilt_right', 0.0, 0.0, 0.0, 0.0, -12.0, 0.0),
+            ('wide_tilt_up', 0.0, 0.0, 0.0, 0.0, 0.0, 10.0),
+            ('wide_tilt_down', 0.0, 0.0, 0.0, 0.0, 0.0, -10.0),
+            ('wide_tilt_left_up', 0.0, 0.0, 0.0, -8.0, 10.0, 8.0),
+            ('wide_tilt_right_up', 0.0, 0.0, 0.0, 8.0, -10.0, 8.0),
+            ('wide_tilt_left_down', 0.0, 0.0, 0.0, 8.0, 10.0, -8.0),
+            ('wide_tilt_right_down', 0.0, 0.0, 0.0, -8.0, -10.0, -8.0),
+        )
+        # The collector accepts candidates in this order.  Put the strong
+        # excitation before radial fine-tuning so a session cannot fill with
+        # near-parallel motions before reaching useful rotations.
+        specifications[5:5] = excitation_specs
+        specifications.extend(
+            (f'fine_roll_{value:+g}', 0.0, 0.0, 0.0, value)
+            for value in (-4.0, 4.0))
+        specifications.extend(
+            (f'fine_radial_{value:+.3f}', value, 0.0, 0.0, 0.0)
+            for value in (-0.015, 0.015))
+        specifications.extend(
+            (f'fine_horizontal_{value:+g}', 0.0, value, 0.0, 0.0)
+            for value in (-3.0, 3.0))
+        specifications.extend(
+            (f'fine_vertical_{value:+g}', 0.0, 0.0, value, 0.0)
+            for value in (-3.0, 3.0))
+        specifications.extend((
+            ('fine_combo_left_low', 0.0, -3.0, -3.0, -3.0),
+            ('fine_combo_left_high', 0.0, -3.0, 3.0, 3.0),
+            ('fine_combo_right_low', 0.0, 3.0, -3.0, 3.0),
+            ('fine_combo_right_high', 0.0, 3.0, 3.0, -3.0),
+        ))
 
     candidates = []
-    for name, radial, horizontal_deg, vertical_deg, roll_deg in specifications:
+    for specification in specifications:
+        name, radial, horizontal_deg, vertical_deg, roll_deg, *tilt = specification
+        yaw_deg, pitch_deg = (tilt + [0.0, 0.0])[:2]
         if name == 'seed':
             # 第一项必须是真实起始姿态，而不是重新构造的“近似 look-at”
             # 姿态。这样 q/Ctrl+C 回退基准和采样覆盖统计都与操作员确认的
@@ -123,6 +201,8 @@ def generate_alicia_candidates(
             )
             camera_quaternion = _camera_look_at(
                 marker, camera, roll_deg, preferred_x)
+            camera_quaternion = _local_tilt(
+                camera_quaternion, yaw_deg, pitch_deg)
         tool_position, tool_quaternion = tool_pose_from_camera_pose(
             camera, camera_quaternion,
             tool_to_camera_translation, tool_to_camera_quaternion)

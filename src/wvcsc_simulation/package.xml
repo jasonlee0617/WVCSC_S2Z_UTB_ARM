@@ -12,6 +12,7 @@
   <exec_depend>alicia_m_descriptions</exec_depend>
   <exec_depend>alicia_m_moveit_config</exec_depend>
   <exec_depend>controller_manager</exec_depend>
+  <exec_depend>easy_handeye2</exec_depend>
   <exec_depend>gazebo_plugins</exec_depend>
   <exec_depend>gazebo_ros</exec_depend>
   <exec_depend>gazebo_ros2_control</exec_depend>
@@ -31,12 +32,15 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>ros2_aruco</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>trajectory_retime_server</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
   <exec_depend>wvcsc_description</exec_depend>
+  <exec_depend>wvcsc_calibration</exec_depend>
   <exec_depend>wvcsc_arm_task</exec_depend>
   <exec_depend>wvcsc_interfaces</exec_depend>
   <exec_depend>wvcsc_mission_manager</exec_depend>

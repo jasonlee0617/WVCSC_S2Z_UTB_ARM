@@ -20,11 +20,8 @@ from types import SimpleNamespace
 import cv2
 from cv_bridge import CvBridge
 from easy_handeye2_msgs.srv import (
-    ComputeCalibration,
     RemoveSample,
-    SaveCalibration,
     SaveSamples,
-    SetAlgorithm,
     TakeSample,
 )
 import numpy as np
@@ -35,6 +32,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
+from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -48,7 +46,7 @@ from wvcsc_arm_task.observation import (
 )
 
 from .alicia_sample_geometry import generate_alicia_candidates
-from .calibration_io import export_calibration
+from .calibration_io import write_calibration
 from .calibration_quality import (
     MarkerObservation,
     calibration_consensus,
@@ -57,8 +55,12 @@ from .calibration_quality import (
     pose_is_diverse,
     sample_coverage,
     stable_marker_window,
+    transform_error,
     transform_components,
 )
+from .calibration_solver import solve_handeye
+from .calibration_solver import matrix_quaternion
+from .marker_tf import average_marker_pose
 
 
 def _wait_future(future, timeout_sec):
@@ -71,6 +73,54 @@ def _wait_future(future, timeout_sec):
 def _transform_tuple(stamped):
     transform = stamped.transform
     return transform_components(transform)
+
+
+def estimate_refined_aruco_pose(corners, marker_size_m, camera_matrix, distortion):
+    """Estimate a square-marker pose with the planar IPPE solver when present.
+
+    ArUco's convenience API is suitable for continuous visualization, but a
+    hand-eye sample benefits from the square-specific IPPE solution after its
+    corners have been refined to sub-pixel precision.  The marker coordinate
+    convention matches ``estimatePoseSingleMarkers``: origin at the printed
+    square centre, +X right and +Y up when viewing the code face.  A robust
+    fallback preserves compatibility with OpenCV builds that lack IPPE.
+    """
+    marker_size = float(marker_size_m)
+    if not math.isfinite(marker_size) or marker_size <= 0.0:
+        raise ValueError('marker_size_m must be finite and positive')
+    image_points = np.asarray(corners, dtype=np.float32).reshape(4, 2)
+    half = marker_size * 0.5
+    object_points = np.asarray((
+        (-half, half, 0.0), (half, half, 0.0),
+        (half, -half, 0.0), (-half, -half, 0.0),
+    ), dtype=np.float32)
+    try:
+        result = cv2.solvePnPGeneric(
+            object_points, image_points, camera_matrix, distortion,
+            flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        solved, rotations, translations, reprojection = result[:4]
+        if solved and rotations and translations:
+            errors = (np.asarray(reprojection, dtype=float).reshape(-1)
+                      if reprojection is not None else
+                      np.full(len(rotations), math.inf))
+            candidates = []
+            for index, (rotation, translation) in enumerate(
+                    zip(rotations, translations)):
+                vector = np.asarray(translation, dtype=float).reshape(3)
+                if vector[2] > 0.0 and np.all(np.isfinite(vector)):
+                    candidates.append((
+                        float(errors[index]) if index < len(errors) else math.inf,
+                        np.asarray(rotation, dtype=float).reshape(3, 1), vector))
+            if candidates:
+                _error, rotation, translation = min(candidates, key=lambda item: item[0])
+                return rotation, translation
+    except cv2.error:
+        pass
+    rotations, translations, _objects = cv2.aruco.estimatePoseSingleMarkers(
+        np.asarray([image_points], dtype=np.float32), marker_size,
+        camera_matrix, distortion)
+    return (np.asarray(rotations[0], dtype=float).reshape(3, 1),
+            np.asarray(translations[0], dtype=float).reshape(3))
 
 
 class AutoCalibrationCollector(Node):
@@ -90,6 +140,7 @@ class AutoCalibrationCollector(Node):
         self._session_thread = None
         self._session_cancel = threading.Event()
         self._session_invalid = threading.Event()
+        self._auto_start_pending = bool(self.get_parameter('auto_start').value)
         self._external_locked = False
         self._emergency_stop = False
         self._joint_positions = None
@@ -102,20 +153,31 @@ class AutoCalibrationCollector(Node):
             cv2.aruco.DetectorParameters()
             if hasattr(cv2.aruco, 'DetectorParameters')
             else cv2.aruco.DetectorParameters_create())
-        self._clients = self._create_easy_clients()
+        # ``rclpy.node.Node`` reserves ``_clients`` for its own ROS client
+        # entities.  Keep easy_handeye2 clients in a distinctly named mapping;
+        # overwriting Node._clients prevents executors from spinning at all.
+        self._easy_clients = self._create_easy_clients()
+        self._stable_marker_publisher = self.create_publisher(
+            PoseStamped,
+            str(self.get_parameter('stable_marker_pose_topic').value), 1)
         latched = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        # Gazebo C10 and real camera drivers commonly publish image streams as
+        # BEST_EFFORT.  A default RELIABLE subscription is incompatible and
+        # silently starves the collector of CameraInfo/image frames.
+        sensor_qos = QoSProfile(
+            depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(
             JointState, str(self.get_parameter('joint_state_topic').value),
             self._on_joint_state, 10, callback_group=self._group)
         self.create_subscription(
             CameraInfo, str(self.get_parameter('camera_info_topic').value),
-            self._on_camera_info, 10, callback_group=self._group)
+            self._on_camera_info, sensor_qos, callback_group=self._group)
         self.create_subscription(
             Image, str(self.get_parameter('image_topic').value),
-            self._on_image, 10, callback_group=self._group)
+            self._on_image, sensor_qos, callback_group=self._group)
         self.create_subscription(
             Bool, str(self.get_parameter('motion_locked_topic').value),
             self._on_motion_locked, latched, callback_group=self._group)
@@ -126,9 +188,20 @@ class AutoCalibrationCollector(Node):
             Bool, str(self.get_parameter('emergency_stop_topic').value),
             self._on_emergency_stop, latched, callback_group=self._group)
 
-        self._keyboard_thread = threading.Thread(
-            target=self._keyboard_loop, daemon=True)
-        self._keyboard_thread.start()
+        # 日常标定仍坚持由独立终端的 s/Enter 启动，避免机械臂在操作者
+        # 未确认工作区安全时自行运动。``auto_start`` 只用于无 TTY 的
+        # Gazebo 回归验证；它保留同一套采集与安全状态机，而非另建测试路径。
+        if sys.stdin.isatty():
+            self._keyboard_thread = threading.Thread(
+                target=self._keyboard_loop, daemon=True)
+            self._keyboard_thread.start()
+        elif self._auto_start_pending:
+            self._auto_start_timer = self.create_timer(
+                0.1, self._start_automatic_session, callback_group=self._group)
+        else:
+            self._keyboard_thread = threading.Thread(
+                target=self._keyboard_loop, daemon=True)
+            self._keyboard_thread.start()
         self.get_logger().info(
             '[CALIBRATION] Alicia-M collector ready: s/Enter=start, q=cancel. '
             'Use motion_control_keyboard for SPACE/h/r/x safety control.')
@@ -154,6 +227,7 @@ class AutoCalibrationCollector(Node):
             'target_samples': 18,
             'maximum_samples': 22,
             'minimum_safe_candidates': 14,
+            'safe_anchor_recovery_limit': 2,
             'stable_frames': 10,
             'settle_time_sec': 1.0,
             'marker_distance_min_m': 0.25,
@@ -183,6 +257,26 @@ class AutoCalibrationCollector(Node):
             'maximum_marker_rotation_rms_deg': 1.0,
             'easy_service_timeout_sec': 10.0,
             'output_file': '~/.ros/wvcsc_calibration/c10_handeye.yaml',
+            'initial_joint_positions': [0.0, -1.09, -0.87, 0.0, -0.77, 0.0],
+            'calibration_surface_enabled': False,
+            'calibration_surface_id': 'calibration_surface',
+            'calibration_surface_frame': 'alicia_base_link',
+            'calibration_surface_size_m': [0.50, 0.80, 0.04],
+            'calibration_surface_position_m': [0.35, 0.0, -0.03],
+            'ground_truth_check_enabled': False,
+            'ground_truth_translation_m': [-0.055, 0.0, -0.10],
+            'ground_truth_rotation_xyzw': [
+                0.0, 0.0, -0.7071067811865476, 0.7071067811865476],
+            'ground_truth_max_translation_error_m': 0.003,
+            'ground_truth_max_rotation_error_deg': 1.0,
+            # The collector owns the exact pose used for each sample.  Its
+            # quality-gated stable window is forwarded to the only marker-TF
+            # broadcaster immediately before easy_handeye2 records a sample.
+            'stable_marker_pose_topic': '/calibration/stable_marker_pose',
+            'stable_tf_settle_sec': 0.15,
+            # 仅供无交互终端的仿真回归使用；实机配置必须保持 false，
+            # 继续要求操作者按 s/Enter 进行明确确认。
+            'auto_start': False,
         }
         for name, default in values.items():
             if not self.has_parameter(name):
@@ -196,6 +290,13 @@ class AutoCalibrationCollector(Node):
             raise ValueError(
                 'sample limits must satisfy 3 <= solution_min <= min <= '
                 'target <= max')
+        if int(self.get_parameter('safe_anchor_recovery_limit').value) < 0:
+            raise ValueError('safe_anchor_recovery_limit must be non-negative')
+        stable_tf_settle_sec = float(
+            self.get_parameter('stable_tf_settle_sec').value)
+        if (not math.isfinite(stable_tf_settle_sec)
+                or stable_tf_settle_sec < 0.0):
+            raise ValueError('stable_tf_settle_sec must be finite and non-negative')
         quality_limits = (
             float(self.get_parameter(
                 'maximum_algorithm_translation_delta_m').value),
@@ -209,6 +310,18 @@ class AutoCalibrationCollector(Node):
         if (not all(math.isfinite(value) for value in quality_limits)
                 or min(quality_limits) <= 0.0):
             raise ValueError('calibration quality limits must be finite and positive')
+        initial = tuple(float(value) for value in self.get_parameter(
+            'initial_joint_positions').value)
+        if len(initial) != 6 or not all(math.isfinite(value) for value in initial):
+            raise ValueError('initial_joint_positions must contain six finite values')
+        for name, expected_size in (
+                ('ground_truth_translation_m', 3),
+                ('ground_truth_rotation_xyzw', 4)):
+            values = tuple(float(value) for value in self.get_parameter(name).value)
+            if (len(values) != expected_size
+                    or not all(math.isfinite(value) for value in values)):
+                raise ValueError(
+                    f'{name} must contain {expected_size} finite values')
 
     def _create_dictionary(self):
         name = str(self.get_parameter('aruco_dictionary').value)
@@ -222,12 +335,6 @@ class AutoCalibrationCollector(Node):
             'get': (TakeSample, '/easy_handeye2/calibration/get_sample_list'),
             'remove': (
                 RemoveSample, '/easy_handeye2/calibration/remove_sample'),
-            'set_algorithm': (
-                SetAlgorithm, '/easy_handeye2/calibration/set_algorithm'),
-            'compute': (
-                ComputeCalibration, '/easy_handeye2/calibration/compute_calibration'),
-            'save': (
-                SaveCalibration, '/easy_handeye2/calibration/save_calibration'),
             'save_samples': (
                 SaveSamples, '/easy_handeye2/calibration/save_samples'),
         }
@@ -274,10 +381,21 @@ class AutoCalibrationCollector(Node):
                 return
             flat = [int(value) for value in np.asarray(ids).reshape(-1)]
             index = flat.index(int(self.get_parameter('marker_id').value))
-            marker_corners = np.asarray(corners[index], dtype=float).reshape(4, 2)
+            marker_corners = np.asarray(corners[index], dtype=np.float32).reshape(4, 2)
             camera, distortion, width, height = camera_info
-            rvecs, tvecs, _objects = cv2.aruco.estimatePoseSingleMarkers(
-                np.asarray([marker_corners], dtype=np.float32),
+            # Refine the four corners before PnP.  This is especially
+            # important in Gazebo where a 70 mm tabletop code can otherwise
+            # move by a whole render pixel between frames; the same operation
+            # also benefits the real RGB-only C10 pipeline.
+            grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            refined = marker_corners.reshape(-1, 1, 2).copy()
+            cv2.cornerSubPix(
+                grayscale, refined, (5, 5), (-1, -1),
+                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+                 30, 0.01))
+            marker_corners = refined.reshape(4, 2)
+            rotation_vector, translation = estimate_refined_aruco_pose(
+                marker_corners,
                 float(self.get_parameter('marker_size_m').value),
                 camera, distortion)
             centre = np.mean(marker_corners, axis=0)
@@ -289,8 +407,8 @@ class AutoCalibrationCollector(Node):
             observation = MarkerObservation(
                 center_px=(float(centre[0]), float(centre[1])),
                 margin_px=margin,
-                translation=tuple(float(value) for value in tvecs[0].reshape(3)),
-                rotation_vector=tuple(float(value) for value in rvecs[0].reshape(3)),
+                translation=tuple(float(value) for value in translation),
+                rotation_vector=tuple(float(value) for value in rotation_vector.reshape(3)),
                 received_monotonic=time.monotonic())
             with self._data_lock:
                 self._observations.append(observation)
@@ -346,6 +464,16 @@ class AutoCalibrationCollector(Node):
             elif command == 'q':
                 self._request_session_stop('operator q')
 
+    def _start_automatic_session(self):
+        """在无 TTY 的 Gazebo 验证中只启动一次相同的采集会话。"""
+        if not self._auto_start_pending:
+            return
+        self._auto_start_pending = False
+        self.destroy_timer(self._auto_start_timer)
+        self.get_logger().info(
+            '[CALIBRATION] auto_start=true; starting simulation session')
+        self._start_session()
+
     def _start_session(self):
         with self._session_lock:
             if self._session_thread is not None and self._session_thread.is_alive():
@@ -362,19 +490,29 @@ class AutoCalibrationCollector(Node):
             self._session_thread.start()
 
     def _request_session_stop(self, reason):
-        self.get_logger().warn(f'[CALIBRATION] cancel requested: {reason}')
+        # During SIGINT rclpy may have already invalidated rosout.  The caller
+        # already owns shutdown reporting, so avoid a misleading second
+        # traceback from logging through a destroyed ROS context.
+        if reason not in {'Ctrl+C', 'node shutdown'}:
+            self.get_logger().warn(f'[CALIBRATION] cancel requested: {reason}')
         self._session_cancel.set()
-        self._arm.cancel()
+        # SIGINT may already have invalidated the rclpy context before the
+        # collector's finally block runs.  Preserve best-effort cancellation
+        # during normal operation, but never turn a clean shutdown into a
+        # traceback merely because its publishers have been destroyed.
+        try:
+            self._arm.cancel()
+        except Exception:
+            pass
 
     def _run_session_guarded(self):
         seed = None
         try:
-            # 先等待完整输入再固定会话起始关节。若操作员在节点刚启动、
-            # 第一帧 joint_states 到达前按下 s，仍必须能够在 q/结束后回到
-            # 真实起始姿态，而不是因为 seed=None 跳过安全回退。
-            initial_inputs = self._wait_inputs()
-            seed = initial_inputs[0]
-            self._run_session(initial_inputs)
+            # 开始姿态通常不会看见桌面上的标定码。因此这里只等待机械臂、
+            # 相机内参与自身TF，先保存可安全回退的真实起始关节；标定码TF
+            # 必须在移动到 Alicia 标定参考姿态之后才作为会话前置条件。
+            seed, _camera, _transforms = self._wait_robot_inputs()
+            self._run_session()
         except Exception as error:
             self.get_logger().error(f'[CALIBRATION] session failed: {error}')
         finally:
@@ -417,6 +555,7 @@ class AutoCalibrationCollector(Node):
         return self._tf_buffer.lookup_transform(target, source, Time())
 
     def _wait_inputs(self, timeout_sec=10.0):
+        """等待完整标定输入，其中包括相机到标定码的动态 TF。"""
         deadline = time.monotonic() + timeout_sec
         while rclpy.ok() and time.monotonic() < deadline:
             if self._session_cancel.is_set():
@@ -445,6 +584,40 @@ class AutoCalibrationCollector(Node):
                 return joints, camera, transforms
             time.sleep(0.05)
         raise RuntimeError('joint state, CameraInfo or calibration TF is unavailable')
+
+    def _wait_robot_inputs(self, timeout_sec=10.0):
+        """等待移动到参考姿态前就应存在的机械臂和相机输入。
+
+        桌面标定码被设计为由相机在 Alicia 官方参考姿态正对。因此不能在
+        会话刚开始时等待 ``base -> marker`` TF：初始 HOME 或上一次姿态可能
+        根本不在标定码视野内。该阶段只确认可记录安全回退姿态的关节、
+        CameraInfo，以及 ``base/tool/camera`` 静态运动链。
+        """
+        deadline = time.monotonic() + timeout_sec
+        while rclpy.ok() and time.monotonic() < deadline:
+            if self._session_cancel.is_set():
+                raise RuntimeError('session canceled')
+            with self._data_lock:
+                joints = self._joint_positions
+                camera = self._camera_info
+            try:
+                transforms = (
+                    self._lookup(
+                        str(self.get_parameter('base_frame').value),
+                        str(self.get_parameter('tool_link').value)),
+                    self._lookup(
+                        str(self.get_parameter('base_frame').value),
+                        str(self.get_parameter('camera_frame').value)),
+                    self._lookup(
+                        str(self.get_parameter('tool_link').value),
+                        str(self.get_parameter('camera_frame').value)),
+                )
+            except TransformException:
+                transforms = None
+            if joints is not None and camera is not None and transforms is not None:
+                return joints, camera, transforms
+            time.sleep(0.05)
+        raise RuntimeError('joint state, CameraInfo or robot/camera TF is unavailable')
 
     def _optimizer(self):
         description = self._parameter_string(
@@ -502,6 +675,37 @@ class AutoCalibrationCollector(Node):
             return None
         return trajectory
 
+    def _move_to_calibration_seed(self):
+        """Reach Alicia-M's official downward-facing calibration seed pose."""
+        positions = tuple(float(value) for value in self.get_parameter(
+            'initial_joint_positions').value)
+        self.get_logger().info(
+            '[CALIBRATION] moving to Alicia-M calibration seed pose')
+        if not self._arm.move_joints(positions):
+            raise RuntimeError('failed to reach Alicia-M calibration seed pose')
+        time.sleep(float(self.get_parameter('settle_time_sec').value))
+
+    def _install_calibration_surface(self):
+        """Publish the target-side tabletop as a collision object for OMPL."""
+        if not bool(self.get_parameter('calibration_surface_enabled').value):
+            return
+        size = tuple(float(value) for value in self.get_parameter(
+            'calibration_surface_size_m').value)
+        position = tuple(float(value) for value in self.get_parameter(
+            'calibration_surface_position_m').value)
+        if (len(size) != 3 or len(position) != 3
+                or not all(math.isfinite(value) and value > 0.0 for value in size)
+                or not all(math.isfinite(value) for value in position)):
+            raise RuntimeError('calibration surface parameters are invalid')
+        self._arm.add_collision_box(
+            str(self.get_parameter('calibration_surface_id').value), size,
+            position, str(self.get_parameter('calibration_surface_frame').value))
+        # CollisionObject is delivered through a topic; wait briefly before the
+        # first collision-aware IK and OMPL request.
+        time.sleep(0.25)
+        self.get_logger().info(
+            '[CALIBRATION] installed target-side tabletop collision geometry')
+
     def _stable_observation(self, timeout_sec=5.0):
         with self._data_lock:
             self._observations.clear()
@@ -532,6 +736,36 @@ class AutoCalibrationCollector(Node):
                 return frames[-required:], last_reason
             time.sleep(0.05)
         return None, last_reason
+
+    def _publish_stable_marker_pose(self, frames):
+        """Publish the quality-gated PnP mean used by the next hand-eye sample.
+
+        The returned pose is ``camera_color_optical_frame -> marker``.  The
+        separate marker-TF node remains the sole TF authority and temporarily
+        forwards this message, so easy_handeye2 sees exactly this window
+        rather than a newer raw detector frame from a moving render stream.
+        """
+        if not frames:
+            raise RuntimeError('cannot publish an empty marker sample window')
+        poses = []
+        for frame in frames:
+            matrix, _jacobian = cv2.Rodrigues(
+                np.asarray(frame.rotation_vector, dtype=float))
+            poses.append((frame.translation, matrix_quaternion(matrix)))
+        translation, quaternion = average_marker_pose(poses)
+        message = PoseStamped()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = str(self.get_parameter('camera_frame').value)
+        message.pose.position.x = translation[0]
+        message.pose.position.y = translation[1]
+        message.pose.position.z = translation[2]
+        message.pose.orientation.x = quaternion[0]
+        message.pose.orientation.y = quaternion[1]
+        message.pose.orientation.z = quaternion[2]
+        message.pose.orientation.w = quaternion[3]
+        self._stable_marker_publisher.publish(message)
+        time.sleep(float(self.get_parameter('stable_tf_settle_sec').value))
+        return translation, quaternion
 
     def _recenter_marker_if_needed(self, frames, optimizer, camera_mount):
         """Apply at most three collision-checked 3 mm image-plane corrections."""
@@ -591,7 +825,7 @@ class AutoCalibrationCollector(Node):
         return None
 
     def _call(self, name, request):
-        client = self._clients[name]
+        client = self._easy_clients[name]
         timeout = float(self.get_parameter('easy_service_timeout_sec').value)
         if not client.wait_for_service(timeout_sec=timeout):
             raise RuntimeError(f'easy_handeye2 service unavailable: {name}')
@@ -628,31 +862,98 @@ class AutoCalibrationCollector(Node):
         if verified.samples.samples:
             raise RuntimeError('easy_handeye2 sample reset verification failed')
 
-    def _run_session(self, initial_inputs=None):
-        _joints, _camera, transforms = (
-            self._wait_inputs() if initial_inputs is None else initial_inputs)
+    def _safe_candidates(self, candidates, optimizer):
+        """Return only poses that pass the unchanged collision/IK safety gate."""
+        return [candidate for candidate in candidates
+                if self._safe_plan(candidate, optimizer) is not None]
+
+    def _run_session(self):
+        self._install_calibration_surface()
+        self._move_to_calibration_seed()
+        # easy_handeye2 intentionally exposes its service API only after the
+        # camera->marker TF exists.  The marker is on the tabletop and first
+        # becomes visible after the Alicia seed motion, so clearing samples
+        # must occur after this readiness gate rather than before it.
+        _joints, _camera, transforms = self._wait_inputs()
         self._clear_easy_samples()
         optimizer = self._optimizer()
         _base_tool, base_camera, base_marker, tool_camera = transforms
         marker_position, _marker_quaternion = _transform_tuple(base_marker)
         camera_position, camera_quaternion = _transform_tuple(base_camera)
         mount_translation, mount_quaternion = _transform_tuple(tool_camera)
-        candidates = generate_alicia_candidates(
-            marker_position, camera_position, camera_quaternion,
-            mount_translation, mount_quaternion)
-        safe = [candidate for candidate in candidates
-                if self._safe_plan(candidate, optimizer) is not None]
         minimum_safe = int(self.get_parameter('minimum_safe_candidates').value)
-        if len(safe) < minimum_safe:
-            raise RuntimeError(
-                f'only {len(safe)} safe Alicia-M candidates; need {minimum_safe}')
+        target_samples = int(self.get_parameter('target_samples').value)
+        required_safe = max(minimum_safe, target_samples)
+        recovery_limit = int(
+            self.get_parameter('safe_anchor_recovery_limit').value)
+        candidates = ()
+        safe = ()
+        used_anchor_ids = set()
+        for recovery_index in range(recovery_limit + 1):
+            candidates = generate_alicia_candidates(
+                marker_position, camera_position, camera_quaternion,
+                mount_translation, mount_quaternion)
+            safe = self._safe_candidates(candidates, optimizer)
+            # 21 broad views are easy to audit.  When their strict-safe subset
+            # cannot even supply the target sample count, add only small,
+            # still marker-facing perturbations instead of lowering safety
+            # thresholds or reusing duplicate sample poses.
+            if len(safe) < required_safe:
+                candidates = generate_alicia_candidates(
+                    marker_position, camera_position, camera_quaternion,
+                    mount_translation, mount_quaternion, include_fine=True)
+                safe = self._safe_candidates(candidates, optimizer)
+            if len(safe) >= required_safe:
+                break
+            if not safe or recovery_index >= recovery_limit:
+                raise RuntimeError(
+                    f'only {len(safe)} safe Alicia-M candidates; need '
+                    f'{required_safe}')
+
+            # The official Alicia reference pose intentionally favors marker
+            # visibility and can be near a wrist singularity.  Move once to a
+            # proven-safe marker-facing view, then regenerate the same
+            # marker-relative pattern around that non-singular anchor instead
+            # of weakening the condition-number or joint-margin limits.
+            # Do not select the regenerated ``seed`` candidate once already
+            # anchored: it leaves the arm in exactly the same configuration
+            # and cannot improve safe-candidate coverage.  Prefer a distinct
+            # non-seed perturbation while preserving the existing safety gate.
+            anchor = next(
+                (candidate for candidate in safe
+                 if candidate.candidate_id != 'seed'
+                 and candidate.candidate_id not in used_anchor_ids),
+                None)
+            if anchor is None:
+                anchor = next(
+                    (candidate for candidate in safe
+                     if candidate.candidate_id != 'seed'),
+                    None)
+            if anchor is None:
+                raise RuntimeError(
+                    f'only {len(safe)} safe Alicia-M candidates; need '
+                    f'{required_safe}')
+            used_anchor_ids.add(anchor.candidate_id)
+            trajectory = self._safe_plan(anchor, optimizer)
+            if trajectory is None or not self._arm.execute_trajectory(trajectory):
+                raise RuntimeError(
+                    f'failed to execute safe calibration anchor '
+                    f'{anchor.candidate_id}')
+            self.get_logger().info(
+                f'[CALIBRATION] safe-anchor={anchor.candidate_id} '
+                f'attempt={recovery_index + 1}/{recovery_limit}')
+            time.sleep(float(self.get_parameter('settle_time_sec').value))
+            _joints, _camera, transforms = self._wait_inputs()
+            _base_tool, base_camera, base_marker, tool_camera = transforms
+            marker_position, _marker_quaternion = _transform_tuple(base_marker)
+            camera_position, camera_quaternion = _transform_tuple(base_camera)
+            mount_translation, mount_quaternion = _transform_tuple(tool_camera)
         self.get_logger().info(
             f'[CALIBRATION] {len(safe)}/{len(candidates)} candidates passed '
             'collision IK, Jacobian, joint-margin and OMPL checks')
 
         accepted_poses = []
         sample_count = 0
-        target_samples = int(self.get_parameter('target_samples').value)
         maximum_samples = int(self.get_parameter('maximum_samples').value)
         for candidate in safe[:maximum_samples]:
             if self._session_cancel.is_set() or self._session_invalid.is_set():
@@ -687,6 +988,7 @@ class AutoCalibrationCollector(Node):
                 self.get_logger().warn(
                     f'[CALIBRATION] diversity rejected {candidate.candidate_id}')
                 continue
+            self._publish_stable_marker_pose(frames)
             response = self._call('take', TakeSample.Request())
             new_count = len(response.samples.samples)
             if new_count <= sample_count:
@@ -715,6 +1017,34 @@ class AutoCalibrationCollector(Node):
                 f'rotation={rotation_span:.1f}deg')
         self._solve_and_export()
 
+    def _verify_simulation_ground_truth(self, handeye):
+        """Reject a simulated solution that misses the known C10 mount."""
+        if not bool(self.get_parameter('ground_truth_check_enabled').value):
+            return None
+        expected = (
+            tuple(float(value) for value in self.get_parameter(
+                'ground_truth_translation_m').value),
+            tuple(float(value) for value in self.get_parameter(
+                'ground_truth_rotation_xyzw').value),
+        )
+        translation_error, rotation_error = transform_error(handeye, expected)
+        translation_limit = float(self.get_parameter(
+            'ground_truth_max_translation_error_m').value)
+        rotation_limit = float(self.get_parameter(
+            'ground_truth_max_rotation_error_deg').value)
+        passed = (translation_error <= translation_limit
+                  and rotation_error <= rotation_limit)
+        self.get_logger().info(
+            '[CALIBRATION][GROUND_TRUTH] '
+            f'translation_error={translation_error * 1000.0:.2f}mm '
+            f'rotation_error={rotation_error:.2f}deg '
+            f'threshold_translation={translation_limit * 1000.0:.2f}mm '
+            f'threshold_rotation={rotation_limit:.2f}deg passed={passed}')
+        if not passed:
+            raise RuntimeError(
+                'simulation ground-truth gate failed; calibration was not saved')
+        return translation_error, rotation_error
+
     def _solve_and_export(self):
         minimum_solution = int(
             self.get_parameter('minimum_solution_samples').value)
@@ -725,9 +1055,8 @@ class AutoCalibrationCollector(Node):
 
         while True:
             solution = self._compute_consensus_solution()
-            (selected_algorithm, computed, samples, translation_delta,
+            (selected_algorithm, handeye, samples, translation_delta,
              rotation_delta) = solution
-            handeye = transform_components(computed.calibration.transform)
             marker_position_rms, marker_rotation_rms = marker_pose_rms(
                 samples, handeye)
             quality_ok = (
@@ -775,14 +1104,12 @@ class AutoCalibrationCollector(Node):
                 'outlier rejection left insufficient sample coverage: '
                 f'translation={translation_span:.3f}m '
                 f'rotation={rotation_span:.1f}deg')
-        saved = self._call('save', SaveCalibration.Request())
-        if not saved.success:
-            raise RuntimeError('easy_handeye2 calibration save failed')
+        self._verify_simulation_ground_truth(handeye)
         sample_save = self._call('save_samples', SaveSamples.Request())
         if not sample_save.success:
             raise RuntimeError('easy_handeye2 sample save failed')
-        output = export_calibration(
-            saved.filepath.data,
+        output = write_calibration(
+            handeye,
             os.path.expanduser(str(self.get_parameter('output_file').value)))
         self.get_logger().info(
             '[CALIBRATION] SUCCESS '
@@ -794,36 +1121,32 @@ class AutoCalibrationCollector(Node):
 
     def _compute_consensus_solution(self):
         """Solve all configured algorithms and select their transform medoid."""
+        samples = self._call('get', TakeSample.Request()).samples.samples
+        results_by_algorithm = solve_handeye(
+            samples, self.get_parameter('algorithm_names').value)
         results = []
         result_by_components = {}
-        for algorithm in self.get_parameter('algorithm_names').value:
-            algorithm = str(algorithm)
-            set_response = self._call(
-                'set_algorithm', SetAlgorithm.Request(new_algorithm=algorithm))
-            if not set_response.success:
-                raise RuntimeError(f'algorithm unavailable: {algorithm}')
-            computed = self._call('compute', ComputeCalibration.Request())
-            if not computed.valid:
-                raise RuntimeError(f'calibration failed: {algorithm}')
-            components = transform_components(computed.calibration.transform)
+        for algorithm, components in results_by_algorithm.items():
             if math.sqrt(sum(value * value for value in components[0])) > float(
-                    self.get_parameter('maximum_camera_translation_norm_m').value):
+                self.get_parameter('maximum_camera_translation_norm_m').value):
                 raise RuntimeError(
                     f'{algorithm} camera translation exceeds sanity limit')
             results.append(components)
             result_by_components[components] = algorithm
         selected, translation_delta, rotation_delta = calibration_consensus(results)
         selected_algorithm = result_by_components[selected]
-        self._call(
-            'set_algorithm', SetAlgorithm.Request(new_algorithm=selected_algorithm))
-        computed = self._call('compute', ComputeCalibration.Request())
-        samples = self._call('get', TakeSample.Request()).samples.samples
         return (
-            selected_algorithm, computed, samples,
+            selected_algorithm, selected, samples,
             translation_delta, rotation_delta)
 
     def destroy_node(self):
         self._request_session_stop('node shutdown')
+        if bool(self.get_parameter('calibration_surface_enabled').value):
+            try:
+                self._arm.remove_collision_object(
+                    str(self.get_parameter('calibration_surface_id').value))
+            except Exception:
+                pass
         return super().destroy_node()
 
 

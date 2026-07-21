@@ -29,7 +29,5 @@ setup(
         'export_handeye = wvcsc_calibration.calibration_io:main',
         'auto_calibration_collector = '
         'wvcsc_calibration.auto_calibration_collector:main',
-        'aruco_tf_broadcaster = '
-        'wvcsc_calibration.aruco_tf_broadcaster:main',
     ]},
 )

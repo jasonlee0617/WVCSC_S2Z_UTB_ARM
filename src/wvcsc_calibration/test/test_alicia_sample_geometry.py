@@ -38,3 +38,34 @@ def test_alicia_candidates_reject_unsafe_initial_range():
             (0.0, 0.0, 0.0), (2.0, 0.0, 0.0),
             (0.0, 0.0, 0.0, 1.0),
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
+
+
+def test_alicia_fine_expansion_preserves_marker_aiming_and_unique_ids():
+    marker = (0.8, 0.0, 0.7)
+    candidates = generate_alicia_candidates(
+        marker_position=marker,
+        current_camera_position=(0.3, 0.0, 0.7),
+        current_camera_quaternion=(
+            0.0, math.sqrt(0.5), 0.0, math.sqrt(0.5)),
+        tool_to_camera_translation=(-0.055, 0.0, -0.10),
+        tool_to_camera_quaternion=(
+            0.0, -math.sqrt(0.5), 0.0, math.sqrt(0.5)),
+        include_fine=True)
+    assert len(candidates) == 49
+    assert len({candidate.candidate_id for candidate in candidates}) == 49
+    assert any(candidate.candidate_id.startswith('wide_')
+               for candidate in candidates)
+    assert any(candidate.candidate_id.startswith('fine_')
+               for candidate in candidates)
+    for candidate in candidates:
+        optical_z = rotate_vector((0.0, 0.0, 1.0), candidate.camera_quaternion)
+        marker_ray = tuple(
+            marker[index] - candidate.camera_position[index]
+            for index in range(3))
+        norm = math.sqrt(sum(value * value for value in marker_ray))
+        alignment = sum(left * right for left, right in zip(
+            optical_z, (value / norm for value in marker_ray)))
+        if candidate.candidate_id.startswith('wide_tilt_'):
+            assert alignment > 0.94
+        else:
+            assert alignment > 0.999

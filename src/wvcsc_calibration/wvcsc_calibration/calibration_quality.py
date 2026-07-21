@@ -28,6 +28,21 @@ def quaternion_angle_deg(left, right):
     return math.degrees(2.0 * math.acos(max(-1.0, min(1.0, dot))))
 
 
+def transform_error(actual, expected):
+    """Return translation metres and shortest rotation degrees between poses.
+
+    Both inputs are ``((x, y, z), (qx, qy, qz, qw))`` transforms with the
+    same parent/child convention.  The quaternion helper intentionally treats
+    ``q`` and ``-q`` as the same rotation, which is required for deterministic
+    simulation ground-truth checks.
+    """
+    translation = _norm(tuple(
+        float(actual[0][index]) - float(expected[0][index])
+        for index in range(3)))
+    rotation = quaternion_angle_deg(actual[1], expected[1])
+    return translation, rotation
+
+
 def stable_marker_window(
         observations, *, required_frames, min_distance_m, max_distance_m,
         minimum_margin_px, maximum_center_std_px,

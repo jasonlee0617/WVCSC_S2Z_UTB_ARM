@@ -1,6 +1,9 @@
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
+import cv2
+import numpy as np
 
 from wvcsc_calibration.calibration_quality import (
     MarkerObservation,
@@ -10,6 +13,10 @@ from wvcsc_calibration.calibration_quality import (
     pose_is_diverse,
     sample_coverage,
     stable_marker_window,
+    transform_error,
+)
+from wvcsc_calibration.auto_calibration_collector import (
+    estimate_refined_aruco_pose,
 )
 
 
@@ -66,6 +73,94 @@ def test_algorithm_consensus_selects_medoid_and_reports_spread():
     assert rotation < 1.0
 
 
+def test_transform_error_is_zero_for_quaternion_sign_equivalence():
+    actual = ((-0.055, 0.0, -0.10), (0.0, 0.0, 0.70710678, -0.70710678))
+    expected = ((-0.055, 0.0, -0.10), (0.0, 0.0, -0.70710678, 0.70710678))
+    translation, rotation = transform_error(actual, expected)
+    assert translation == pytest.approx(0.0)
+    assert rotation == pytest.approx(0.0)
+
+
+def test_transform_error_reports_translation_and_rotation_in_public_units():
+    translation, rotation = transform_error(
+        ((0.003, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+        ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)))
+    assert translation == pytest.approx(0.003)
+    assert rotation == pytest.approx(0.0)
+
+
+def test_collector_waits_for_marker_only_after_the_calibration_seed_move():
+    """The initial operator pose need not see the tabletop marker."""
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    guarded = source.split('    def _run_session_guarded(self):', 1)[1].split(
+        '    def _parameter_string(', 1)[0]
+    assert 'self._wait_robot_inputs()' in guarded
+    assert 'self._wait_inputs()' not in guarded
+    run_session = source.split('    def _run_session(self):', 1)[1].split(
+        '    def _solve', 1)[0]
+    assert run_session.index('self._move_to_calibration_seed()') < \
+        run_session.index('self._wait_inputs()')
+    assert run_session.index('self._wait_inputs()') < \
+        run_session.index('self._clear_easy_samples()')
+
+
+def test_collector_does_not_overwrite_rclpy_node_client_storage():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    assert 'self._easy_clients = self._create_easy_clients()' in source
+    assert 'self._clients = self._create_easy_clients()' not in source
+
+
+def test_collector_uses_best_effort_qos_for_camera_streams():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    assert 'reliability=ReliabilityPolicy.BEST_EFFORT' in source
+    assert 'self._on_camera_info, sensor_qos' in source
+    assert 'self._on_image, sensor_qos' in source
+
+
+def test_collector_shutdown_keeps_motion_cancel_best_effort():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    method = source.split('    def _request_session_stop(self, reason):', 1)[1].split(
+        '    def _run_session_guarded(', 1)[0]
+    assert 'try:' in method
+    assert 'self._arm.cancel()' in method
+    assert 'except Exception:' in method
+    assert "reason not in {'Ctrl+C', 'node shutdown'}" in method
+
+
+def test_collector_recovers_from_a_visible_but_near_singular_seed():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    run_session = source.split('    def _run_session(self):', 1)[1].split(
+        '    def _solve', 1)[0]
+    assert 'safe_anchor_recovery_limit' in run_session
+    assert "candidate.candidate_id != 'seed'" in run_session
+    assert 'include_fine=True' in run_session
+    assert 'required_safe = max(minimum_safe, target_samples)' in run_session
+    assert 'safe-anchor={anchor.candidate_id}' in run_session
+    assert 'self._wait_inputs()' in run_session
+    assert 'self._safe_candidates(candidates, optimizer)' in run_session
+
+
+def test_collector_uses_wvcsc_opencv_transform_conversion_not_server_solver():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    solver = source.split('    def _compute_consensus_solution(self):', 1)[1].split(
+        '    def destroy_node(self):', 1)[0]
+    assert 'solve_handeye(' in solver
+    assert "'compute'" not in solver
+    assert "'set_algorithm'" not in solver
+
+
 def _transform(translation=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0, 1.0)):
     return SimpleNamespace(
         translation=SimpleNamespace(
@@ -98,3 +193,24 @@ def test_marker_residuals_expose_one_bad_tracking_sample():
     assert residuals[0][0] == pytest.approx(0.0)
     assert residuals[1][0] == pytest.approx(0.0)
     assert residuals[2][0] == pytest.approx(0.06)
+
+
+def test_refined_square_pnp_recovers_a_synthetic_marker_pose():
+    camera = np.asarray(
+        ((900.0, 0.0, 640.0), (0.0, 900.0, 360.0), (0.0, 0.0, 1.0)))
+    size = 0.070
+    half = size * 0.5
+    object_points = np.asarray((
+        (-half, half, 0.0), (half, half, 0.0),
+        (half, -half, 0.0), (-half, -half, 0.0)), dtype=np.float32)
+    expected_rvec = np.asarray((0.12, -0.18, 0.06), dtype=float).reshape(3, 1)
+    expected_tvec = np.asarray((0.03, -0.02, 0.46), dtype=float).reshape(3, 1)
+    corners, _jacobian = cv2.projectPoints(
+        object_points, expected_rvec, expected_tvec, camera, np.zeros(5))
+
+    rvec, tvec = estimate_refined_aruco_pose(
+        corners.reshape(4, 2), size, camera, np.zeros(5))
+
+    assert tuple(tvec) == pytest.approx(tuple(expected_tvec.reshape(3)), abs=1.0e-6)
+    assert tuple(rvec.reshape(3)) == pytest.approx(
+        tuple(expected_rvec.reshape(3)), abs=1.0e-6)

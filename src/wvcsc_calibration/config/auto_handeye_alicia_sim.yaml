@@ -1,0 +1,38 @@
+auto_calibration_collector:
+  ros__parameters:
+    use_sim_time: true
+    # CI/无桌面回归时没有可输入 s 的终端；仍调用与手动模式完全相同的
+    # 采集状态机。实机配置未设置该参数，默认必须人工按 s/Enter 启动。
+    auto_start: true
+    output_file: ~/.ros/wvcsc_calibration/c10_handeye_sim.yaml
+    marker_size_m: 0.070
+    stable_marker_pose_topic: /calibration/stable_marker_pose
+    stable_tf_settle_sec: 0.15
+
+    # The simulation benchmark gathers additional well-separated samples so
+    # that all three OpenCV solvers receive enough rotational excitation.
+    target_samples: 22
+    maximum_samples: 30
+    # Retain deliberate 10-12 degree off-axis calibration views.
+    maximum_center_error_px: 220.0
+
+    # 仿真基准有已知的 tool0->C10 外参，因此采样质量门槛比实机更严：
+    # 仅允许内部一致的 marker 位姿集合进入 OpenCV 手眼求解。该门槛
+    # 只依据标记位姿残差和算法共识，不使用真值挑选样本。
+    maximum_marker_position_rms_m: 0.002
+    maximum_marker_rotation_rms_deg: 0.50
+    maximum_algorithm_translation_delta_m: 0.005
+    maximum_algorithm_rotation_delta_deg: 1.0
+
+    # Target-side table segment: x=0.10..0.60 m, outside the arm base footprint.
+    calibration_surface_enabled: true
+    calibration_surface_id: calibration_surface
+    calibration_surface_frame: alicia_base_link
+    calibration_surface_size_m: [0.50, 0.80, 0.04]
+    calibration_surface_position_m: [0.35, 0.0, -0.03]
+
+    ground_truth_check_enabled: true
+    ground_truth_translation_m: [-0.055, 0.0, -0.10]
+    ground_truth_rotation_xyzw: [0.0, 0.0, -0.7071067811865476, 0.7071067811865476]
+    ground_truth_max_translation_error_m: 0.003
+    ground_truth_max_rotation_error_deg: 1.0

@@ -65,6 +65,9 @@ def generate_launch_description():
                 'tracking_base_frame': 'camera_color_optical_frame',
                 'tracking_marker_frame': 'calibration_aruco',
                 'marker_id': 1,
+                # A sample is taken only after arm settling; average a short
+                # stationary window to reduce planar-PnP quantization.
+                'smoothing_window': 15,
             }],
             output='screen'),
         # 自动采集只需要服务端；不启动会与 s/q 流程重复的 RQt 手工界面。

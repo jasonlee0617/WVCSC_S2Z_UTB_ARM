@@ -16,6 +16,10 @@ auto_calibration_collector:
 
     marker_id: 1
     marker_size_m: 0.070
+    # 每个样本先用本进程的角点亚像素PnP稳定窗口更新marker TF，再调用
+    # easy_handeye2。实机仍使用同一条路径，不引入仿真专用采样逻辑。
+    stable_marker_pose_topic: /calibration/stable_marker_pose
+    stable_tf_settle_sec: 0.15
     aruco_dictionary: DICT_5X5_250
     image_topic: /camera/color/image_raw
     camera_info_topic: /camera/color/camera_info
@@ -29,6 +33,10 @@ auto_calibration_collector:
     target_samples: 18
     maximum_samples: 22
     minimum_safe_candidates: 14
+    # 官方参考姿态优先保证桌面码可见，可能接近腕部奇异位形。
+    # 候选不足时，先移动到一个已经通过IK/关节余量/条件数门控的视角，
+    # 再围绕该视角重新生成同一套21个marker-relative候选。
+    safe_anchor_recovery_limit: 3
     stable_frames: 10
     settle_time_sec: 1.0
     marker_distance_min_m: 0.25

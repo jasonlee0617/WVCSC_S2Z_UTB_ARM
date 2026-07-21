@@ -571,6 +571,24 @@ class AliciaMoveIt:
         stamp = points[-1].time_from_start
         return float(stamp.sec) + float(stamp.nanosec) / 1_000_000_000.0
 
+    def add_collision_box(self, object_id, size, position, frame_id):
+        """Add one static planning-scene box used by a task session."""
+        if not str(object_id).strip():
+            raise ValueError('collision object id must not be empty')
+        values = tuple(float(value) for value in (*size, *position))
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError('collision box values must be finite')
+        if any(value <= 0.0 for value in values[:3]):
+            raise ValueError('collision box dimensions must be positive')
+        self._moveit.add_collision_box(
+            id=str(object_id), size=tuple(values[:3]),
+            position=tuple(values[3:]), quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+            frame_id=str(frame_id))
+
+    def remove_collision_object(self, object_id):
+        """Remove a collision object previously installed by this adapter."""
+        self._moveit.remove_collision_object(id=str(object_id))
+
     def control_gripper(self, open_gripper=True, position=None, allow_locked=False):
         """控制夹爪（可自定义位置，或通过布尔值控制开闭）。"""
         if position is None:

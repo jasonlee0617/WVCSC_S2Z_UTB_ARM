@@ -66,6 +66,29 @@ def export_calibration(input_path, output_path):
     destination = Path(output_path).expanduser()
     with source.open(encoding='utf-8') as stream:
         normalized = normalized_calibration(yaml.safe_load(stream))
+    return _write_normalized_calibration(normalized, output_path)
+
+
+def write_calibration(transform, output_path):
+    """Atomically write a WVCSC ``tool0 -> camera`` calibration transform."""
+    translation, rotation = transform
+    source = {
+        'parameters': {
+            'calibration_type': 'eye_in_hand',
+            'robot_base_frame': 'alicia_base_link',
+            'robot_effector_frame': 'tool0',
+            'tracking_base_frame': 'camera_color_optical_frame',
+        },
+        'transform': {
+            'translation': dict(zip(('x', 'y', 'z'), translation)),
+            'rotation': dict(zip(('x', 'y', 'z', 'w'), rotation)),
+        },
+    }
+    return _write_normalized_calibration(normalized_calibration(source), output_path)
+
+
+def _write_normalized_calibration(normalized, output_path):
+    destination = Path(output_path).expanduser()
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = yaml.safe_dump(normalized, sort_keys=False)
     descriptor, temporary_name = tempfile.mkstemp(
