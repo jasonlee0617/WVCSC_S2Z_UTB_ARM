@@ -12,6 +12,7 @@ install(FILES README.md DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/preflight_check.py
   scripts/save_corn_map.sh
+  scripts/nav_validate_sites.py
   DESTINATION share/${PROJECT_NAME}/scripts)
 install(PROGRAMS
   scripts/capture_site_pose.py

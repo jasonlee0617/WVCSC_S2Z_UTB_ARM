@@ -201,7 +201,59 @@ mission:
 
 ---
 
-## 阶段 3：验收标准
+## 阶段 3：自动导航验收（无机械臂）
+
+### 3.1 目的
+
+用刚采集的 `corn_site.yaml` 中保存的 `docking_pose`，让小车依次自动导航到每棵玉米树的停靠位置。到达每个点后停留 2 秒，目视确认停靠精度后自动前往下一目标。
+
+### 3.2 启动导航
+
+```bash
+ros2 launch wvcsc_bringup real_navigation.launch.py \
+  map:=/home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/map/orchard.yaml
+```
+
+在 RViz 中确认 AMCL 粒子云收敛（使用 `2D Pose Estimate` 初始化定位）。
+
+### 3.3 执行顺序导航
+
+```bash
+ros2 run wvcsc_bringup nav_validate_sites.py \
+  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
+  --pause-sec 2.0
+```
+
+**执行流程**：
+
+```
+[1/4] tree_01: navigating to (3.002, 0.498, 0.003)
+[1/4] tree_01: arrived
+[1/4] tree_01: pausing 2.0s...
+[2/4] tree_02: navigating to (5.001, -0.502, 0.001)
+[2/4] tree_02: arrived
+[2/4] tree_02: pausing 2.0s...
+[3/4] tree_03: ...
+[4/4] tree_04: ... arrived
+[4/4] tree_04: last target — done
+[VALIDATE] all 4 targets completed successfully
+```
+
+关键行为：
+- 逐目标调用 `/navigate_to_pose` Action，超时 120 秒
+- Nav2 返回 `SUCCEEDED` 后原地等 `--pause-sec` 秒
+- 任一目标失败 → 脚本报错退出，不继续后续目标
+- 无需手动触发——全程自动顺序执行
+
+### 3.4 验收细节
+
+在每个 2 秒停留期间：
+1. 观察 RViz 中 `base_footprint` 是否与地图上记录的停靠点重合
+2. 目视或用卷尺确认实际位置误差 ≤ 0.12 m
+
+---
+
+## 阶段 4：验收标准
 
 | # | 检查项 | 标准 |
 |---|--------|------|
@@ -212,6 +264,7 @@ mission:
 | 5 | 位置散布 | 30 个样本散布 ≤ 0.03 m |
 | 6 | 重复性 | 同一棵树连续 3 次停靠误差 ≤ 0.12 m |
 | 7 | corn_site.yaml | 4 棵树全部记录，格式校验通过 |
+| 8 | 自动顺序导航 | 4 个目标全部 `SUCCEEDED`，无超时、无跳过 |
 
 ---
 
