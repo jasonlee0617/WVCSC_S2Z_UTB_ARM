@@ -71,7 +71,7 @@ def generate_launch_description():
             'camera_info_url',
             default_value=(
                 'package://wvcsc_c10_camera/config/'
-                'c10_reference_calibration.yaml'),
+                'c10_intrinsics.yaml'),
             description=(
                 'CameraInfo URL. After calibration pass '
                 'file://$HOME/.ros/camera_info/c10.yaml explicitly.')),

@@ -185,7 +185,7 @@ def _resolve_calibrations(context, *, launch_dir):
             SetLaunchConfiguration(
                 'camera_info_url',
                 'package://wvcsc_c10_camera/config/'
-                'c10_reference_calibration.yaml'),
+                'c10_intrinsics.yaml'),
         ])
 
     # --- preflight ---
@@ -318,7 +318,7 @@ def generate_launch_description():
             'camera_info_url',
             default_value=(
                 'package://wvcsc_c10_camera/config/'
-                'c10_reference_calibration.yaml')),
+                'c10_intrinsics.yaml')),
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.20'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
         DeclareLaunchArgument(

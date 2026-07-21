@@ -57,7 +57,7 @@
     camera_name: c10_color
     # CameraInfo 的源文件 URL。`package://` 协议会被 ROS 自动解析为
     # `install/wvcsc_c10_camera/share/wvcsc_c10_camera/config/...` 的绝对路径。
-    camera_info_url: package://wvcsc_c10_camera/config/c10_reference_calibration.yaml
+    camera_info_url: package://wvcsc_c10_camera/config/c10_intrinsics.yaml
 
     # ----------------------------------------------------------------------
     # 4. 图像与曝光控制参数

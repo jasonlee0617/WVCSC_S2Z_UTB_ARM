@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import py_compile; py_compile.compile\\('/home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_simulation/launch/calibration_sim.launch.py', doraise=True\\); print\\('Syntax OK'\\)\")",
+      "Bash(ros2 run *)",
+      "Bash(python3 -c \"import py_compile; py_compile.compile\\('wvcsc_simulation/launch/calibration_sim.launch.py', doraise=True\\); print\\('Syntax OK'\\)\")"
+    ]
+  }
+}

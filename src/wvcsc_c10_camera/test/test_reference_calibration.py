@@ -6,7 +6,7 @@ import yaml
 def test_reference_calibration_matches_gazebo_c10_model():
     path = (
         Path(__file__).resolve().parents[1]
-        / 'config' / 'c10_reference_calibration.yaml'
+        / 'config' / 'c10_intrinsics.yaml'
     )
     calibration = yaml.safe_load(path.read_text(encoding='utf-8'))
     assert calibration['image_width'] == 1280

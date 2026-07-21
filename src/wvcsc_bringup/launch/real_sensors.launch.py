@@ -68,7 +68,7 @@ def generate_launch_description():
             'camera_info_url',
             default_value=(
                 'package://wvcsc_c10_camera/config/'
-                'c10_reference_calibration.yaml')),
+                'c10_intrinsics.yaml')),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('control_mode', default_value='pv'),

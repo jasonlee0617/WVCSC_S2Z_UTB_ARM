@@ -6,7 +6,7 @@ find_package(ament_cmake_python REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
 
-install(DIRECTORY launch config map
+install(DIRECTORY launch config maps
   DESTINATION share/${PROJECT_NAME})
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS

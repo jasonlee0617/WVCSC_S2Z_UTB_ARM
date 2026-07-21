@@ -5,6 +5,7 @@
   <xacro:arg name="enable_gazebo_ros2_control" default="false"/>
   <xacro:arg name="enable_c10_camera" default="true"/>
   <xacro:arg name="enable_c10_gazebo" default="false"/>
+  <xacro:arg name="calibration_fix_base" default="false"/>
 
     <!-- 机械臂车顶安装参数 -->
   <!--
@@ -19,9 +20,9 @@
   <xacro:arg name="vehicle_roof_z" default="0.675"/>
   <!--
     机械臂相对于车顶安装坐标系的位置：
-    沿 base_link 正 X 方向平移 0.10 m。
+    沿 base_link 负 X 方向平移 0.40 m。
   -->
-  <xacro:arg name="arm_mount_xyz" default="-0.20 0 0"/>
+  <xacro:arg name="arm_mount_xyz" default="-0.40 0 0"/>
   <!--
     绕 Z 轴旋转 180°，使机械臂底座 X 轴方向反转，
     同时保持机械臂 Z 轴朝上。
@@ -50,6 +51,15 @@
   <xacro:include filename="$(find wtb_car_driver)/urdf/wtb_car.xacro"/>
   <xacro:include filename="$(find alicia_m_descriptions)/urdf/Alicia_M_v1_1/Alicia_M_v1_1_follower.urdf"/>
   <xacro:include filename="$(find alicia_m_moveit_config)/config/alicia_m_v1_1_follower.ros2_control.xacro"/>
+
+  <xacro:if value="$(arg calibration_fix_base)">
+    <link name="world"/>
+    <joint name="world_to_base_footprint" type="fixed">
+      <parent link="world"/>
+      <child link="base_footprint"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+  </xacro:if>
 
   <!--
     车顶安装坐标系。

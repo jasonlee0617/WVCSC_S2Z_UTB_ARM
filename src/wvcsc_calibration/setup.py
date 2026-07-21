@@ -15,6 +15,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'xacro'), glob('xacro/*.xacro')),
     ],
     install_requires=['setuptools'],
     tests_require=['pytest'],
@@ -28,5 +29,7 @@ setup(
         'export_handeye = wvcsc_calibration.calibration_io:main',
         'auto_calibration_collector = '
         'wvcsc_calibration.auto_calibration_collector:main',
+        'aruco_tf_broadcaster = '
+        'wvcsc_calibration.aruco_tf_broadcaster:main',
     ]},
 )

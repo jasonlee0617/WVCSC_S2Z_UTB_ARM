@@ -1,0 +1,113 @@
+<?xml version="1.0"?>
+<robot name="alicia_calibration" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- Eye-in-hand calibration model: Alicia-M arm + C10 camera on a desk.
+       No vehicle chassis, no controller_manager, no Ackermann.  -->
+
+  <xacro:arg name="alicia_base_link" default="base_link"/>
+  <xacro:arg name="c10_mount_xyz" default="-0.055 0 -0.10"/>
+  <xacro:arg name="c10_mount_rpy" default="0 -1.57079632679 0"/>
+
+  <!-- Anchor in Gazebo world so the arm does not fall through the desk -->
+  <link name="world"/>
+  <link name="base_footprint"/>
+  <joint name="world_to_base" type="fixed">
+    <parent link="world"/>
+    <child link="base_footprint"/>
+  </joint>
+  <joint name="base_to_base_link" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+  </joint>
+
+  <!-- Alicia-M arm geometry (joint1–tool0) -->
+  <xacro:include filename="$(find alicia_m_descriptions)/urdf/Alicia_M_v1_1/Alicia_M_v1_1_follower.urdf"/>
+  <xacro:include filename="$(find alicia_m_moveit_config)/config/alicia_m_v1_1_follower.ros2_control.xacro"/>
+
+  <xacro:arg name="initial_positions_file" default="$(find alicia_m_moveit_config)/config/initial_positions.yaml"/>
+  <xacro:arg name="gazebo_controllers_file" default="$(find wvcsc_description)/config/ros2_controllers.yaml"/>
+  <xacro:arg name="ros2_control_plugin" default="gazebo_ros2_control/GazeboSystem"/>
+
+  <xacro:alicia_m_v1_1_follower_ros2_control
+    name="AliciaHardware"
+    initial_positions_file="$(arg initial_positions_file)"
+    ros2_control_plugin="$(arg ros2_control_plugin)"
+    serial_port="/dev/null"
+    baudrate="1000000"
+    control_mode="pv"
+    default_speed="1.0"
+    mit_kp="50.0"
+    mit_kd="2.0"/>
+
+  <!-- C10 eye-in-hand camera on tool0 -->
+  <link name="camera_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://wvcsc_description/meshes/c10/camera.dae"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.070 0.040 0.025"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.130"/>
+      <inertia ixx="0.000020" ixy="0" ixz="0" iyy="0.000055" iyz="0" izz="0.000060"/>
+    </inertial>
+  </link>
+  <joint name="c10_mount_joint" type="fixed">
+    <parent link="tool0"/>
+    <child link="camera_link"/>
+    <origin xyz="$(arg c10_mount_xyz)" rpy="$(arg c10_mount_rpy)"/>
+  </joint>
+
+  <link name="camera_color_optical_frame"/>
+  <joint name="camera_color_optical_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_color_optical_frame"/>
+    <origin xyz="0 0 0" rpy="-1.57079632679 0 -1.57079632679"/>
+  </joint>
+
+  <!-- Gazebo C10 camera sensor on link6 -->
+  <gazebo reference="link6">
+    <sensor name="c10_color" type="camera">
+      <always_on>true</always_on>
+      <update_rate>30.0</update_rate>
+      <visualize>false</visualize>
+      <pose>-0.055 0 0.05 0 -1.57079632679 0</pose>
+      <camera name="c10_optical">
+        <horizontal_fov>1.8</horizontal_fov>
+        <image><width>1280</width><height>720</height><format>R8G8B8</format></image>
+        <clip><near>0.02</near><far>300</far></clip>
+        <noise><type>gaussian</type><mean>0.0</mean><stddev>0.007</stddev></noise>
+      </camera>
+      <plugin name="c10_camera_plugin" filename="libgazebo_ros_camera.so">
+        <ros>
+          <namespace>/camera</namespace>
+          <qos>
+            <topic name="color/image_raw">
+              <publisher>
+                <reliability>best_effort</reliability>
+                <history depth="1">keep_last</history>
+              </publisher>
+            </topic>
+            <topic name="color/camera_info">
+              <publisher>
+                <reliability>best_effort</reliability>
+                <history depth="1">keep_last</history>
+              </publisher>
+            </topic>
+          </qos>
+        </ros>
+        <camera_name>color</camera_name>
+        <frame_name>camera_color_optical_frame</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <gazebo>
+    <plugin name="gazebo_ros2_control" filename="libgazebo_ros2_control.so">
+      <parameters>$(arg gazebo_controllers_file)</parameters>
+    </plugin>
+  </gazebo>
+</robot>
