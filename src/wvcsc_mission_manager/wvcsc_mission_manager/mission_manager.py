@@ -1,10 +1,10 @@
 # mission_manager.py
 # ============================================================================
-# 空地协同任务编排节点 (ROS2 Node)
+# 地面任务编排节点 (ROS2 Node)
 # ============================================================================
 #
 # 职责：
-# 1. 接收无人机通过 `/uav/disease_trees` 发布的病树列表。
+# 1. 接收 RViz、实测站点或仿真 Mock 通过 `/mission/load_manual` 提交的任务。
 # 2. 使用 `MissionCore` 驱动状态机。
 # 3. 依次调用 Nav2 (`NavigateToPose`)、停稳检测 (`StopDetector`) 和
 #    机械臂喷洒 (`ExecuteSpray`)。
@@ -27,11 +27,9 @@ from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.msg import (
-    DiseaseTreeArray,
     MissionPlan,
     MissionStatus,
     MissionTargetPlan,
@@ -45,23 +43,19 @@ from .core import (
     MissionState,
     StopDetector,
     Target,
-    docking_pose,
     manual_tree_hint,
     navigation_pose,
 )
 
 
 class MissionManager(Node):
-    """串联 Mock/真实 UAV、Nav2 与机械臂 Action 的事件驱动状态机外壳。"""
+    """串联 YAML/RViz 任务、Nav2 与机械臂 Action 的事件驱动状态机外壳。"""
 
     def __init__(self, **kwargs):
         super().__init__('mission_manager', **kwargs)
         self._declare_parameters()
         self.core = MissionCore()
         self._auto_start = bool(self.get_parameter('auto_start').value)
-        self._require_autonomy = bool(
-            self.get_parameter('require_autonomy_enabled').value)
-        self._autonomy_enabled = not self._require_autonomy
         self._map_frame = str(self.get_parameter('map_frame').value)
         self._road_center_y = float(self.get_parameter('road_center_y').value)
         self._road_yaw = float(self.get_parameter('road_yaw').value)
@@ -147,18 +141,12 @@ class MissionManager(Node):
         self._plan_pub = self.create_publisher(
             MissionPlan, '/mission/plan', latched)
 
-        # 订阅无人机病树列表和底层里程计
-        self.create_subscription(
-            DiseaseTreeArray, '/uav/disease_trees', self._on_mission, latched)
+        # 订阅里程计和定位质量；任务仅通过 /mission/load_manual 注入。
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
         self.create_subscription(
             PoseWithCovarianceStamped,
             str(self.get_parameter('localization_pose_topic').value),
             self._on_localization_pose, 10)
-        self.create_subscription(
-            Bool, str(self.get_parameter('autonomy_enabled_topic').value),
-            self._on_autonomy_enabled, latched)
-
         # 初始化 Action 客户端
         self._nav_client = ActionClient(
             self, NavigateToPose, str(self.get_parameter('nav_action_name').value))
@@ -204,8 +192,6 @@ class MissionManager(Node):
         """声明 YAML 中定义的各项参数。"""
         parameters = {
             'auto_start': False,
-            'require_autonomy_enabled': False,
-            'autonomy_enabled_topic': '/safety/autonomy_enabled',
             'map_frame': 'map',
             'nav_action_name': '/navigate_to_pose',
             'spray_action_name': '/arm/execute_spray',
@@ -237,7 +223,6 @@ class MissionManager(Node):
             'stop_stable_duration_sec': 1.0,
             'odom_stale_timeout_sec': 1.0,
             'stop_verify_timeout_sec': 5.0,
-            'confidence_threshold': 0.5,
             'max_targets': 20,
             'max_abs_coordinate': 50.0,
             'min_spray_duration': 0.2,
@@ -248,78 +233,6 @@ class MissionManager(Node):
 
     def _now(self):
         return self.get_clock().now().nanoseconds * 1e-9
-
-    def _on_mission(self, message):
-        """
-        接收无人机任务列表消息。
-        校验消息数据的合法性（坐标、置信度、时长等），并加载到 MissionCore 中。
-        """
-        try:
-            targets = self._validate_message(message)
-            outcome = self.core.load(message.mission_id.strip(), targets)
-        except ValueError as error:
-            self.get_logger().error(f'[MISSION] rejected task list: {error}')
-            return
-        if outcome == 'accepted':
-            self._restore_configured_mission_options()
-            self._manual_return_home = False
-            self._clear_nav_startup_retry()
-            self._reset_docking_verification()
-            self.get_logger().info(
-                f'[MISSION] accepted mission={self.core.mission_id} '
-                f'targets={len(self.core.targets)}')
-            self._publish_plan()
-            self._publish_status()
-        elif outcome == 'duplicate':
-            self.get_logger().info(
-                f'[MISSION] ignored duplicate mission={message.mission_id}')
-        else:
-            self.get_logger().warn(
-                f'[MISSION] rejected new mission={message.mission_id}: busy')
-
-    def _validate_message(self, message):
-        """对来自无人机的 `DiseaseTreeArray` 进行严格的数值校验。"""
-        if message.header.frame_id != self._map_frame:
-            raise ValueError(f'frame must be {self._map_frame}')
-        if message.source_mode not in ('mock', 'replay', 'live'):
-            raise ValueError('source_mode must be mock, replay or live')
-        if not message.mission_id.strip() or not message.trees:
-            raise ValueError('mission_id and targets are required')
-        max_targets = int(self.get_parameter('max_targets').value)
-        if len(message.trees) > max_targets:
-            raise ValueError(f'target count exceeds limit {max_targets}')
-        threshold = float(self.get_parameter('confidence_threshold').value)
-        bound = float(self.get_parameter('max_abs_coordinate').value)
-        min_duration = float(self.get_parameter('min_spray_duration').value)
-        max_duration = float(self.get_parameter('max_spray_duration').value)
-        seen = set()
-        targets = []
-        for tree in message.trees:
-            values = (tree.position.x, tree.position.y, tree.position.z,
-                      tree.confidence, tree.spray_duration)
-            if not tree.tree_id.strip() or tree.tree_id in seen:
-                raise ValueError('tree_id must be non-empty and unique')
-            if not all(math.isfinite(value) for value in values):
-                raise ValueError(f'{tree.tree_id}: non-finite value')
-            if tree.confidence < threshold or tree.confidence > 1.0:
-                raise ValueError(f'{tree.tree_id}: confidence out of range')
-            if tree.spray_side not in ('left', 'right'):
-                raise ValueError(f'{tree.tree_id}: invalid spray_side')
-            if not min_duration <= tree.spray_duration <= max_duration:
-                raise ValueError(f'{tree.tree_id}: spray_duration out of range')
-            if abs(tree.position.x) > bound or abs(tree.position.y) > bound:
-                raise ValueError(f'{tree.tree_id}: position out of bounds')
-            seen.add(tree.tree_id)
-            target = Target(
-                tree.tree_id, tree.position.x, tree.position.y, tree.position.z,
-                tree.confidence, tree.spray_side, tree.spray_duration,
-                tree.evidence_uri)
-            # 即使只是加载，也提前校验停靠位姿计算能否成功
-            docking_pose(
-                target, self._road_center_y, self._road_yaw,
-                self._docking_lateral_offset)
-            targets.append(target)
-        return targets
 
     def _load_manual(self, request, response):
         """处理通过 Rviz 或 Web 操作台手动设定的任务。"""
@@ -376,14 +289,24 @@ class MissionManager(Node):
             duration = float(item.spray_duration)
             if not math.isfinite(duration) or not min_duration <= duration <= max_duration:
                 raise ValueError(f'{target_id}: spray_duration out of range')
-            docking = MissionManager._pose_to_xy_yaw(
-                item.docking_pose, f'{target_id}.docking_pose')
-            if abs(docking[0]) > bound or abs(docking[1]) > bound:
-                raise ValueError(f'{target_id}: docking pose out of bounds')
+            confidence = float(getattr(item, 'confidence', 1.0))
+            if not math.isfinite(confidence) or not 0.0 < confidence <= 1.0:
+                raise ValueError(f'{target_id}: confidence must be in (0, 1]')
+            compute_docking = bool(getattr(item, 'compute_docking_pose', False))
+            if compute_docking:
+                docking = None
+            else:
+                docking = MissionManager._pose_to_xy_yaw(
+                    item.docking_pose, f'{target_id}.docking_pose')
+                if abs(docking[0]) > bound or abs(docking[1]) > bound:
+                    raise ValueError(f'{target_id}: docking pose out of bounds')
             tree_base_z = getattr(self, '_manual_tree_base_z', 0.0)
             tree_standoff = getattr(self, '_manual_tree_standoff', 1.5)
             explicit_hint = bool(getattr(
                 item, 'use_explicit_tree_hint', False))
+            if compute_docking and not explicit_hint:
+                raise ValueError(
+                    f'{target_id}: compute_docking_pose requires tree_hint')
             if explicit_hint:
                 point = item.tree_hint
                 tree_hint = (
@@ -392,22 +315,35 @@ class MissionManager(Node):
                     raise ValueError(f'{target_id}: non-finite tree_hint')
                 if abs(tree_hint[0]) > bound or abs(tree_hint[1]) > bound:
                     raise ValueError(f'{target_id}: tree_hint out of bounds')
-                source = 'manual://measured'
+                source = (
+                    str(getattr(item, 'evidence_uri', '')).strip()
+                    or 'manual://measured')
             else:
                 tree_hint = manual_tree_hint(
                     docking, item.spray_side, tree_standoff, tree_base_z)
-                source = 'manual://inferred'
+                source = (
+                    str(getattr(item, 'evidence_uri', '')).strip()
+                    or 'manual://inferred')
             target = Target(
                 target_id,
                 tree_hint[0],
                 tree_hint[1],
                 tree_hint[2],
-                1.0,
+                confidence,
                 item.spray_side,
                 duration,
                 source,
                 docking,
                 tree_hint if explicit_hint else None,
+            )
+            # Mock YAML only supplies a tree hint.  Validate its derived
+            # parking pose here so an invalid road-side relation is rejected
+            # by the same geometry function Nav2 will later use.
+            navigation_pose(
+                target,
+                self._road_center_y,
+                self._road_yaw,
+                self._docking_lateral_offset,
             )
             seen.add(target_id)
             targets.append(target)
@@ -444,9 +380,6 @@ class MissionManager(Node):
     def _start(self, _request, response):
         if self.core.state != MissionState.READY:
             return self._reply(response, False, 'mission is not READY')
-        if (getattr(self, '_require_autonomy', False) and
-                not getattr(self, '_autonomy_enabled', False)):
-            return self._reply(response, False, 'autonomy mode is not enabled')
         if not self._servers_ready():
             return self._reply(response, False, 'Nav2 or spray Action server is not ready')
         self._begin_mission_navigation()
@@ -466,9 +399,6 @@ class MissionManager(Node):
             return self._reply(response, False, 'previous navigation goal is still canceling')
         if not self._nav_client.server_is_ready():
             return self._reply(response, False, 'Nav2 Action server is not ready')
-        if (getattr(self, '_require_autonomy', False) and
-                not getattr(self, '_autonomy_enabled', False)):
-            return self._reply(response, False, 'autonomy mode is not enabled')
         self.core.resume()
         self._send_nav_goal()
         return self._reply(response, True, 'mission resumed')
@@ -804,10 +734,6 @@ class MissionManager(Node):
             'docking pose remains outside tolerance after retry')
         return False
 
-    def _on_autonomy_enabled(self, message):
-        """Cache the latched hardware/operator autonomy permission."""
-        self._autonomy_enabled = bool(message.data)
-
     def _send_spray_goal(self):
         """构建并发送机械臂 Action 目标。"""
         target = self.core.current_target
@@ -948,9 +874,7 @@ class MissionManager(Node):
         4. 机械臂反馈进度的卡死检查 (progress_timeout)。
         """
         if (self.core.state == MissionState.READY and self._auto_start and
-                self._servers_ready() and
-                (getattr(self, '_autonomy_enabled', False) or
-                 not getattr(self, '_require_autonomy', False))):
+                self._servers_ready()):
             self._begin_mission_navigation()
             return
         now = self._now()
@@ -1055,14 +979,14 @@ class MissionManager(Node):
         self._set_pose(message.home_pose, *self._home_pose)
         for target in self.core.targets:
             item = MissionTargetPlan()
-            item.target.tree_id = target.tree_id
-            item.target.confidence = target.confidence
-            item.target.position.x = target.x
-            item.target.position.y = target.y
-            item.target.position.z = target.z
-            item.target.spray_side = target.spray_side
-            item.target.spray_duration = target.spray_duration
-            item.target.evidence_uri = target.evidence_uri
+            item.target_id = target.tree_id
+            item.confidence = target.confidence
+            item.tree_hint.x = target.x
+            item.tree_hint.y = target.y
+            item.tree_hint.z = target.z
+            item.spray_side = target.spray_side
+            item.spray_duration = target.spray_duration
+            item.evidence_uri = target.evidence_uri
             self._set_pose(
                 item.docking_pose,
                 *navigation_pose(

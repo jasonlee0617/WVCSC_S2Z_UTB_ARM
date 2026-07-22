@@ -200,7 +200,6 @@ def _resolve_calibrations(context, *, launch_dir):
             LaunchConfiguration('preflight_script').perform(context),
             '--mode', 'localization',
             '--operation', 'mission',
-            '--mission-source', 'measured',
             '--mission-file', LaunchConfiguration('mission_file').perform(context),
             '--camera-device', LaunchConfiguration('c10_device').perform(context),
             '--arm-device', LaunchConfiguration('serial_port').perform(context),
@@ -242,7 +241,6 @@ def _resolve_calibrations(context, *, launch_dir):
         _include(launch_dir, 'real_orchestration.launch.py', {
             **shared_description_args,
             'map': LaunchConfiguration('map'),
-            'mission_source': 'measured',
             'mission_file': LaunchConfiguration('mission_file'),
             'yolo_python_executable': LaunchConfiguration(
                 'yolo_python_executable'),

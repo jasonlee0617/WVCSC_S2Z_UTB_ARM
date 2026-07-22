@@ -9,21 +9,19 @@ import tty
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
 
 
 def command_for_key(key):
-    """Map a single key to an arm command or controlled-abort request."""
+    """Map a single key to a direct arm control command."""
     return {
         ' ': 'stop',
         'h': 'reset',
         'r': 'resume',
-        'x': 'controlled_abort',
     }.get(key)
 
 
 class MotionControlKeyboard(Node):
-    """Publish stop/reset/resume commands without duplicating safety state logic."""
+    """Publish direct stop/reset/resume commands for the arm controller."""
 
     def __init__(self):
         super().__init__('wvcsc_motion_control_keyboard')
@@ -36,8 +34,6 @@ class MotionControlKeyboard(Node):
         self.declare_parameter('keyboard_poll_period_sec', 0.01)
         self._command_pub = self.create_publisher(
             String, '/motion_control/command', 10)
-        self._abort_client = self.create_client(
-            Trigger, '/safety/controlled_abort')
         self._stream = None
         self._fd = None
         self._old_settings = None
@@ -51,7 +47,7 @@ class MotionControlKeyboard(Node):
             float(self.get_parameter('keyboard_poll_period_sec').value))
         self.create_timer(period, self._poll)
         self.get_logger().info(
-            'Keys: SPACE stop, h reset/HOME, r resume, x controlled abort')
+            'Keys: SPACE stop, h reset/HOME, r resume')
 
     def _configure_tty(self):
         try:
@@ -90,18 +86,6 @@ class MotionControlKeyboard(Node):
             return
         command = command_for_key(self._stream.read(1))
         if command is None:
-            return
-        if command == 'controlled_abort':
-            # 无论安全协调服务是否已启动，先直接触发机械臂 stop。独立手眼
-            # 标定不会启动底盘 safety 节点，因此 x 仍必须具有确定的停臂
-            # 效果；完整实机系统中再由 controlled_abort 协调底盘与 HOME。
-            self._publish_command('stop')
-            if not self._abort_client.service_is_ready():
-                self.get_logger().warn(
-                    '/safety/controlled_abort is not ready; arm stop sent only')
-                return
-            self._abort_client.call_async(Trigger.Request())
-            self.get_logger().warn('controlled abort requested')
             return
         self._publish_command(command)
 

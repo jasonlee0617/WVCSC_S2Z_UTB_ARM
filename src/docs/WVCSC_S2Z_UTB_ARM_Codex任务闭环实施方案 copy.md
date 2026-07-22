@@ -260,12 +260,9 @@ ros2 run wvcsc_arm_task motion_control_keyboard
 SPACE  stop并锁定
 h      reset并执行HOME
 r      HOME_LOCKED后解除锁定
-x      立即发送机械臂stop
 ```
 
-`x` 只负责机械臂 stop，不负责底盘停车。底盘紧急停止必须使用物理急停。
-
-任何 stop、reset、HOME_LOCKED 或物理急停都会立即作废当前标定会话并取消机械臂 Goal。完成 `h → HOME_LOCKED → r` 后，必须回到终端二重新按 `s`；不允许从中断样本继续求解。
+底盘紧急停止必须使用物理急停。任何 stop、reset 或 HOME_LOCKED 都会立即作废当前标定会话并取消机械臂 Goal。完成 `h → HOME_LOCKED → r` 后，必须回到终端二重新按 `s`；不允许从中断样本继续求解。
 
 ## 6. 速度下发与现场停机
 
@@ -275,8 +272,7 @@ x      立即发送机械臂stop
 Nav2 controller → velocity_smoother → /cmd_vel → wtb_car_driver
 ```
 
-`real_navigation.launch.py` 和完整任务均不启动 `wvcsc_safety`，也不等待
-`/safety/set_autonomy_enabled`。正常停止顺序为：
+`real_navigation.launch.py` 和完整任务直接向 `/cmd_vel` 输出，不依赖软件安全门。正常停止顺序为：
 
 ```text
 取消 mission/Nav2 或终止 launch
@@ -287,9 +283,7 @@ Nav2 controller → velocity_smoother → /cmd_vel → wtb_car_driver
 → 人工resume后才允许重新工作
 ```
 
-绕过软件安全门后，不再提供 `/safety/controlled_abort`、持续零速发布或软件急停
-兜底。实车运行必须保留可触达的底盘物理急停；紧急情况下先按物理急停，确认
-底盘停稳后再处理机械臂和任务状态。
+实车运行必须保留可触达的底盘物理急停；紧急情况下先按物理急停，确认底盘停稳后再处理机械臂和任务状态。
 
 ## 7. 构建、测试与现场验收
 

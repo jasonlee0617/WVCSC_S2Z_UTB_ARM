@@ -44,10 +44,13 @@ class SiteMissionLoader(Node):
             _set_pose(target.docking_pose, source['docking_pose'])
             target.spray_side = str(source['spray_side'])
             target.spray_duration = float(source['spray_duration'])
+            target.confidence = 1.0
+            target.evidence_uri = 'manual://measured'
             target.tree_hint.x = float(source['tree_hint']['x'])
             target.tree_hint.y = float(source['tree_hint']['y'])
             target.tree_hint.z = float(source['tree_hint']['z'])
             target.use_explicit_tree_hint = True
+            target.compute_docking_pose = False
             request.targets.append(target)
         future = self._client.call_async(request)
         rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)

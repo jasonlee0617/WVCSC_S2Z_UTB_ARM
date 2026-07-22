@@ -32,7 +32,6 @@ MISSION_PACKAGES = (
     'moveit_ros_move_group', 'moveit_servo', 'pymoveit2',
     'trajectory_retime_server', 'wvcsc_interfaces', 'wvcsc_rgb_vision',
     'wvcsc_visual_servo', 'wvcsc_arm_task', 'wvcsc_mission_manager',
-    'wvcsc_uav_gateway',
 )
 MAPPING_PACKAGES = (
     'cartographer_ros', 'my_cartographer', 'joint_state_publisher', 'rviz2',
@@ -48,7 +47,6 @@ def _arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', required=True, choices=('localization', 'mapping'))
     parser.add_argument('--operation', default='mission', choices=('survey', 'mission'))
-    parser.add_argument('--mission-source', default='measured', choices=('measured', 'uav'))
     parser.add_argument('--mission-file', default='')
     parser.add_argument('--camera-device', default='')
     parser.add_argument('--arm-device', default='')
@@ -164,7 +162,7 @@ def main():
     failures = []
     print(
         f'=== WVCSC preflight: mode={args.mode} '
-        f'operation={args.operation} source={args.mission_source} ===')
+        f'operation={args.operation} ===')
     _packages(COMMON_PACKAGES, failures)
 
     if args.mode == 'mapping':
@@ -186,19 +184,18 @@ def main():
                 _exists(f'real YOLO weight {model}', model_dir / model, failures)
             _yolo_contracts(args.yolo_python, model_dir, failures)
             _calibration_checks(args, failures)
-            if args.mission_source == 'measured':
-                _exists('measured site mission', args.mission_file, failures)
-                if Path(args.mission_file).expanduser().is_file():
-                    try:
-                        from wvcsc_bringup.site_mission import (
-                            load_site_document, validate_site_document)
-                        validate_site_document(
-                            load_site_document(args.mission_file), args.map)
-                        print('  [OK]   measured site mission contract')
-                    except (ImportError, ValueError) as error:
-                        failures.append(
-                            f'measured site mission validation failed: {error}')
-                        print(f'  [FAIL] measured site mission: {error}')
+            _exists('measured site mission', args.mission_file, failures)
+            if Path(args.mission_file).expanduser().is_file():
+                try:
+                    from wvcsc_bringup.site_mission import (
+                        load_site_document, validate_site_document)
+                    validate_site_document(
+                        load_site_document(args.mission_file), args.map)
+                    print('  [OK]   measured site mission contract')
+                except (ImportError, ValueError) as error:
+                    failures.append(
+                        f'measured site mission validation failed: {error}')
+                    print(f'  [FAIL] measured site mission: {error}')
 
     if failures:
         print('\n[ABORT] Real bringup prerequisites failed:')

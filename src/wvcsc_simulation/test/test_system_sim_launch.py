@@ -86,6 +86,16 @@ def test_arm_planner_selection_is_exposed_as_launch_arguments():
     assert "'planner_id': planner_id" in LAUNCH_SOURCE
 
 
+def test_simulation_loads_mock_targets_without_a_uav_gateway():
+    assert "package='wvcsc_mission_manager', executable='mock_target_loader'" \
+        in LAUNCH_SOURCE
+    assert "DeclareLaunchArgument('use_mock_targets', default_value='true')" \
+        in LAUNCH_SOURCE
+    assert "mock_targets.yaml" in LAUNCH_SOURCE
+    assert 'wvcsc_uav_gateway' not in LAUNCH_SOURCE
+    assert 'use_replay_uav' not in LAUNCH_SOURCE
+
+
 @pytest.mark.parametrize('name,value', [
     ('arm_velocity_scaling', '0'),
     ('arm_velocity_scaling', '1.01'),

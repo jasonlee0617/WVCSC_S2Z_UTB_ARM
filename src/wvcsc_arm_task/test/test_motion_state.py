@@ -3,40 +3,16 @@ from wvcsc_arm_task.motion_state import (
     begin_reset,
     perform_reset,
 )
-from types import SimpleNamespace
 
-from wvcsc_arm_task.motion_control_keyboard import (
-    MotionControlKeyboard,
-    command_for_key,
-)
+from wvcsc_arm_task.motion_control_keyboard import command_for_key
 
 
 def test_motion_control_keyboard_mapping():
     assert command_for_key(' ') == 'stop'
     assert command_for_key('h') == 'reset'
     assert command_for_key('r') == 'resume'
-    assert command_for_key('x') == 'controlled_abort'
+    assert command_for_key('x') is None
     assert command_for_key('?') is None
-
-
-def test_keyboard_x_stops_arm_when_safety_service_is_absent(monkeypatch):
-    keyboard = object.__new__(MotionControlKeyboard)
-    keyboard._stream = SimpleNamespace(read=lambda _count: 'x')
-    keyboard._abort_client = SimpleNamespace(
-        service_is_ready=lambda: False)
-    commands = []
-    warnings = []
-    keyboard._publish_command = commands.append
-    keyboard.get_logger = lambda: SimpleNamespace(
-        warn=warnings.append, error=warnings.append)
-    monkeypatch.setattr(
-        'wvcsc_arm_task.motion_control_keyboard.select.select',
-        lambda *_args: ([keyboard._stream], [], []))
-
-    keyboard._poll()
-
-    assert commands == ['stop']
-    assert any('arm stop sent only' in message for message in warnings)
 
 
 class _Arm:
@@ -123,23 +99,6 @@ def test_reset_does_not_open_gripper_until_all_motion_is_stopped():
     assert arm.calls == ['cancel_and_wait']
     assert state.locked
     assert not state.reset_in_progress
-
-
-def test_physical_estop_blocks_reset_resume_and_allow_locked_motion():
-    state = MotionControlState()
-    state.set_hard_stop(True)
-
-    assert state.hard_stopped
-    assert state.locked
-    assert not state.begin_reset()
-    assert not state.resume()
-
-    state.set_hard_stop(False)
-    assert not state.hard_stopped
-    assert state.locked
-    assert state.begin_reset()
-    state.finish_reset()
-    assert state.resume()
 
 
 def test_reset_abort_predicate_prevents_home_motion():

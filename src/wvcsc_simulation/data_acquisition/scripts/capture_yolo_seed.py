@@ -8,12 +8,13 @@ import time
 from cv_bridge import CvBridge
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data)
 from sensor_msgs.msg import Image
 from tf2_ros import Buffer, TransformException, TransformListener
 from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.action._execute_spray import ExecuteSpray_FeedbackMessage
-from wvcsc_interfaces.msg import DiseaseTreeArray, MissionStatus
+from wvcsc_interfaces.msg import MissionPlan, MissionStatus
 from wvcsc_simulation.data_acquisition.yolo_seed_dataset import (
     write_fruit_seg_sample,
     write_unlabeled_sample,
@@ -38,7 +39,11 @@ class SeedCapture(Node):
         self.create_subscription(
             MissionStatus, '/mission/status', self._status, 10)
         self.create_subscription(
-            DiseaseTreeArray, '/uav/disease_trees', self._targets, 10)
+            MissionPlan, '/mission/plan', self._plan,
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(
             ExecuteSpray_FeedbackMessage,
             '/arm/execute_spray/_action/feedback', self._feedback, 10)
@@ -49,8 +54,9 @@ class SeedCapture(Node):
             self.failure = message.last_error or message.state_text
             self.done.set()
 
-    def _targets(self, message):
-        self.sides.update({tree.tree_id: tree.spray_side for tree in message.trees})
+    def _plan(self, message):
+        self.sides.update({
+            target.target_id: target.spray_side for target in message.targets})
 
     def _feedback(self, message):
         if (message.feedback.phase == ExecuteSpray.Feedback.SCANNING_TREE and

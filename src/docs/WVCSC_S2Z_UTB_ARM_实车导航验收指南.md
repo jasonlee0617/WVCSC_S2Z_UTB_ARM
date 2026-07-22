@@ -54,7 +54,7 @@ ros2 launch wvcsc_bringup real_navigation.launch.py
 
 该命令直接启动底盘、LiDAR、IMU、EKF、AMCL、Nav2 和一个 RViz，不加载 C10，默认读取
 `${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml`。Nav2 最终速度
-直接发布到 `/cmd_vel`，不经过 `wvcsc_safety`。RViz 使用
+直接发布到 `/cmd_vel`，底盘急停由硬件负责。RViz 使用
 `wvcsc_bringup/rviz/real_navigation.rviz`。
 
 启动后确认：
@@ -102,7 +102,34 @@ m，位置/偏航散布均 ≤ 1.00 m/rad。定位链稳定后，应再恢复为
 AMCL 位姿在采样期间允许最多 2 秒未更新；短暂过期时脚本会自动等待下一次
 AMCL 更新，不会因约 1 Hz 发布抖动直接中断采点。
 
-### 2.5 测量树到小车的距离
+### 2.5 采集 HOME 位姿
+
+采集树目标前必须先采集 HOME 位姿。HOME 是任务完成后小车返回的位置，
+也是站点文件中 `mission.home_pose` 的来源。
+
+操作步骤：
+
+1. 将小车停在任务结束后希望返回的安全位置；
+2. 在 RViz 中确认 `map → base_footprint` TF 正常，AMCL 粒子云已经收敛；
+3. 确认车体停稳后执行：
+
+```bash
+ros2 run wvcsc_bringup capture_site_pose \
+  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
+  --capture-home \
+  --timeout-sec 60
+```
+
+成功输出类似：
+
+```text
+[SITE] captured HOME pose=(-1.950,0.107,0.020) file=.../corn_site.yaml
+```
+
+只有看到 `captured HOME` 后，才能执行后面的树目标采集。重复采集 HOME
+会更新 `mission.home_pose`，原文件会自动保存为 `.bak`。
+
+### 2.6 测量树到小车的距离
 
 小车停稳后，用卷尺测量两个距离：
 
@@ -129,37 +156,45 @@ AMCL 更新，不会因约 1 Hz 发布抖动直接中断采点。
 2. 从同一中心点向小车左侧拉卷尺——读数为 `tree-left-m`（右侧为负，填 `-1.5` 等）
 3. 如果树就在小车正侧面，`tree-forward-m` 填 `0.0`
 
-### 2.6 执行采点
+### 2.7 执行采点
 
 ```bash
 ros2 run wvcsc_bringup capture_site_pose \
   --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
   --target-id tree_01 \
   --tree-forward-m 0.0 \
-  --tree-left-m 1.50
+  --tree-left-m 1.50 \
+  --force-capture
 ```
 
 脚本执行流程：
-1. 自行调用 AMCL 的 `/request_nomotion_update`，等待 AHRS、AMCL 定位稳定 + EKF 停稳 1 秒
+1. 普通模式下自行调用 AMCL 的 `/request_nomotion_update`，等待 IMU、AMCL 定位稳定 + EKF 停稳 1 秒
 2. 连续采集 30 个样本（0.1 秒/次），当前执行优先阶段位置散布 ≤ 1.00 m、偏航散布 ≤ 1.00 rad
 3. 调用 `tree_hint_from_offset()` 自动计算树根 map 坐标
 4. 写入 `~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml`（自动创建或追加）
 
 采点前必须确认 `/dev/yesense_IMU` 存在且 `ros2 topic hz /imu` 有持续输出；
-AMCL 位置和偏航标准差均须不大于 `0.08`，不满足时脚本会拒绝写入。
+当前执行优先门限为位置/偏航标准差 ≤ `1.00` m/rad。
 
 成功输出示例：
 ```
 [SITE] captured tree_01 pose=(3.002,0.498,0.003) file=~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
 ```
 
-### 2.7 重复所有树
+### 2.8 重复所有树
 
-对每棵玉米树重复步骤 2.3~2.6：
+对每棵玉米树重复步骤 2.3~2.7：
 
-### 2.8 调整采点质量门限
+### 2.9 采点门控说明与参数调整
 
-当前门限集中定义在：
+正常采点模式中的门控作用如下：
+
+- **新鲜度门控**：检查 `/imu`、`/ekf_odom` 和 `/amcl_pose` 是否近期更新，避免使用过期的定位或里程计数据；当前 AMCL 允许最多约 2 秒未更新。
+- **停稳门控**：检查 EKF 线速度和角速度，并要求车辆持续停稳约 1 秒，避免把运动中的位姿写入站点文件。
+- **质量门控**：检查 30 个 TF 样本的位置/偏航散布，以及 AMCL 协方差，判断采集位姿是否稳定。
+- **footprint 门控**：把小车 footprint 投影到地图，检查 HOME 和 docking 位姿是否落在地图自由区域，避免目标位姿落在障碍物或未知区域。
+
+当前执行优先门限集中定义在：
 
 ```text
 wvcsc_bringup/wvcsc_bringup/site_mission.py
@@ -186,7 +221,7 @@ source install/setup.bash
 采点质量数据仍会写入 `capture_quality`，因此门限放宽只代表允许写入，
 不代表当前定位精度已经满足最终工程验收。
 
-如果当前阶段只要求先完成文件写入，可在采点命令末尾增加 `--force-capture`。
+如果当前阶段只要求先完成文件写入，可在采点命令末尾增加 `--force-capture`：
 该调试模式跳过 AMCL/EKF/停稳新鲜度、质量和地图 footprint 门控，但仍要求
 初始传感器消息和 30 个有效 `map → base_footprint` TF 样本；它不适合作为最终
 实机导航验收依据。
@@ -213,7 +248,7 @@ ros2 run wvcsc_bringup capture_site_pose \
   --tree-forward-m 0.0 --tree-left-m -1.52
 ```
 
-### 2.8 验证 YAML
+### 2.10 验证 YAML
 
 ```bash
 cat ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
@@ -223,11 +258,15 @@ cat ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
 
 ```yaml
 schema_version: 1
-map_file: <当前用户HOME>/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml
-map_sha256: abc123...
+site_id: corn_site
+map:
+  frame_id: map
+  yaml_sha256: abc123...
+  image_sha256: def456...
 mission:
-  site_id: corn_site
   mission_id: corn_measured_001
+  return_home_after_finish: false
+  home_pose: {x: -1.950, y: 0.107, yaw: 0.020}
   targets:
     - target_id: tree_01
       docking_pose: {x: 3.002, y: 0.498, yaw: 0.003}

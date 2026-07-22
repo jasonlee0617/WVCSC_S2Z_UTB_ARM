@@ -50,8 +50,8 @@ def test_success_and_cancel_always_close_simulated_actuator():
     client_node.create_subscription(
         Bool, '/spray/simulated_active',
         lambda message: active_samples.append(message.data), qos)
-    emergency_stop = client_node.create_publisher(
-        Bool, '/safety/emergency_stop', qos)
+    motion_locked = client_node.create_publisher(
+        Bool, '/motion_control/locked', qos)
     executor = MultiThreadedExecutor(num_threads=3, context=context)
     executor.add_node(server)
     executor.add_node(client_node)
@@ -84,7 +84,7 @@ def test_success_and_cancel_always_close_simulated_actuator():
         assert handle.accepted
         assert _spin_until(
             executor, lambda: bool(active_samples) and active_samples[-1] is True)
-        emergency_stop.publish(Bool(data=True))
+        motion_locked.publish(Bool(data=True))
         result_future = handle.get_result_async()
         assert _spin_until(executor, result_future.done)
         wrapped = result_future.result()

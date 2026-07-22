@@ -19,13 +19,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 from wvcsc_interfaces.action import ExecuteSpray
-from wvcsc_interfaces.msg import (
-    DiseaseTree,
-    DiseaseTreeArray,
-    ManualMissionTarget,
-    MissionPlan,
-    MissionStatus,
-)
+from wvcsc_interfaces.msg import ManualMissionTarget, MissionPlan, MissionStatus
 from wvcsc_interfaces.srv import LoadManualMission
 
 from wvcsc_mission_manager.mission_manager import MissionManager
@@ -88,8 +82,6 @@ class _Harness(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self.mission_pub = self.create_publisher(
-            DiseaseTreeArray, '/uav/disease_trees', qos)
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
         self.reset_client = self.create_client(Trigger, '/mission/reset')
         self.start_client = self.create_client(Trigger, '/mission/start')
@@ -116,24 +108,32 @@ class _Harness(Node):
         message.child_frame_id = 'base_footprint'
         self.odom_pub.publish(message)
 
-    def publish_mission(self, mission_id):
-        message = DiseaseTreeArray()
-        message.header.stamp = self.get_clock().now().to_msg()
-        message.header.frame_id = 'map'
-        message.mission_id = mission_id
-        message.source_mode = 'mock'
+    def load_mock(self, mission_id, return_home=False, home=(0.0, 0.0, 0.0)):
+        request = LoadManualMission.Request()
+        request.header.stamp = self.get_clock().now().to_msg()
+        request.header.frame_id = 'map'
+        request.mission_id = mission_id
+        request.return_home_after_finish = return_home
+        request.home_pose.position.x = home[0]
+        request.home_pose.position.y = home[1]
+        request.home_pose.orientation.z = math.sin(home[2] / 2.0)
+        request.home_pose.orientation.w = math.cos(home[2] / 2.0)
         for tree_id, x, y, side in (
                 ('tree_01', 3.0, 2.0, 'left'),
                 ('tree_02', 5.0, -2.0, 'right')):
-            tree = DiseaseTree()
-            tree.tree_id = tree_id
-            tree.position.x = x
-            tree.position.y = y
-            tree.confidence = 0.95
-            tree.spray_side = side
-            tree.spray_duration = 0.2
-            message.trees.append(tree)
-        self.mission_pub.publish(message)
+            target = ManualMissionTarget()
+            target.target_id = tree_id
+            target.tree_hint.x = x
+            target.tree_hint.y = y
+            target.tree_hint.z = 0.0
+            target.use_explicit_tree_hint = True
+            target.compute_docking_pose = True
+            target.confidence = 0.95
+            target.evidence_uri = f'mock://{tree_id}'
+            target.spray_side = side
+            target.spray_duration = 0.2
+            request.targets.append(target)
+        return self.manual_client.call_async(request)
 
     def load_manual(self, mission_id, targets, return_home=False):
         request = LoadManualMission.Request()
@@ -151,6 +151,9 @@ class _Harness(Node):
             target.docking_pose.orientation.w = math.cos(yaw / 2.0)
             target.spray_side = side
             target.spray_duration = 0.2
+            target.confidence = 1.0
+            target.evidence_uri = 'manual://test'
+            target.compute_docking_pose = False
             request.targets.append(target)
         return self.manual_client.call_async(request)
 
@@ -190,7 +193,9 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
 
         for run in range(3):
             mission_id = f'fake_closed_loop_{run}'
-            harness.publish_mission(mission_id)
+            load = harness.load_mock(mission_id)
+            assert _spin_until(executor, load.done)
+            assert load.result().success
             assert _spin_until(
                 executor,
                 lambda: (
@@ -219,7 +224,7 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
             ('map', 5.0, -2.0, 0.0),
         ] * 3
         assert harness.plan.mission_id == 'fake_closed_loop_2'
-        assert [item.target.tree_id for item in harness.plan.targets] == [
+        assert [item.target_id for item in harness.plan.targets] == [
             'tree_01', 'tree_02']
         assert math.isclose(
             harness.plan.targets[0].docking_pose.position.y,
@@ -268,7 +273,10 @@ def test_optional_return_home_adds_final_nav_goal():
 
     try:
         assert _spin_until(executor, manager._servers_ready)
-        harness.publish_mission('return_home_loop')
+        load = harness.load_mock(
+            'return_home_loop', return_home=True, home=(0.25, -0.1, 0.0))
+        assert _spin_until(executor, load.done)
+        assert load.result().success
         assert _spin_until(
             executor,
             lambda: (

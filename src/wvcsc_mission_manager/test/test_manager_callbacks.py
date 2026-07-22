@@ -1,6 +1,7 @@
 import math
 from types import SimpleNamespace
 
+import pytest
 from action_msgs.msg import GoalStatus
 from wvcsc_interfaces.action import ExecuteSpray
 
@@ -121,7 +122,6 @@ class _Validator:
         self._road_yaw = 0.0
         self._docking_lateral_offset = 0.5
         self.parameters = {
-            'confidence_threshold': 0.5,
             'max_targets': 2,
             'max_abs_coordinate': 50.0,
             'min_spray_duration': 0.2,
@@ -147,8 +147,11 @@ def _manual_request(frame='map', x=3.0, count=1):
         docking_pose=_pose(x + index, 0.5, yaw=0.2 + index),
         spray_side='left',
         spray_duration=2.0,
+        confidence=1.0,
+        evidence_uri='manual://test',
         tree_hint=SimpleNamespace(x=0.0, y=0.0, z=0.0),
         use_explicit_tree_hint=False,
+        compute_docking_pose=False,
     ) for index in range(count)]
     return SimpleNamespace(
         header=SimpleNamespace(frame_id=frame),
@@ -156,23 +159,6 @@ def _manual_request(frame='map', x=3.0, count=1):
         home_pose=_pose(0.0, 0.0),
         return_home_after_finish=False,
         targets=targets,
-    )
-
-
-def _message(frame='map', x=3.0, count=1):
-    trees = [SimpleNamespace(
-        tree_id=f'tree_{index}',
-        position=SimpleNamespace(x=x, y=2.0, z=0.0),
-        confidence=0.9,
-        spray_side='left',
-        spray_duration=2.0,
-        evidence_uri='',
-    ) for index in range(count)]
-    return SimpleNamespace(
-        header=SimpleNamespace(frame_id=frame),
-        mission_id='demo',
-        source_mode='mock',
-        trees=trees,
     )
 
 
@@ -338,26 +324,22 @@ def test_fail_cancels_both_children_and_stops_odom_check():
     assert harness.status_updates == 1
 
 
-def test_invalid_frame_coordinate_and_target_count_are_rejected():
+def test_invalid_manual_frame_coordinate_target_count_and_confidence_are_rejected():
     validator = _Validator()
-    for message in (
-            _message(frame='odom'),
-            _message(x=51.0),
-            _message(count=3)):
+    for request in (
+            _manual_request(frame='odom'),
+            _manual_request(x=51.0),
+            _manual_request(count=3)):
         try:
-            MissionManager._validate_message(validator, message)
+            MissionManager._validate_manual_request(validator, request)
         except ValueError:
             continue
         raise AssertionError('invalid mission was accepted')
 
-    invalid_source = _message()
-    invalid_source.source_mode = 'serial'
-    try:
-        MissionManager._validate_message(validator, invalid_source)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError('invalid source_mode was accepted')
+    invalid_confidence = _manual_request()
+    invalid_confidence.targets[0].confidence = 0.0
+    with pytest.raises(ValueError, match='confidence'):
+        MissionManager._validate_manual_request(validator, invalid_confidence)
 
 
 def test_manual_targets_preserve_selected_pose_and_validate_input():
@@ -368,15 +350,22 @@ def test_manual_targets_preserve_selected_pose_and_validate_input():
     assert math.isclose(targets[0].docking_pose_override[2], 0.2)
     assert home == (0.0, 0.0, 0.0)
 
-    for invalid in (
-            _manual_request(frame='odom'),
-            _manual_request(x=51.0),
-            _manual_request(count=3)):
-        try:
-            MissionManager._validate_manual_request(validator, invalid)
-        except ValueError:
-            continue
-        raise AssertionError('invalid manual mission was accepted')
+
+def test_mock_style_manual_target_uses_mission_manager_docking_geometry():
+    validator = _Validator()
+    request = _manual_request()
+    target = request.targets[0]
+    target.tree_hint = SimpleNamespace(x=3.0, y=2.0, z=0.0)
+    target.use_explicit_tree_hint = True
+    target.compute_docking_pose = True
+    target.confidence = 0.95
+    target.evidence_uri = 'mock://tree_01'
+
+    targets, _home = MissionManager._validate_manual_request(validator, request)
+
+    assert targets[0].docking_pose_override is None
+    assert targets[0].tree_hint_override == (3.0, 2.0, 0.0)
+    assert targets[0].evidence_uri == 'mock://tree_01'
 
 
 def test_manual_target_can_supply_explicit_measured_tree_hint():
@@ -384,6 +373,7 @@ def test_manual_target_can_supply_explicit_measured_tree_hint():
     request = _manual_request()
     request.targets[0].tree_hint = SimpleNamespace(x=3.2, y=1.7, z=0.0)
     request.targets[0].use_explicit_tree_hint = True
+    request.targets[0].evidence_uri = ''
 
     targets, _home = MissionManager._validate_manual_request(validator, request)
 

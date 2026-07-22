@@ -90,8 +90,8 @@ def test_real_orchestration_uses_real_leaf_and_measured_mission_contracts():
               'vision_real.yaml').read_text(encoding='utf-8')
 
     assert "executable='load_site_mission.py'" in source
-    assert "LaunchConfiguration('mission_source')" in source
-    assert "'require_autonomy_enabled': False" in source
+    assert 'mission_source' not in source
+    assert 'wvcsc_uav_gateway' not in source
     assert "'require_docking_quality': True" in source
     assert 'vision_real.yaml' in source
     assert 'yolov8s_real.pt' in vision

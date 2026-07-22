@@ -172,8 +172,7 @@ def generate_launch_description():
     use_nav2_qt = LaunchConfiguration('use_nav2_qt')
     enable_arm_control = LaunchConfiguration('enable_arm_control')
     enable_ackermann = LaunchConfiguration('enable_ackermann')
-    use_mock_uav = LaunchConfiguration('use_mock_uav')
-    use_replay_uav = LaunchConfiguration('use_replay_uav')
+    use_mock_targets = LaunchConfiguration('use_mock_targets')
     use_mission_manager = LaunchConfiguration('use_mission_manager')
     arm_velocity_scaling = LaunchConfiguration('arm_velocity_scaling')
     arm_acceleration_scaling = LaunchConfiguration('arm_acceleration_scaling')
@@ -183,14 +182,12 @@ def generate_launch_description():
     auto_start_mission = LaunchConfiguration('auto_start_mission')
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
     mock_target_config = LaunchConfiguration('mock_target_config')
-    replay_target_config = LaunchConfiguration('replay_target_config')
 
     # 获取各个功能包的共享目录路径
     description_share = get_package_share_directory('wvcsc_description')
     simulation_share = get_package_share_directory('wvcsc_simulation')
     arm_task_share = get_package_share_directory('wvcsc_arm_task')
     mission_share = get_package_share_directory('wvcsc_mission_manager')
-    uav_share = get_package_share_directory('wvcsc_uav_gateway')
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
     visual_servo_share = get_package_share_directory('wvcsc_visual_servo')
     spray_share = get_package_share_directory('wvcsc_arm_task')
@@ -553,7 +550,7 @@ def generate_launch_description():
         condition=IfCondition(use_nav2),
     )
 
-    # ------------------------- 10. 任务管理与感知 (Mock UAV, YOLO) -------------------------
+    # ------------------------- 10. 任务管理与感知 (Mock YAML, YOLO) -------------------------
     mission_manager = Node(
         package='wvcsc_mission_manager', executable='mission_manager',
         parameters=[
@@ -580,25 +577,15 @@ def generate_launch_description():
         }.items(),
         condition=IfCondition(use_nav2_qt),
     )
-    mock_uav = Node(
-        package='wvcsc_uav_gateway', executable='mock_uav_gateway',
-        parameters=[{
-            'config_file': mock_target_config,
-            'use_sim_time': True,
-        }],
+    mock_target_loader = Node(
+        package='wvcsc_mission_manager', executable='mock_target_loader',
+        arguments=[
+            '--file', mock_target_config,
+            '--service-timeout-sec', '30.0',
+        ],
         condition=IfCondition(PythonExpression([
-            "'", use_mock_uav, "' == 'true' and '",
-            use_nav2_qt, "' != 'true'",
-        ])), output='screen',
-    )
-    replay_uav = Node(
-        package='wvcsc_uav_gateway', executable='replay_uav_gateway',
-        parameters=[{
-            'config_file': replay_target_config,
-            'use_sim_time': True,
-        }],
-        condition=IfCondition(PythonExpression([
-            "'", use_replay_uav, "' == 'true' and '",
+            "'", use_mock_targets, "' == 'true' and '",
+            use_mission_manager, "' == 'true' and '",
             use_nav2_qt, "' != 'true'",
         ])), output='screen',
     )
@@ -645,7 +632,7 @@ def generate_launch_description():
             TimerAction(period=3.0, actions=[nav2]),    # 3.0秒后启动导航栈
             TimerAction(
                 period=6.0,
-                actions=[mission_manager, mock_uav, replay_uav, nav2_qt], # 6.0秒后启动任务调度和无人机Mock
+                actions=[mission_manager, mock_target_loader, nav2_qt],
             ),
         ],
     ))
@@ -660,8 +647,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_nav2_qt', default_value='false'),
         DeclareLaunchArgument('enable_arm_control', default_value='true'),
         DeclareLaunchArgument('enable_ackermann', default_value='true'),
-        DeclareLaunchArgument('use_mock_uav', default_value='true'),
-        DeclareLaunchArgument('use_replay_uav', default_value='false'),
+        DeclareLaunchArgument('use_mock_targets', default_value='true'),
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.40'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.50'),
@@ -675,10 +661,8 @@ def generate_launch_description():
         DeclareLaunchArgument('return_home_after_finish', default_value='false'),
         DeclareLaunchArgument(
             'mock_target_config',
-            default_value=os.path.join(uav_share, 'config', 'mock_targets.yaml')),
-        DeclareLaunchArgument(
-            'replay_target_config',
-            default_value=os.path.join(uav_share, 'config', 'replay_targets.yaml')),
+            default_value=os.path.join(
+                simulation_share, 'config', 'mock_targets.yaml')),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),
         # 前置安全检查 (若检查失败，直接终止 Launch 启动)

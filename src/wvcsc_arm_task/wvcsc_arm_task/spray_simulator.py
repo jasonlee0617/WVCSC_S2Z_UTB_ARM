@@ -4,9 +4,9 @@
 
 职责：
 1. 实现 `/spray/execute` Action 服务，模拟喷洒泵/阀的行为。
-2. 使用 `SprayInterlock` 实现线程安全的喷洒并发控制与紧急停止。
+2. 使用 `SprayInterlock` 实现线程安全的喷洒并发控制与机械臂停止联锁。
 3. 在喷洒期间通过 Feedback 实时反馈进度。
-4. 支持 Action 取消请求 (Cancel) 和全局急停响应 (Emergency Stop)，确保状态机安全。
+4. 支持 Action 取消请求和 `/motion_control/locked` 立即关喷洒。
 """
 
 import time
@@ -29,7 +29,7 @@ class SpraySimulator(Node):
         # 1. 声明所有 ROS2 参数，为后期替换真机驱动提供 YAML 配置接口
         self.declare_parameter('action_name', '/spray/execute')
         self.declare_parameter('active_topic', '/spray/simulated_active')
-        self.declare_parameter('emergency_stop_topic', '/safety/emergency_stop')
+        self.declare_parameter('motion_locked_topic', '/motion_control/locked')
         self.declare_parameter('min_duration', 0.2)
         self.declare_parameter('max_duration', 10.0)
         
@@ -40,8 +40,7 @@ class SpraySimulator(Node):
         )
 
         # 3. 设置 Latch (持久化) QoS 配置。
-        # 使用 `TRANSIENT_LOCAL` 确保下游节点（如 Web 页面）在任何时间订阅，
-        # 都能立刻获取到当前活跃状态或急停状态，而非丢失历史数据。
+        # 使用 `TRANSIENT_LOCAL` 确保下游节点能立刻得到当前活跃或锁定状态。
         latched = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -52,12 +51,11 @@ class SpraySimulator(Node):
         self._active_pub = self.create_publisher(
             Bool, str(self.get_parameter('active_topic').value), latched)
             
-        # 5. 订阅全局安全急停话题
-        # 当收到来自上位机或底层安全板卡的急停信号时，立刻终止所有喷洒动作。
+        # 5. 订阅机械臂运动锁。stop/reset 时立即关闭喷洒。
         self.create_subscription(
             Bool,
-            str(self.get_parameter('emergency_stop_topic').value),
-            self._on_emergency_stop,
+            str(self.get_parameter('motion_locked_topic').value),
+            self._on_motion_locked,
             latched,
         )
         
@@ -87,9 +85,9 @@ class SpraySimulator(Node):
             self.get_logger().warn(f'[SPRAY] rejected goal: {error}')
             return GoalResponse.REJECT
             
-        # 尝试锁住喷洒控制权；如果被其他目标占用或处于急停状态，则拒绝请求
+        # 尝试锁住喷洒控制权；如果被其他目标占用或机械臂锁定，则拒绝请求。
         if not self._interlock.claim():
-            self.get_logger().warn('[SPRAY] rejected goal: busy or emergency stopped')
+            self.get_logger().warn('[SPRAY] rejected goal: busy or motion locked')
             return GoalResponse.REJECT
             
         return GoalResponse.ACCEPT
@@ -120,10 +118,10 @@ class SpraySimulator(Node):
             while True:
                 elapsed = time.monotonic() - started
                 
-                # [1] 安全检查：检测是否触发了全局急停
-                if self._interlock.emergency_stopped:
+                # [1] 机械臂 stop/reset 时立即关闭喷洒。
+                if self._interlock.motion_locked:
                     result.error_code = Spray.Result.EMERGENCY_STOPPED
-                    result.message = 'spray stopped by emergency interlock'
+                    result.message = 'spray stopped because motion is locked'
                     goal_handle.abort()
                     break
                 
@@ -155,17 +153,16 @@ class SpraySimulator(Node):
                 time.sleep(min(0.02, duration - elapsed))
                 
         finally:
-            # [5] 结束善后：无论成功/失败/取消/急停，都必须关泵并释放互锁
+            # [5] 结束善后：无论成功/失败/取消/锁定，都必须关泵并释放互锁。
             self._set_active(False)
             self._interlock.release()
             
         result.actual_duration = time.monotonic() - started
         return result
 
-    def _on_emergency_stop(self, message):
-        """响应全局急停信号，更新互锁的状态。"""
-        self._interlock.set_emergency_stop(message.data)
-        # 如果触发急停，立刻将活跃状态标志位设为 False（虽然泵已经停，但同步状态给任务管理器）
+    def _on_motion_locked(self, message):
+        """响应机械臂 stop/reset 锁，立即停止当前喷洒。"""
+        self._interlock.set_motion_locked(message.data)
         if message.data:
             self._set_active(False)
 
@@ -177,9 +174,9 @@ class SpraySimulator(Node):
 
     def force_off(self):
         """
-        强制关闭安全互锁与发布器（用于节点销毁前的深度清理）。
+        强制关闭喷洒互锁与发布器（用于节点销毁前的深度清理）。
         """
-        self._interlock.set_emergency_stop(True)
+        self._interlock.set_motion_locked(True)
         if self.context.ok():
             self._set_active(False)
 

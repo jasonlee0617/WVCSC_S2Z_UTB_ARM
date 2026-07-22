@@ -85,7 +85,7 @@ ros2 launch lslidar_driver lslidar_four_launch.py
     publish_scan: true       #是否发布 laserscan话题
     scan_num: 15              #laserscan线号
     coordinate_opt: false     #点云0度角对应方向  true: x轴正方向
-    #pcap: /home/ls/work/xxx.pcap   #pcap包路径，加载pcap包时打开此注释
+    #pcap: $HOME/work/xxx.pcap   #pcap包路径，加载pcap包时打开此注释
 ~~~
 
 ### 组播模式：
@@ -116,7 +116,7 @@ ros2 launch lslidar_driver lslidar_four_launch.py
 
   ~~~shell
   #取消注释
-  pcap: /home/chris/Documents/leishen/1212bytes_c32/gps.pcap                        #pcap包路径，加载pcap包时打开此注释
+  pcap: $HOME/Documents/leishen/1212bytes_c32/gps.pcap                        #pcap包路径，加载pcap包时打开此注释
   ~~~
 
 

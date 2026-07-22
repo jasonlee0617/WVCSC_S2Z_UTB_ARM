@@ -1,21 +1,21 @@
 # WVCSC_S2Z_UTB_ARM 项目分析
 
-> 更新日期：2026-07-20
+> 更新日期：2026-07-22
 > 详细架构：[WORKSPACE_ARCHITECTURE.md](WORKSPACE_ARCHITECTURE.md)
 > 仿真执行手册：[WVCSC_S2Z_UTB_ARM_Codex_仿真任务闭环实施方案.md](WVCSC_S2Z_UTB_ARM_Codex_仿真任务闭环实施方案.md)
 
 ## 1. 项目定位
 
-智能农林病虫害空地协同防治：无人机提供疑似病树坐标，阿克曼小车自主停靠，Alicia-M 六轴机械臂利用 C10 RGB 相机识别病果并通过 IBVS 图像伺服逐个对准后喷洒。
+智能农林病虫害防治：通过 RViz/遥控采点获得实机玉米树坐标，阿克曼小车自主停靠，Alicia-M 六轴机械臂利用 C10 RGB 相机识别病害目标并通过 IBVS 图像伺服逐个对准后喷洒。
 
 **仿真闭环已 100% 完成。下一步转入实机部署。**
 
 ## 2. 当前闭环
 
 ```text
-Mock/Replay UAV
-  → DiseaseTreeArray
-  → Mission Manager 生成 0.2 m 横向停靠位姿
+仿真 mock_targets.yaml / 实机 corn_site.yaml
+  → /mission/load_manual
+  → Mission Manager 生成或读取停靠位姿
   → Nav2 NavigateToPose
   → /odom 连续停稳 (1.0s)
   → Arm ExecuteSpray
@@ -36,10 +36,10 @@ Mock/Replay UAV
 | 对准精度 | ≤ 2 px/轴 | 通过 |
 | 对准中位时间 | 1.4 s | 通过 |
 | 连续三轮 | 待验收 | 未完成 |
-| 构建 | 24 包通过 | 通过 |
-| 测试 | 196 tests, 0 failures | 通过 |
+| 构建 | 相关 29 包通过 | 通过 |
+| 测试 | 相关回归 199 项通过 | 通过 |
 
-## 3. 包清单（24 个）
+## 3. 核心包清单
 
 | 层 | 包 | 语言 | 说明 |
 |----|-----|------|------|
@@ -50,7 +50,7 @@ Mock/Replay UAV
 | 复合模型 | `wvcsc_description` | C++ | 统一 XACRO（底盘+Alicia+C10+喷嘴）|
 | 仿真 | `wvcsc_simulation` | C++ | Gazebo 世界生成、AckermannSim、数据采集 |
 | 接口 | `wvcsc_interfaces` | C++ | 自定义 action/srv/msg |
-| 任务编排 | `wvcsc_mission_manager`, `wvcsc_uav_gateway` | Python | 使命管理 + Mock/Replay UAV |
+| 任务编排 | `wvcsc_mission_manager` | Python | YAML/RViz任务加载与使命管理 |
 | 感知 | `wvcsc_rgb_vision`, `wvcsc_c10_camera` | Python | YOLOv8n 两级推理 + C10 驱动 |
 | 执行 | `wvcsc_arm_task`, `wvcsc_visual_servo` | Python | 喷洒状态机 + IBVS 伺服 |
 
@@ -58,6 +58,7 @@ Mock/Replay UAV
 - 删除 `wvcsc_web_ui`（与 Nav2 Qt 重叠）—— 26→25 包
 - 删除 7 个无调用方的独立 launch
 - `wvcsc_simulation/data_acquisition/` 解耦离线数据采集与运行时代码
+- 删除 `wvcsc_safety` 与 `wvcsc_uav_gateway`，统一为 YAML/RViz 任务加载
 - `alicia_m_grasp_6d` 移入 experimental/
 - `wvcsc_spray_controller` 保留但默认不构建（真机泵阀接入时启用）
 

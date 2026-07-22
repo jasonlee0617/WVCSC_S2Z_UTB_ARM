@@ -266,6 +266,9 @@ class Nav2QtNode(Node):
             target.docking_pose = copy_pose(point.pose)
             target.spray_side = point.spray_side
             target.spray_duration = float(spray_duration)
+            target.confidence = 1.0
+            target.evidence_uri = 'manual://rviz'
+            target.compute_docking_pose = False
             request.targets.append(target)
         return request
 

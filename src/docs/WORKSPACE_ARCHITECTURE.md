@@ -1,15 +1,15 @@
 # WVCSC_S2Z_UTB_ARM 工作区架构
 
-> 更新日期：2026-07-18
+> 更新日期：2026-07-22
 > 平台：ROS 2 Humble + Gazebo Classic 11 + Nav2 + MoveIt 2
 > 主入口：`ros2 launch wvcsc_simulation system_sim.launch.py`
 
 ## 1. 系统目标
 
-本工作区实现智能农林空地协同作业的核心闭环：
+本工作区实现智能农林地面作业的核心闭环：
 
 ```text
-无人机/Mock UAV 病树坐标
+仿真 Mock YAML、实机站点 YAML 或 RViz 病树坐标
   → 小车生成停靠位姿并由 Nav2 导航
   → /odom 连续停稳确认
   → Alicia-M 观察果树
@@ -21,7 +21,7 @@
 
 仿真与真机共用 ROS 接口。硬件驱动、真实相机和真实喷头通过稳定边界替换，不侵入任务状态机。
 
-## 2. 25 个 ROS 包
+## 2. 核心 ROS 包
 
 ### 2.1 上游与硬件基础包
 
@@ -54,14 +54,13 @@
 |---|---|---|
 | `wvcsc_interfaces` | 项目消息、服务与 Action | 所有项目包共享 |
 | `wvcsc_description` | 小车、机械臂、C10 的统一 Xacro | 仿真/真机复用 |
-| `wvcsc_uav_gateway` | Mock/Replay 无人机任务源 | `/uav/disease_trees` |
-| `wvcsc_mission_manager` | 导航、停稳、机械臂编排 | `/mission/*` |
+| `wvcsc_mission_manager` | YAML/RViz任务、导航、停稳、机械臂编排 | `/mission/*` |
 | `wvcsc_arm_task` | 观察、重心、逐果作业、HOME | `/arm/execute_spray` |
 | `wvcsc_rgb_vision` | 两级 YOLO、跟踪、目标锁定 | `/vision/*` |
 | `wvcsc_visual_servo` | 30 Hz IBVS + 100 Hz Servo 图像平面 XY 控制 | `/vision/align_target` |
 | `wvcsc_spray_controller` | 可取消的喷洒执行器边界 | `/spray/execute` |
 | `wvcsc_c10_camera` | C10 真机采集、诊断、断线恢复 | 标准 Image/CameraInfo |
-| `wvcsc_simulation` | Gazebo 果园、Nav2 仿真、统一 launch、数据采集 | `system_sim.launch.py` |
+| `wvcsc_simulation` | Gazebo 果园、Nav2 仿真、Mock任务、统一 launch、数据采集 | `system_sim.launch.py` |
 
 `wvcsc_web_ui` 已删除。任务操作保留 ROS 服务、Nav2 Qt 和各节点 `ros2 run` 入口。
 
@@ -69,8 +68,8 @@
 
 ```text
 任务输入层
-  wvcsc_uav_gateway
-        │ DiseaseTreeArray
+  仿真 mock_targets.yaml / 实机 corn_site.yaml / RViz
+        │ LoadManualMission
         ▼
 任务编排层
   wvcsc_mission_manager ── NavigateToPose ── Nav2
@@ -91,7 +90,7 @@
 职责约束：
 
 - Mission Manager 不直接控制关节、相机或喷头。
-- UAV Gateway 不生成导航位姿，只发布病树信息。
+- MissionManager 使用唯一的 `docking_pose()` 根据仿真树提示计算停靠位姿；实机站点和 RViz 可提供实测停靠位姿。
 - RGB Vision 不发机械臂命令，只发布检测和目标。
 - Visual Servo 不负责长轨迹规划，只输出受限微调命令。
 - Spray Controller 独立保留，便于将仿真定时器替换为泵阀驱动。
@@ -102,7 +101,7 @@
 
 | 名称 | 类型 | 用途 |
 |---|---|---|
-| `/uav/disease_trees` | `DiseaseTreeArray` | 病树任务列表 |
+| `/mission/load_manual` | `LoadManualMission` | 加载仿真 Mock、实测站点或 RViz 任务 |
 | `/mission/status` | `MissionStatus` | 任务状态与统计 |
 | `/mission/plan` | `MissionPlan` | 停靠与任务计划 |
 | `/mission/start` 等 | `std_srvs/Trigger` | start/pause/resume/cancel/reset |

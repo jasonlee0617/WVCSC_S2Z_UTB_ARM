@@ -1,6 +1,6 @@
 # motion_control.py
 """
-Alicia-M 机械臂运动控制的安全仲裁节点 (Motion Control Node)。
+Alicia-M 机械臂运动锁控制节点 (Motion Control Node)。
 
 核心功能：
 1. 接收并执行系统级的运动控制指令：`stop`(急停), `reset`(复位至HOME), `resume`(解除锁定)。
@@ -80,23 +80,12 @@ class MotionControlNode(Node):
         self._reset_abort = threading.Event()
 
         # 4. 订阅运动控制命令话题
-        # 接收来自 Web 界面、遥控器或系统急停模块的强制命令。
+        # 接收来自 Web 界面、遥控器或键盘的机械臂控制命令。
         self.command_sub = self.create_subscription(
             String,
             '/motion_control/command',
             self._on_command,
             10,
-            callback_group=self._callback_group,
-        )
-        self._estop_sub = self.create_subscription(
-            Bool,
-            '/safety/emergency_stop',
-            self._on_emergency_stop,
-            QoSProfile(
-                depth=1,
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            ),
             callback_group=self._callback_group,
         )
 
@@ -111,7 +100,7 @@ class MotionControlNode(Node):
         self._locked_pub.publish(message)
 
     def _publish_state(self):
-        """Publish a machine-readable recovery state for the safety coordinator."""
+        """Publish a machine-readable arm recovery state."""
         self._state_pub.publish(String(data=self._motion_state))
 
     def _set_motion_state(self, state):
@@ -132,18 +121,13 @@ class MotionControlNode(Node):
             self.get_logger().warn(f'Ignoring unknown motion command: {message.data!r}')
             return
 
-        if self.state.hard_stopped and command != 'stop':
-            self.get_logger().error(
-                f'Physical emergency stop active; rejected {command!r}')
-            return
-
         if command == 'stop':
             # --------- 紧急停止指令 ---------
             # 同时终止可能正在后台执行的 reset/HOME；否则 cancel 结束当前
             # 轨迹后，复位线程仍可能继续下发下一段 HOME 运动。
             self._reset_abort.set()
             self.state.stop()          # 状态机标记为锁定
-            self._publish_locked()     # 广播锁定信号，阻止其他任务继续下发 /cmd_vel 或 MoveIt 动作
+            self._publish_locked()     # 广播锁定信号，阻止新的机械臂与喷洒动作
             self.arm.cancel()          # 立刻取消当前底层已发送的 MoveIt 轨迹
             self._set_motion_state(STOPPED_LOCKED)
             self.get_logger().warn('Motion stopped; new goals are locked')
@@ -182,22 +166,6 @@ class MotionControlNode(Node):
             self.get_logger().info('Motion lock released')
         else:
             self.get_logger().warn('Cannot resume while reset is in progress')
-
-    def _on_emergency_stop(self, message):
-        """Enforce the physical E-stop at the final arm command boundary."""
-        active = bool(message.data)
-        self.state.set_hard_stop(active)
-        if not active:
-            self._publish_locked()
-            self.get_logger().warn(
-                'Physical emergency stop cleared; motion remains locked')
-            return
-        self._reset_abort.set()
-        self.arm.cancel()
-        self._publish_locked()
-        self._set_motion_state(STOPPED_LOCKED)
-        self.get_logger().error(
-            'Physical emergency stop active; reset/HOME/resume are inhibited')
 
     def _reset(self):
         """

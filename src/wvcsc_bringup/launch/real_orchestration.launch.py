@@ -1,4 +1,4 @@
-"""Safety, real perception, arm task and mission orchestration."""
+"""Real perception, arm task and measured-site mission orchestration."""
 
 import os
 
@@ -6,8 +6,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import (
-    Command, FindExecutable, LaunchConfiguration, PythonExpression)
+from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -127,28 +126,13 @@ def generate_launch_description():
             {
                 'use_sim_time': False,
                 'auto_start': False,
-                'require_autonomy_enabled': False,
                 'require_docking_quality': True,
             },
         ],
         remappings=[('/odom', '/ekf_odom')],
         output='screen')
-    uav_gateway = Node(
-        package='wvcsc_uav_gateway', executable='mock_uav_gateway',
-        condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('mission_source'), "' == 'uav'",
-        ])),
-        parameters=[{
-            'config_file': os.path.join(
-                real_config, 'uav_detection_targets.yaml'),
-            'use_sim_time': False,
-        }],
-        output='screen')
     measured_loader = Node(
         package='wvcsc_bringup', executable='load_site_mission.py',
-        condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('mission_source'), "' == 'measured'",
-        ])),
         arguments=[
             '--file', LaunchConfiguration('mission_file'),
             '--map', LaunchConfiguration('map'),
@@ -165,7 +149,6 @@ def generate_launch_description():
             default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
         DeclareLaunchArgument('use_keyboard', default_value='false'),
-        DeclareLaunchArgument('mission_source', default_value='measured'),
         DeclareLaunchArgument(
             'mission_file',
             default_value=os.path.expanduser(
@@ -192,7 +175,6 @@ def generate_launch_description():
         spray_task,
         spray_simulator,
         mission_manager,
-        uav_gateway,
         measured_loader,
         keyboard,
     ])

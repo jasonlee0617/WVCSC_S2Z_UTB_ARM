@@ -162,7 +162,6 @@ class AutoCalibrationCollector(Node):
         self._session_invalid = threading.Event()
         self._auto_start_pending = bool(self.get_parameter('auto_start').value)
         self._external_locked = False
-        self._emergency_stop = False
         self._joint_positions = None
         self._camera_info = None
         self._observations = deque(maxlen=max(
@@ -204,9 +203,6 @@ class AutoCalibrationCollector(Node):
         self.create_subscription(
             String, str(self.get_parameter('motion_state_topic').value),
             self._on_motion_state, latched, callback_group=self._group)
-        self.create_subscription(
-            Bool, str(self.get_parameter('emergency_stop_topic').value),
-            self._on_emergency_stop, latched, callback_group=self._group)
 
         # 日常标定仍坚持由独立终端的 s/Enter 启动，避免机械臂在操作者
         # 未确认工作区安全时自行运动。``auto_start`` 只用于无 TTY 的
@@ -220,7 +216,7 @@ class AutoCalibrationCollector(Node):
             self._keyboard_thread.start()
         self.get_logger().info(
             '[CALIBRATION] Alicia-M collector ready: s/Enter=start, q=cancel. '
-            'Use motion_control_keyboard for SPACE/h/r/x safety control.')
+            'Use motion_control_keyboard for SPACE/h/r arm control.')
 
     def _declare_parameters(self):
         values = {
@@ -237,7 +233,6 @@ class AutoCalibrationCollector(Node):
             'joint_state_topic': '/joint_states',
             'motion_locked_topic': '/motion_control/locked',
             'motion_state_topic': '/motion_control/state',
-            'emergency_stop_topic': '/safety/emergency_stop',
             'minimum_samples': 15,
             'minimum_solution_samples': 14,
             'target_samples': 18,
@@ -467,7 +462,7 @@ class AutoCalibrationCollector(Node):
         self._state.stop()
         self._arm.cancel()
         self.get_logger().warn(
-            f'[CALIBRATION] session invalidated by safety state: {reason}')
+            f'[CALIBRATION] session invalidated by motion state: {reason}')
 
     def _on_motion_locked(self, message):
         self._external_locked = bool(message.data)
@@ -480,16 +475,10 @@ class AutoCalibrationCollector(Node):
         state = str(message.data).strip().upper()
         if state in {
                 'STOPPED', 'STOPPED_LOCKED', 'RESETTING', 'RESET_FAILED',
-                'HOME_LOCKED', 'HARD_STOPPED'}:
+                'HOME_LOCKED'}:
             self._invalidate_session(state)
-        elif state in {'NORMAL', 'RUNNING', 'READY'} and not self._emergency_stop:
+        elif state in {'NORMAL', 'RUNNING', 'READY'}:
             self._state.resume()
-
-    def _on_emergency_stop(self, message):
-        self._emergency_stop = bool(message.data)
-        self._state.set_hard_stop(self._emergency_stop)
-        if self._emergency_stop:
-            self._invalidate_session('physical emergency stop')
 
     def _keyboard_loop(self):
         if not sys.stdin.isatty():
@@ -524,7 +513,7 @@ class AutoCalibrationCollector(Node):
             if self._session_thread is not None and self._session_thread.is_alive():
                 self.get_logger().warn('[CALIBRATION] a collection session is active')
                 return
-            if self._external_locked or self._emergency_stop or self._state.locked:
+            if self._external_locked or self._state.locked:
                 self.get_logger().error(
                     '[CALIBRATION] motion is locked; complete h -> HOME_LOCKED -> r first')
                 return
@@ -562,7 +551,7 @@ class AutoCalibrationCollector(Node):
             self.get_logger().error(f'[CALIBRATION] session failed: {error}')
         finally:
             if (seed is not None and not self._session_invalid.is_set()
-                    and not self._state.locked and not self._emergency_stop):
+                    and not self._state.locked):
                 self.get_logger().info('[CALIBRATION] returning to session start joints')
                 if not self._arm.move_joints(seed):
                     self.get_logger().error(

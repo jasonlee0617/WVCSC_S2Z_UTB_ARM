@@ -1,4 +1,4 @@
-公司电脑：
+#公司电脑：
 --extra-index-url https://download.pytorch.org/whl/cu130
 torch==2.13.0+cu130
 torchvision==0.28.0+cu130
@@ -7,10 +7,62 @@ opencv-python==4.11.0.86
 ultralytics==8.3.217
 
 
-实验室电脑：
---extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.5.1+cu124
-torchvision==0.20.1+cu124
-numpy==1.26.4
-opencv-python==4.11.0.86
-ultralytics==8.3.217
+# 实验室电脑：
+# --extra-index-url https://download.pytorch.org/whl/cu124
+# torch==2.5.1+cu124
+# torchvision==0.20.1+cu124
+# numpy==1.26.4
+# opencv-python==4.11.0.86
+# ultralytics==8.3.217
+
+# ---------------------------------------------------------------------------
+# 实机工控机部署指南（不参与 pip install，仅作为参考注释）
+# ---------------------------------------------------------------------------
+#
+# ── 部署方式：隔离虚拟环境（推荐，与本机仿真环境一致） ──
+#   python3 -m venv --system-site-packages ~/venvs/wvcsc_yolo_ros
+#   ~/venvs/wvcsc_yolo_ros/bin/pip install -r requirements-yolo-runtime.txt
+#
+#   --system-site-packages 使 venv 能访问 ROS2 系统包：
+#     /opt/ros/humble/lib/python3.10/site-packages/ (cv_bridge, rclpy, ...)
+#
+# ── 验证 YOLO 运行时（仿真端已集成到 system_sim.launch.py 的 check_yolo_runtime） ──
+#   ~/venvs/wvcsc_yolo_ros/bin/python -c "import cv_bridge, rclpy, torch, torchvision, ultralytics; print(torch.__version__, torchvision.__version__, ultralytics.__version__)"
+#
+# ── 查看工控机 ROS2 系统级 Python 依赖 ──
+#   apt list --installed 2>/dev/null | grep -E "ros-humble-cv-bridge|ros-humble-vision-msgs|ros-humble-image-transport"
+#   dpkg -l | grep -E "python3-opencv|python3-numpy|python3-scipy|python3-yaml"
+#
+# ── 手眼标定 (alicia_m_calibration) 系统级依赖 ──
+#   # 本工作区使用 easy_handeye2 + ros2_aruco（位于 third_party/）
+#   # 工控机需确保以下 ROS2 包已安装：
+#   apt list --installed 2>/dev/null | grep -E "easy-handeye2|ros2-aruco"
+#   # 系统 Python 依赖（通过 --system-site-packages 在 venv 中可用）：
+#   python3 -c "import cv2, numpy, scipy, yaml; print('hand-eye deps OK')"
+#
+# ── 视觉伺服 (wvcsc_visual_servo) 系统级依赖 ──
+#   apt list --installed 2>/dev/null | grep -E "ros-humble-moveit-servo|ros-humble-moveit-ros-visualization"
+#
+# ── 迁移清单（工控机上需逐一确认） ──
+#   1. rosdep install --from-paths ~/WVCSC_S2Z_UTB_ARM/src \
+#        --ignore-packages-from-source \
+#        --rosdistro humble -y
+#      （安装所有 ROS2 包的系统级依赖，跳过工作区自有包）
+#
+#   2. 创建 YOLO venv 并安装 PyTorch/ultralytics：
+#      python3 -m venv --system-site-packages ~/venvs/wvcsc_yolo_ros
+#      ~/venvs/wvcsc_yolo_ros/bin/pip install -r requirements-yolo-runtime.txt
+#
+#   3. 确认 CV/Camera 系统库：
+#      apt list --installed 2>/dev/null | grep -E "v4l-utils|libv4l"
+#
+#   4. 验证 C10 相机：
+#      v4l2-ctl --list-devices
+#      v4l2-ctl -d /dev/v4l/by-id/usb-Synria_C10-video-index0 \
+#        --list-formats-ext
+#
+#   5. 验证串口设备（机械臂）：
+#      ls -la /dev/ttyACM* /dev/ttyUSB*
+#
+#   6. 验证 CAN 设备（底盘）：
+#      ip link show | grep -i can

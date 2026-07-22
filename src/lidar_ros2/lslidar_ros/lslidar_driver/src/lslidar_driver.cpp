@@ -18,6 +18,7 @@
 
 #include "lslidar_driver/lslidar_driver.h"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
+#include <cstdlib>
 #include <functional>
 
 #include <memory>
@@ -88,6 +89,16 @@ namespace lslidar_driver {
         this->declare_parameter<bool>("coordinate_opt", false);
 
         this->get_parameter("pcap", dump_file);
+        // ROS parameter YAML does not expand shell variables.  Accept the
+        // portable forms used by the workspace documentation explicitly.
+        if (const char *home = std::getenv("HOME")) {
+            const std::string home_path(home);
+            if (dump_file.rfind("$HOME/", 0) == 0) {
+                dump_file = home_path + dump_file.substr(6);
+            } else if (dump_file.rfind("${HOME}/", 0) == 0) {
+                dump_file = home_path + dump_file.substr(8);
+            }
+        }
         this->get_parameter("packet_rate", packet_rate);
         this->get_parameter("device_ip", lidar_ip_string);
         this->get_parameter("msop_port", msop_udp_port);

@@ -49,7 +49,6 @@
   <exec_depend>wvcsc_description</exec_depend>
   <exec_depend>wvcsc_mission_manager</exec_depend>
   <exec_depend>wvcsc_rgb_vision</exec_depend>
-  <exec_depend>wvcsc_uav_gateway</exec_depend>
   <exec_depend>wvcsc_visual_servo</exec_depend>
   <exec_depend>xacro</exec_depend>
 

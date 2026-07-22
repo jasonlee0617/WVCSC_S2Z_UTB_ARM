@@ -26,7 +26,6 @@ auto_calibration_collector:
     joint_state_topic: /joint_states
     motion_locked_topic: /motion_control/locked
     motion_state_topic: /motion_control/state
-    emergency_stop_topic: /safety/emergency_stop
 
     minimum_samples: 15
     minimum_solution_samples: 14

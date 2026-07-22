@@ -28,9 +28,6 @@ class MotionControlState:
         self._locked = False
         # 复位中标志位：`True` 表示后台正处于执行 `reset` 回到 HOME 的物理运动流程中
         self._reset_in_progress = False
-        # 物理急停属于最高优先级联锁；激活时即使 `allow_locked=True`
-        # 也不得执行 HOME 等恢复运动。
-        self._hard_stopped = False
 
     @property
     def locked(self):
@@ -43,19 +40,6 @@ class MotionControlState:
         """返回当前是否正在执行回到 HOME 的复位动作。"""
         with self._mutex:
             return self._reset_in_progress
-
-    @property
-    def hard_stopped(self):
-        """返回物理急停是否仍在阻断一切机械臂运动。"""
-        with self._mutex:
-            return self._hard_stopped
-
-    def set_hard_stop(self, active):
-        """设置物理急停联锁；解除急停不会自动解除普通运动锁。"""
-        with self._mutex:
-            self._hard_stopped = bool(active)
-            if self._hard_stopped:
-                self._locked = True
 
     def stop(self):
         """
@@ -77,7 +61,7 @@ class MotionControlState:
         with self._mutex:
             # 如果系统已经被锁定，或者已经有另一个重置线程在执行，则不允许发起新的复位
             self._locked = True
-            if self._hard_stopped or self._reset_in_progress:
+            if self._reset_in_progress:
                 return False
             self._reset_in_progress = True
             return True
@@ -101,7 +85,7 @@ class MotionControlState:
         安全约束：只有在复位动作完全结束（`_reset_in_progress = False`）后，才能恢复。
         """
         with self._mutex:
-            if self._hard_stopped or self._reset_in_progress:
+            if self._reset_in_progress:
                 return False
             self._locked = False
             return True

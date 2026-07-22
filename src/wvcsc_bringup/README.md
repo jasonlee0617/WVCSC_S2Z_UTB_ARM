@@ -44,7 +44,7 @@ ros2 launch wvcsc_bringup real_navigation.launch.py \
 Nav2 参数和 `tf_buffer_size`；硬件子 RViz 被关闭，只启动复制到
 `wvcsc_bringup/rviz/real_navigation.rviz` 的导航 RViz。完整任务才加载
 `real_sensors.launch.py` 和 C10。Nav2 速度平滑器的最终输出直接发布到
-`/cmd_vel`；不启动 `wvcsc_safety` 速度门控。
+`/cmd_vel`；底盘紧急停止由硬件负责。
 
 当前实车使用 Yesense IMU。首次部署或更换工控机时，先安装
 `/dev/yesense_IMU` 稳定串口别名：
@@ -115,7 +115,6 @@ ros2 run wvcsc_bringup capture_site_pose -- \
 
 ```bash
 ros2 launch wvcsc_bringup real_system_mission.launch.py \
-  mission_source:=measured \
   mission_file:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml" \
   map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
 ```
@@ -143,26 +142,28 @@ ros2 service call /mission/start std_srvs/srv/Trigger "{}"
 ```
 
 实测任务加载后不会自动执行。先检查`/mission/plan`中的树根坐标和停靠位姿，
-再调用 `/mission/start`。需要兼容原 UAV/Mock 路径时使用
-`mission_source:=uav`。
+再调用 `/mission/start`。
 
 ## 5. 停止与恢复
 
-当前实机链路按项目要求绕过 `wvcsc_safety`。停止任务时先取消任务或终止
-launch，确认 `/cmd_vel` 已归零，再使用机械臂控制命令：
+停止任务时先取消任务或终止 launch，确认 `/cmd_vel` 已归零，再使用机械臂
+控制命令：
 
 ```bash
 ros2 service call /mission/cancel std_srvs/srv/Trigger "{}"
 ros2 topic pub --once /motion_control/command \
   std_msgs/msg/String "{data: stop}"
 ros2 topic pub --once /motion_control/command \
+  std_msgs/msg/String "{data: reset}"
+# 等待 /motion_control/state 显示 HOME_LOCKED 后再恢复。
+ros2 topic pub --once /motion_control/command \
   std_msgs/msg/String "{data: resume}"
 ros2 service call /mission/reset std_srvs/srv/Trigger "{}"
 ros2 service call /mission/start std_srvs/srv/Trigger "{}"
 ```
 
-绕过软件安全门后，不再有 `/safety/controlled_abort`、自动持续零速或软件急停
-兜底。实车运行必须保留可触达的底盘物理急停，并由操作员确认车辆完全停止。
+`motion_control_keyboard` 只提供空格停止、`h` 回 HOME、`r` 恢复；不会自动
+取消底盘导航。实车运行必须保留可触达的底盘物理急停，并由操作员确认车辆完全停止。
 
 ## 6. 标定
 

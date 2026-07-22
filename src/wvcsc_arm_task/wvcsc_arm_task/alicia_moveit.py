@@ -295,8 +295,7 @@ class AliciaMoveIt:
     def _allowed(self, epoch, allow_locked):
         """判断当前状态是否允许执行运动指令（安全锁与版本号双重检查）。"""
         return (
-            not self.state.hard_stopped
-            and (allow_locked or not self.state.locked)
+            (allow_locked or not self.state.locked)
             and epoch == self._epoch()
         )
 

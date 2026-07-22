@@ -1,8 +1,8 @@
 # core.py
 """
-喷洒执行器的核心安全互锁模块 (Spray Interlock)。
+喷洒执行器的核心运动锁互锁模块 (Spray Interlock)。
 
-本模块定义了喷洒泵/阀控制器的状态锁（State Lock）和紧急停止仲裁。
+本模块定义了喷洒泵/阀控制器的状态锁（State Lock）和机械臂运动锁仲裁。
 它不直接执行硬件动作，而是作为 Spray Action Server (spray_simulator.py)
 和未来真机驱动的一个纯逻辑状态层，保证在并发环境下，喷洒动作具有明确的
 独占性、安全性和防误触机制。
@@ -16,12 +16,12 @@ import threading
 
 class SprayInterlock:
     """
-    喷洒安全互锁类。
+    喷洒运动锁互锁类。
 
     职责：
     1. 验证喷洒目标的参数合法性（如时长是否在范围内）。
     2. 确保同一时间只有一个喷洒目标占据控制权（独占锁）。
-    3. 响应系统层面的急停信号，强制切断喷洒执行权限。
+    3. 响应 `/motion_control/locked`，强制切断喷洒执行权限。
     """
 
     def __init__(self, min_duration=0.2, max_duration=10.0):
@@ -36,7 +36,7 @@ class SprayInterlock:
         self.max_duration = float(max_duration)
         self._lock = threading.Lock()   # 线程安全锁，保护内部状态变量
         self._active = False            # 当前是否正在执行喷洒任务
-        self._emergency_stopped = False # 全局紧急停止状态
+        self._motion_locked = False     # 机械臂停止/复位期间的锁定状态
 
     @property
     def active(self):
@@ -45,10 +45,10 @@ class SprayInterlock:
             return self._active
 
     @property
-    def emergency_stopped(self):
-        """返回系统是否处于紧急停止锁定状态。"""
+    def motion_locked(self):
+        """返回机械臂是否锁定，从而禁止喷洒。"""
         with self._lock:
-            return self._emergency_stopped
+            return self._motion_locked
 
     def validate(self, mission_id, tree_id, duration, mode):
         """
@@ -80,14 +80,14 @@ class SprayInterlock:
         """
         尝试获取喷洒执行器的控制权（加锁）。
 
-        这是一个原子操作（由互斥锁保护）。只有同时满足“未激活”且“未急停”
+        这是一个原子操作（由互斥锁保护）。只有同时满足“未激活”且“机械臂未锁定”
         两个条件时，才能成功获取控制权并返回 True。
 
         Returns:
             bool: 如果成功获取喷洒控制权，返回 True；否则返回 False。
         """
         with self._lock:
-            if self._active or self._emergency_stopped:
+            if self._active or self._motion_locked:
                 return False
             self._active = True
             return True
@@ -101,16 +101,16 @@ class SprayInterlock:
         with self._lock:
             self._active = False
 
-    def set_emergency_stop(self, active):
+    def set_motion_locked(self, active):
         """
-        设置全局紧急停止状态。
+        设置机械臂运动锁状态。
 
         该状态一旦设为 True，将导致后续所有 `claim()` 请求失败。
-        通常由订阅 `/safety/emergency_stop` 话题的订阅者调用。
-        若要恢复系统，需由上层安全逻辑将 active 设为 False。
+        通常由订阅 `/motion_control/locked` 的节点调用。
+        `resume` 解除锁后才允许新的喷洒目标。
 
         Args:
-            active (bool): True 表示触发紧急停止，False 表示解除紧急停止。
+            active (bool): True 表示锁定，False 表示解除锁定。
         """
         with self._lock:
-            self._emergency_stopped = bool(active)
+            self._motion_locked = bool(active)

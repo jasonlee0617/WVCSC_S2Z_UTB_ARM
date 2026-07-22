@@ -15,13 +15,13 @@ def test_invalid_goal_is_rejected(mission, tree, duration, mode):
     assert interlock.validate(mission, tree, duration, mode)
 
 
-def test_single_goal_and_emergency_stop_interlock():
+def test_single_goal_and_motion_lock_interlock():
     interlock = SprayInterlock()
     assert not interlock.validate('mission', 'tree', 1.0, 'continuous')
     assert interlock.claim()
     assert not interlock.claim()
     interlock.release()
-    interlock.set_emergency_stop(True)
+    interlock.set_motion_locked(True)
     assert not interlock.claim()
-    interlock.set_emergency_stop(False)
+    interlock.set_motion_locked(False)
     assert interlock.claim()

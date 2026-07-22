@@ -19,9 +19,10 @@ setup(
     zip_safe=True,
     maintainer='robot',
     maintainer_email='robot@example.com',
-    description='Mission state machine for UAV, Nav2 and Alicia-M coordination.',
+    description='Mission state machine for YAML/RViz tasks, Nav2 and Alicia-M coordination.',
     license='Apache-2.0',
     entry_points={'console_scripts': [
         'mission_manager = wvcsc_mission_manager.mission_manager:main',
+        'mock_target_loader = wvcsc_mission_manager.mock_target_loader:main',
     ]},
 )

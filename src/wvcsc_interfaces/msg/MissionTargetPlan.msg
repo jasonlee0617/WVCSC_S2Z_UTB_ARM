@@ -1,2 +1,7 @@
-wvcsc_interfaces/DiseaseTree target
+string target_id
+float32 confidence
+geometry_msgs/Point tree_hint
+string spray_side
+float32 spray_duration
+string evidence_uri
 geometry_msgs/Pose docking_pose
