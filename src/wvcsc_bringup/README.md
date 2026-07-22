@@ -96,6 +96,20 @@ ros2 run wvcsc_bringup validate_site_mission -- \
 AMCL 位置/偏航标准差 ≤ 1.00 m/rad。门限集中定义在
 `wvcsc_bringup/wvcsc_bringup/site_mission.py`，修改后重新构建并 source 工作区。
 定位链稳定后应恢复严格门限；放宽门限不代表当前定位精度满足最终工程验收。
+采样期间 AMCL 位姿允许最多 2 秒未更新；短暂过期时脚本会自动等待并重试，
+不会因约 1 Hz 发布抖动直接中断采点。
+
+如果当前阶段只要求先写入站点文件，可临时增加 `--force-capture`：
+
+```bash
+ros2 run wvcsc_bringup capture_site_pose -- \
+  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
+  --target-id tree_01 --tree-forward-m 0.0 --tree-left-m 1.60 \
+  --timeout-sec 60 --force-capture
+```
+
+该模式仅保留初始 `/imu`、`/ekf_odom`、`/amcl_pose` 和 30 个有效 TF 样本要求，
+跳过新鲜度、停稳、质量和地图 footprint 门控；仅用于当前调试，不代表站点位姿可靠。
 
 ## 4. 完整定位与作业
 

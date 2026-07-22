@@ -33,6 +33,9 @@ from wvcsc_bringup.site_mission import (
 
 class SitePoseCapture(Node):
     _INPUT_MAX_AGE_SEC = 1.0
+    # AMCL may publish at roughly 1 Hz while the vehicle is stopped.  Allow
+    # one publication-period of jitter and retry stale AMCL during sampling.
+    _AMCL_MAX_AGE_SEC = 2.0
     _STOP_SETTLE_SEC = 1.0
     _NO_MOTION_UPDATE_PERIOD_SEC = 0.5
     # TF may need a short warm-up after AMCL starts publishing.  This is only
@@ -145,9 +148,11 @@ class SitePoseCapture(Node):
 
         if self._amcl is None:
             issues.append('AMCL /amcl_pose has not published')
-        elif now - self._amcl[0] > self._INPUT_MAX_AGE_SEC:
+        elif now - self._amcl[0] > self._AMCL_MAX_AGE_SEC:
             issues.append(
-                f'AMCL /amcl_pose is stale ({now - self._amcl[0]:.2f} s old)')
+                f'AMCL /amcl_pose is stale '
+                f'({now - self._amcl[0]:.2f} s old, '
+                f'limit={self._AMCL_MAX_AGE_SEC:.1f} s)')
 
         if self._no_motion_service_state != 'available':
             issues.append(
@@ -187,17 +192,33 @@ class SitePoseCapture(Node):
                 f"{quality['max_yaw_stddev_rad']:.3f} rad exceeds "
                 f'{MAX_CAPTURE_YAW_STDDEV_RAD:.2f} rad')
 
-    def capture(self, timeout_sec=30.0):
+    def capture(self, timeout_sec=30.0, *, force_capture=False):
         deadline = time.monotonic() + timeout_sec
-        while rclpy.ok() and time.monotonic() < deadline:
-            rclpy.spin_once(self, timeout_sec=0.05)
-            now = time.monotonic()
-            self._request_no_motion_update(now)
-            if self._inputs_ready(now):
-                break
+        if force_capture:
+            self.get_logger().warning(
+                '[SITE] FORCE_CAPTURE enabled: freshness, stop, quality and '
+                'map-footprint gates are bypassed; TF and initial sensor data '
+                'are still required')
+            while rclpy.ok() and time.monotonic() < deadline:
+                rclpy.spin_once(self, timeout_sec=0.05)
+                now = time.monotonic()
+                self._request_no_motion_update(now)
+                if self._imu is not None and self._odom is not None and self._amcl is not None:
+                    break
+            else:
+                raise RuntimeError(
+                    'timed out waiting for initial /imu, /ekf_odom and '
+                    '/amcl_pose messages')
         else:
-            raise RuntimeError('timed out waiting for safe capture inputs: ' +
-                               '; '.join(self._input_issues(time.monotonic())))
+            while rclpy.ok() and time.monotonic() < deadline:
+                rclpy.spin_once(self, timeout_sec=0.05)
+                now = time.monotonic()
+                self._request_no_motion_update(now)
+                if self._inputs_ready(now):
+                    break
+            else:
+                raise RuntimeError('timed out waiting for safe capture inputs: ' +
+                                   '; '.join(self._input_issues(time.monotonic())))
 
         samples = []
         position_stddevs = []
@@ -208,16 +229,42 @@ class SitePoseCapture(Node):
         tf_retry_count = 0
         last_tf_error = None
         next_tf_log = next_sample
+        amcl_wait_started = None
+        amcl_retry_count = 0
+        last_amcl_issue = None
+        next_amcl_log = next_sample
         while rclpy.ok() and len(samples) < 30 and time.monotonic() < sample_deadline:
             rclpy.spin_once(self, timeout_sec=0.02)
             now = time.monotonic()
             self._request_no_motion_update(now)
             if now < next_sample:
                 continue
-            if not self._inputs_ready(now):
-                raise RuntimeError(
-                    'capture interrupted: ' +
-                    '; '.join(self._input_issues(now)))
+            if not force_capture:
+                input_issues = self._input_issues(now)
+                amcl_stale_issues = [
+                    issue for issue in input_issues
+                    if issue.startswith('AMCL /amcl_pose is stale')]
+                if (amcl_stale_issues and
+                        len(amcl_stale_issues) == len(input_issues)):
+                    amcl_retry_count += 1
+                    last_amcl_issue = amcl_stale_issues[-1]
+                    if amcl_wait_started is None:
+                        amcl_wait_started = now
+                    if now >= next_amcl_log:
+                        self.get_logger().warning(
+                            '[SITE] waiting for fresh AMCL pose: '
+                            f'{now - amcl_wait_started:.1f} s, '
+                            f'retries={amcl_retry_count}, '
+                            f'last_error={last_amcl_issue}')
+                        next_amcl_log = now + self._TF_LOG_PERIOD_SEC
+                    next_sample = now + self._TF_RETRY_PERIOD_SEC
+                    continue
+                if input_issues:
+                    raise RuntimeError(
+                        'capture interrupted: ' + '; '.join(input_issues))
+            elif self._amcl is None:
+                next_sample = now + self._TF_RETRY_PERIOD_SEC
+                continue
             transform, tf_error = self._lookup_latest_transform()
             if transform is None:
                 tf_retry_count += 1
@@ -244,6 +291,10 @@ class SitePoseCapture(Node):
                 message += (
                     f'; TF retries={tf_retry_count}, '
                     f'last_error={last_tf_error}')
+            if amcl_retry_count:
+                message += (
+                    f'; AMCL retries={amcl_retry_count}, '
+                    f'last_error={last_amcl_issue}')
             raise RuntimeError(message)
         x, y, yaw, position_spread, yaw_spread = pose_sample_statistics(samples)
         quality = {
@@ -253,7 +304,10 @@ class SitePoseCapture(Node):
             'max_position_stddev_m': float(max(position_stddevs)),
             'max_yaw_stddev_rad': float(max(yaw_stddevs)),
         }
-        self._validate_quality(quality)
+        if not force_capture:
+            self._validate_quality(quality)
+        else:
+            quality['validation_bypassed'] = True
         return (x, y, yaw), quality
 
 
@@ -271,6 +325,9 @@ def _arguments(argv):
     parser.add_argument('--mission-id', default='corn_measured_001')
     parser.add_argument('--timeout-sec', type=float, default=30.0)
     parser.add_argument('--update', action='store_true')
+    parser.add_argument(
+        '--force-capture', action='store_true',
+        help='debug only: bypass freshness, stop, quality and footprint gates')
     return parser.parse_args(argv)
 
 
@@ -298,7 +355,8 @@ def main():
     rclpy.init(args=sys.argv)
     node = SitePoseCapture()
     try:
-        pose, quality = node.capture(args.timeout_sec)
+        pose, quality = node.capture(
+            args.timeout_sec, force_capture=args.force_capture)
         document = _document(args)
         mission = document['mission']
         pose_mapping = {'x': pose[0], 'y': pose[1], 'yaw': pose[2]}
@@ -334,7 +392,10 @@ def main():
                 targets.append(target)
             else:
                 targets[targets.index(existing)] = target
-            validate_site_document(document, args.map)
+            validate_site_document(
+                document, args.map,
+                require_capture_quality=not args.force_capture,
+                require_free_space=not args.force_capture)
         atomic_write_site(args.file, document, backup=Path(args.file).expanduser().exists())
         node.get_logger().info(
             f'[SITE] captured {"HOME" if args.capture_home else args.target_id} '

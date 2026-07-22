@@ -51,10 +51,21 @@ def test_capture_inputs_require_fresh_imu_odom_amcl_and_stop():
     assert node._input_issues(10.0) == []
 
     node._imu = None
-    node._amcl = (8.0, 0.04, 0.04)
+    node._amcl = (7.9, 0.04, 0.04)
     issues = node._input_issues(10.0)
     assert 'AHRS /imu has not published' in issues
     assert any('AMCL /amcl_pose is stale' in issue for issue in issues)
+
+
+def test_amcl_one_second_publish_jitter_is_allowed():
+    node = _node()
+    node._amcl = (8.5, 0.04, 0.04)
+    assert not any('AMCL /amcl_pose is stale' in issue
+                   for issue in node._input_issues(10.0))
+
+    node._amcl = (7.9, 0.04, 0.04)
+    assert any('AMCL /amcl_pose is stale' in issue
+               for issue in node._input_issues(10.0))
 
 
 def test_capture_reports_missing_no_motion_service_and_throttles_requests():

@@ -299,7 +299,9 @@ def _point(mapping, label):
                  for key in ('x', 'y', 'z'))
 
 
-def validate_site_document(document, map_yaml, *, require_capture_quality=True):
+def validate_site_document(
+        document, map_yaml, *, require_capture_quality=True,
+        require_free_space=True):
     errors = []
 
     def check(condition, message):
@@ -325,7 +327,9 @@ def validate_site_document(document, map_yaml, *, require_capture_quality=True):
         check(isinstance(targets, list) and bool(targets),
               'mission.targets must be a non-empty list')
         grid = load_map_grid(map_yaml)
-        check(footprint_is_free(grid, home), 'HOME footprint is not in free map space')
+        if require_free_space:
+            check(footprint_is_free(grid, home),
+                  'HOME footprint is not in free map space')
         seen = set()
         for index, target in enumerate(targets if isinstance(targets, list) else []):
             label = f'mission.targets[{index}]'
@@ -356,8 +360,9 @@ def validate_site_document(document, map_yaml, *, require_capture_quality=True):
                                f'{label}.spray_duration')
             check(0.2 <= duration <= 10.0,
                   f'{label}.spray_duration must be within 0.2-10.0 s')
-            check(footprint_is_free(grid, docking),
-                  f'{label} docking footprint is not in free map space')
+            if require_free_space:
+                check(footprint_is_free(grid, docking),
+                      f'{label} docking footprint is not in free map space')
             if require_capture_quality:
                 quality = target.get('capture_quality') or {}
                 samples = int(quality.get('samples', 0))
