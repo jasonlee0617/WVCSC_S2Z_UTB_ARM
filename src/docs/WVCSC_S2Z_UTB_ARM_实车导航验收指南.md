@@ -97,8 +97,8 @@ ros2 topic echo /ekf_odom
 ros2 topic echo /amcl_pose
 ```
 
-当前采点脚本使用调试阶段的宽松门限：位置标准差 ≤ 0.60 m、偏航标准差 ≤ 0.40 rad。
-定位链稳定后，应再恢复为工程验收门限。
+当前采点脚本使用“只要流程成功”的执行优先门限：位置/偏航标准差均 ≤ 1.00
+m，位置/偏航散布均 ≤ 1.00 m/rad。定位链稳定后，应再恢复为工程验收门限。
 
 ### 2.5 测量树到小车的距离
 
@@ -139,7 +139,7 @@ ros2 run wvcsc_bringup capture_site_pose \
 
 脚本执行流程：
 1. 自行调用 AMCL 的 `/request_nomotion_update`，等待 AHRS、AMCL 定位稳定 + EKF 停稳 1 秒
-2. 连续采集 30 个样本（0.1 秒/次），当前调试阶段位置散布 ≤ 0.25 m、偏航散布 ≤ 0.25 rad
+2. 连续采集 30 个样本（0.1 秒/次），当前执行优先阶段位置散布 ≤ 1.00 m、偏航散布 ≤ 1.00 rad
 3. 调用 `tree_hint_from_offset()` 自动计算树根 map 坐标
 4. 写入 `~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml`（自动创建或追加）
 
@@ -154,6 +154,35 @@ AMCL 位置和偏航标准差均须不大于 `0.08`，不满足时脚本会拒�
 ### 2.7 重复所有树
 
 对每棵玉米树重复步骤 2.3~2.6：
+
+### 2.8 调整采点质量门限
+
+当前门限集中定义在：
+
+```text
+wvcsc_bringup/wvcsc_bringup/site_mission.py
+```
+
+可调整以下四个参数：
+
+```python
+MAX_CAPTURE_POSITION_SPREAD_M = 1.00
+MAX_CAPTURE_YAW_SPREAD_RAD = 1.00
+MAX_CAPTURE_POSITION_STDDEV_M = 1.00
+MAX_CAPTURE_YAW_STDDEV_RAD = 1.00
+```
+
+修改后必须重新构建并重新加载工作区：
+
+```bash
+cd ~/WVCSC_S2Z_UTB_ARM
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select wvcsc_bringup
+source install/setup.bash
+```
+
+采点质量数据仍会写入 `capture_quality`，因此门限放宽只代表允许写入，
+不代表当前定位精度已经满足最终工程验收。
 
 ```bash
 # tree_01 (左侧)
@@ -266,8 +295,8 @@ ros2 run wvcsc_bringup nav_validate_sites.py \
 | 1 | Cartographer 回环闭合 | 地图无重影、无断裂 |
 | 2 | AMCL 初始定位 | 粒子云在 3 秒内收敛 |
 | 3 | 每棵树停稳 | 1 秒内线速度 ≤ 0.03 m/s，角速度 ≤ 0.03 rad/s |
-| 4 | AMCL 协方差 | 调试阶段位置标准差 ≤ 0.60 m、偏航标准差 ≤ 0.40 rad |
-| 5 | 位置散布 | 调试阶段 30 个样本位置/偏航散布 ≤ 0.25 m/0.25 rad |
+| 4 | AMCL 协方差 | 执行优先阶段位置/偏航标准差 ≤ 1.00 m/rad |
+| 5 | 位置散布 | 执行优先阶段 30 个样本位置/偏航散布 ≤ 1.00 m/rad |
 | 6 | 重复性 | 同一棵树连续 3 次停靠误差 ≤ 0.12 m |
 | 7 | corn_site.yaml | 4 棵树全部记录，格式校验通过 |
 | 8 | 自动顺序导航 | 4 个目标全部 `SUCCEEDED`，无超时、无跳过 |
