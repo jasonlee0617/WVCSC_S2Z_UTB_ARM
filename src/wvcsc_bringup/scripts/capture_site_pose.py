@@ -31,6 +31,11 @@ class SitePoseCapture(Node):
     _INPUT_MAX_AGE_SEC = 1.0
     _STOP_SETTLE_SEC = 1.0
     _NO_MOTION_UPDATE_PERIOD_SEC = 0.5
+    # TF may need a short warm-up after AMCL starts publishing.  This is only
+    # a retry window; the pose spread and covariance gates below are unchanged.
+    _TF_CAPTURE_WINDOW_SEC = 8.0
+    _TF_RETRY_PERIOD_SEC = 0.05
+    _TF_LOG_PERIOD_SEC = 1.0
 
     def __init__(self):
         super().__init__('wvcsc_site_pose_capture')
@@ -149,6 +154,14 @@ class SitePoseCapture(Node):
     def _inputs_ready(self, now):
         return not self._input_issues(now)
 
+    def _lookup_latest_transform(self):
+        """Return the latest map pose, or a retryable TF exception."""
+        try:
+            return self._tf_buffer.lookup_transform(
+                'map', 'base_footprint', rclpy.time.Time()), None
+        except TransformException as error:
+            return None, error
+
     @staticmethod
     def _validate_quality(quality):
         if quality['position_spread_m'] > 0.03:
@@ -184,7 +197,11 @@ class SitePoseCapture(Node):
         position_stddevs = []
         yaw_stddevs = []
         next_sample = time.monotonic()
-        sample_deadline = next_sample + 4.0
+        sample_deadline = next_sample + self._TF_CAPTURE_WINDOW_SEC
+        tf_wait_started = None
+        tf_retry_count = 0
+        last_tf_error = None
+        next_tf_log = next_sample
         while rclpy.ok() and len(samples) < 30 and time.monotonic() < sample_deadline:
             rclpy.spin_once(self, timeout_sec=0.02)
             now = time.monotonic()
@@ -195,20 +212,33 @@ class SitePoseCapture(Node):
                 raise RuntimeError(
                     'capture interrupted: ' +
                     '; '.join(self._input_issues(now)))
-            try:
-                transform = self._tf_buffer.lookup_transform(
-                    'map', 'base_footprint', rclpy.time.Time())
-            except TransformException as error:
-                raise RuntimeError(
-                    f'map -> base_footprint TF unavailable: {error}') from error
+            transform, tf_error = self._lookup_latest_transform()
+            if transform is None:
+                tf_retry_count += 1
+                last_tf_error = str(tf_error)
+                if tf_wait_started is None:
+                    tf_wait_started = now
+                if now >= next_tf_log:
+                    self.get_logger().warning(
+                        '[SITE] waiting for map -> base_footprint TF: '
+                        f'{now - tf_wait_started:.1f} s, '
+                        f'retries={tf_retry_count}, last_error={last_tf_error}')
+                    next_tf_log = now + self._TF_LOG_PERIOD_SEC
+                next_sample = now + self._TF_RETRY_PERIOD_SEC
+                continue
             translation = transform.transform.translation
             yaw = self._yaw(transform.transform.rotation)
             samples.append((translation.x, translation.y, yaw))
             position_stddevs.append(self._amcl[1])
             yaw_stddevs.append(self._amcl[2])
-            next_sample += 0.1
+            next_sample = now + 0.1
         if len(samples) < 30:
-            raise RuntimeError(f'only captured {len(samples)}/30 valid samples')
+            message = f'only captured {len(samples)}/30 valid samples'
+            if tf_retry_count:
+                message += (
+                    f'; TF retries={tf_retry_count}, '
+                    f'last_error={last_tf_error}')
+            raise RuntimeError(message)
         x, y, yaw, position_spread, yaw_spread = pose_sample_statistics(samples)
         quality = {
             'samples': len(samples),

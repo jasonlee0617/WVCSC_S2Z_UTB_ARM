@@ -22,6 +22,18 @@ class _NoMotionClient:
         self.calls += 1
 
 
+class _TransientTfBuffer:
+    def __init__(self):
+        self.calls = 0
+
+    def lookup_transform(self, _target, _source, _time):
+        self.calls += 1
+        if self.calls == 1:
+            raise capture_site_pose.TransformException(
+                'Lookup would require extrapolation into the past')
+        return object()
+
+
 def _node():
     node = object.__new__(capture_site_pose.SitePoseCapture)
     node._imu = 9.9
@@ -75,3 +87,16 @@ def test_capture_quality_keeps_the_amcl_covariance_gate():
 
     quality['max_position_stddev_m'] = 0.04
     capture_site_pose.SitePoseCapture._validate_quality(quality)
+
+
+def test_transient_tf_extrapolation_is_retryable():
+    node = _node()
+    node._tf_buffer = _TransientTfBuffer()
+
+    transform, error = node._lookup_latest_transform()
+    assert transform is None
+    assert 'extrapolation into the past' in str(error)
+
+    transform, error = node._lookup_latest_transform()
+    assert transform is not None
+    assert error is None
