@@ -142,11 +142,13 @@ def generate_launch_description():
 
     # 当前实车 IMU：Yesense，配置文件固定发布 sensor_msgs/msg/Imu 到 /imu。
     imu_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            FindPackageShare('yesense_std_ros2'),
-            'launch',
-            'yesense_node.launch.py'
-        ])
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('yesense_std_ros2'),
+                'launch',
+                'yesense_node.launch.py',
+            ])
+        )
     )
 
     ekf_node = Node(
