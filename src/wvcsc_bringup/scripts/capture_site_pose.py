@@ -12,6 +12,8 @@ from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
 from rclpy.utilities import remove_ros_args
+from sensor_msgs.msg import Imu
+from std_srvs.srv import Empty
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from wvcsc_bringup.site_mission import (
@@ -26,13 +28,23 @@ from wvcsc_bringup.site_mission import (
 
 
 class SitePoseCapture(Node):
+    _INPUT_MAX_AGE_SEC = 1.0
+    _STOP_SETTLE_SEC = 1.0
+    _NO_MOTION_UPDATE_PERIOD_SEC = 0.5
+
     def __init__(self):
         super().__init__('wvcsc_site_pose_capture')
+        self._imu = None
         self._odom = None
         self._amcl = None
         self._stable_since = None
+        self._next_no_motion_update = 0.0
+        self._no_motion_service_state = 'not checked'
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
+        self._no_motion_client = self.create_client(
+            Empty, '/request_nomotion_update')
+        self.create_subscription(Imu, '/imu', self._on_imu, 20)
         self.create_subscription(Odometry, '/ekf_odom', self._on_odom, 20)
         self.create_subscription(
             PoseWithCovarianceStamped, '/amcl_pose', self._on_amcl, 10)
@@ -49,6 +61,9 @@ class SitePoseCapture(Node):
         return math.atan2(
             2.0 * (w * z + x * y),
             1.0 - 2.0 * (y * y + z * z))
+
+    def _on_imu(self, _message):
+        self._imu = time.monotonic()
 
     def _on_odom(self, message):
         now = time.monotonic()
@@ -80,22 +95,90 @@ class SitePoseCapture(Node):
             math.sqrt(variances[2]),
         )
 
+    def _request_no_motion_update(self, now):
+        if now < self._next_no_motion_update:
+            return
+        self._next_no_motion_update = (
+            now + self._NO_MOTION_UPDATE_PERIOD_SEC)
+        if not self._no_motion_client.service_is_ready():
+            self._no_motion_service_state = 'unavailable'
+            return
+        try:
+            self._no_motion_client.call_async(Empty.Request())
+        except Exception as error:  # rclpy reports transport errors here.
+            self._no_motion_service_state = f'error: {error}'
+            return
+        self._no_motion_service_state = 'available'
+
+    def _input_issues(self, now):
+        issues = []
+        if self._imu is None:
+            issues.append('AHRS /imu has not published')
+        elif now - self._imu > self._INPUT_MAX_AGE_SEC:
+            issues.append(
+                f'AHRS /imu is stale ({now - self._imu:.2f} s old)')
+
+        if self._odom is None:
+            issues.append('EKF odometry /ekf_odom has not published')
+        else:
+            age, linear, angular = (
+                now - self._odom[0], self._odom[1], self._odom[2])
+            if age > self._INPUT_MAX_AGE_SEC:
+                issues.append(f'EKF odometry is stale ({age:.2f} s old)')
+            if self._stable_since is None:
+                issues.append(
+                    f'vehicle is moving (linear={linear:.3f} m/s, '
+                    f'angular={angular:.3f} rad/s)')
+            elif now - self._stable_since < self._STOP_SETTLE_SEC:
+                issues.append(
+                    f'vehicle stop is settling '
+                    f'({now - self._stable_since:.2f}/{self._STOP_SETTLE_SEC:.2f} s)')
+
+        if self._amcl is None:
+            issues.append('AMCL /amcl_pose has not published')
+        elif now - self._amcl[0] > self._INPUT_MAX_AGE_SEC:
+            issues.append(
+                f'AMCL /amcl_pose is stale ({now - self._amcl[0]:.2f} s old)')
+
+        if self._no_motion_service_state != 'available':
+            issues.append(
+                'AMCL /request_nomotion_update service is '
+                f'{self._no_motion_service_state}')
+        return issues
+
     def _inputs_ready(self, now):
-        if self._odom is None or now - self._odom[0] > 1.0:
-            return False
-        if self._amcl is None or now - self._amcl[0] > 1.0:
-            return False
-        return self._stable_since is not None and now - self._stable_since >= 1.0
+        return not self._input_issues(now)
+
+    @staticmethod
+    def _validate_quality(quality):
+        if quality['position_spread_m'] > 0.03:
+            raise RuntimeError(
+                f"position spread {quality['position_spread_m']:.3f} m "
+                'exceeds 0.03 m')
+        if quality['yaw_spread_rad'] > 0.03:
+            raise RuntimeError(
+                f"yaw spread {quality['yaw_spread_rad']:.3f} rad "
+                'exceeds 0.03 rad')
+        if quality['max_position_stddev_m'] > 0.08:
+            raise RuntimeError(
+                'AMCL position standard deviation '
+                f"{quality['max_position_stddev_m']:.3f} m exceeds 0.08 m")
+        if quality['max_yaw_stddev_rad'] > 0.08:
+            raise RuntimeError(
+                'AMCL yaw standard deviation '
+                f"{quality['max_yaw_stddev_rad']:.3f} rad exceeds 0.08 rad")
 
     def capture(self, timeout_sec=30.0):
         deadline = time.monotonic() + timeout_sec
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(self, timeout_sec=0.05)
-            if self._inputs_ready(time.monotonic()):
+            now = time.monotonic()
+            self._request_no_motion_update(now)
+            if self._inputs_ready(now):
                 break
         else:
-            raise RuntimeError(
-                'timed out waiting for fresh AMCL, EKF odometry and 1 s stop')
+            raise RuntimeError('timed out waiting for safe capture inputs: ' +
+                               '; '.join(self._input_issues(time.monotonic())))
 
         samples = []
         position_stddevs = []
@@ -105,10 +188,13 @@ class SitePoseCapture(Node):
         while rclpy.ok() and len(samples) < 30 and time.monotonic() < sample_deadline:
             rclpy.spin_once(self, timeout_sec=0.02)
             now = time.monotonic()
+            self._request_no_motion_update(now)
             if now < next_sample:
                 continue
             if not self._inputs_ready(now):
-                raise RuntimeError('vehicle or localization became unstable during capture')
+                raise RuntimeError(
+                    'capture interrupted: ' +
+                    '; '.join(self._input_issues(now)))
             try:
                 transform = self._tf_buffer.lookup_transform(
                     'map', 'base_footprint', rclpy.time.Time())
@@ -131,16 +217,7 @@ class SitePoseCapture(Node):
             'max_position_stddev_m': float(max(position_stddevs)),
             'max_yaw_stddev_rad': float(max(yaw_stddevs)),
         }
-        if position_spread > 0.03:
-            raise RuntimeError(
-                f'position spread {position_spread:.3f} m exceeds 0.03 m')
-        if yaw_spread > 0.03:
-            raise RuntimeError(
-                f'yaw spread {yaw_spread:.3f} rad exceeds 0.03 rad')
-        if quality['max_position_stddev_m'] > 0.08:
-            raise RuntimeError('AMCL position standard deviation exceeds 0.08 m')
-        if quality['max_yaw_stddev_rad'] > 0.08:
-            raise RuntimeError('AMCL yaw standard deviation exceeds 0.08 rad')
+        self._validate_quality(quality)
         return (x, y, yaw), quality
 
 

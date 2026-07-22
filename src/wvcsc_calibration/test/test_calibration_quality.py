@@ -16,6 +16,7 @@ from wvcsc_calibration.calibration_quality import (
     transform_error,
 )
 from wvcsc_calibration.auto_calibration_collector import (
+    camera_center_aim_offsets,
     estimate_refined_aruco_pose,
 )
 
@@ -44,6 +45,23 @@ def test_marker_window_enforces_count_edge_and_stability():
         maximum_center_std_px=4.0, maximum_depth_std_m=0.003,
         maximum_angle_std_deg=0.8)
     assert not invalid and 'edge' in message
+
+
+def test_camera_center_aim_offsets_use_live_camera_info():
+    matrix = np.asarray((
+        (1079.11172, 0.0, 656.42746),
+        (0.0, 1082.95708, 525.74486),
+        (0.0, 0.0, 1.0),
+    ))
+    yaw, pitch = camera_center_aim_offsets(
+        (matrix, np.zeros(5), 1280, 720))
+    assert yaw == pytest.approx(0.862, abs=0.002)
+    assert pitch == pytest.approx(-8.702, abs=0.002)
+    assert camera_center_aim_offsets(
+        (np.asarray(((1000.0, 0.0, 640.0),
+                     (0.0, 1000.0, 360.0),
+                     (0.0, 0.0, 1.0))), np.zeros(5), 1280, 720)
+    ) == pytest.approx((0.0, 0.0))
 
 
 def test_pose_diversity_and_coverage_use_translation_or_rotation():
@@ -89,8 +107,8 @@ def test_transform_error_reports_translation_and_rotation_in_public_units():
     assert rotation == pytest.approx(0.0)
 
 
-def test_collector_waits_for_marker_only_after_the_calibration_seed_move():
-    """The initial operator pose need not see the tabletop marker."""
+def test_collector_waits_for_marker_only_after_the_adaptive_anchor_move():
+    """The initial operator pose need not see the vehicle-mounted marker."""
     source = (
         Path(__file__).parents[1] / 'wvcsc_calibration' /
         'auto_calibration_collector.py').read_text(encoding='utf-8')
@@ -100,7 +118,7 @@ def test_collector_waits_for_marker_only_after_the_calibration_seed_move():
     assert 'self._wait_inputs()' not in guarded
     run_session = source.split('    def _run_session(self):', 1)[1].split(
         '    def _solve', 1)[0]
-    assert run_session.index('self._move_to_calibration_seed()') < \
+    assert run_session.index('self._move_to_initial_anchor(') < \
         run_session.index('self._wait_inputs()')
     assert run_session.index('self._wait_inputs()') < \
         run_session.index('self._clear_easy_samples()')
@@ -148,6 +166,34 @@ def test_collector_recovers_from_a_visible_but_near_singular_seed():
     assert 'safe-anchor={anchor.candidate_id}' in run_session
     assert 'self._wait_inputs()' in run_session
     assert 'self._safe_candidates(candidates, optimizer)' in run_session
+
+
+def test_collector_uses_marker_prior_for_the_first_safe_anchor():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    assert "'marker_position_base_m': [0.0, 0.25, 0.0]" in source
+    anchor = source.split('    def _move_to_initial_anchor(', 1)[1].split(
+        '    def _install_calibration_surface(', 1)[0]
+    assert 'generate_initial_anchor_candidates(' in anchor
+    assert 'self._safe_plan_details(candidate, optimizer)' in anchor
+    assert "'no collision-safe initial anchor" in anchor
+
+
+def test_collector_applies_live_camera_centre_aim_to_all_candidate_sets():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    run_session = source.split('    def _run_session(self):', 1)[1].split(
+        '    def _solve', 1)[0]
+    assert 'requested_aim = camera_center_aim_offsets(camera_info)' in run_session
+    assert '_anchor_aim = self._move_to_initial_anchor(' in run_session
+    assert "'camera_centering_scale_candidates'" in run_session
+    assert run_session.count('aim_yaw_deg=aim_offsets[0]') == 2
+    anchor = source.split('    def _move_to_initial_anchor(', 1)[1].split(
+        '    def _install_calibration_surface(', 1)[0]
+    assert 'camera_centering_scale_candidates' in anchor
+    assert 'aim_yaw_deg=aim_offsets[0]' in anchor
 
 
 def test_collector_uses_wvcsc_opencv_transform_conversion_not_server_solver():

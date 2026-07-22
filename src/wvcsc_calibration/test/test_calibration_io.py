@@ -1,6 +1,6 @@
 import pytest
 
-from wvcsc_calibration.calibration_io import normalized_calibration
+from wvcsc_calibration.calibration_io import expanded_path, normalized_calibration
 
 
 def _valid():
@@ -36,3 +36,9 @@ def test_rejects_non_unit_quaternion():
     data['transform']['rotation']['w'] = 0.1
     with pytest.raises(ValueError, match='quaternion norm'):
         normalized_calibration(data)
+
+
+def test_expanded_path_supports_portable_home_environment_variable(monkeypatch, tmp_path):
+    monkeypatch.setenv('WVCSC_CALIBRATION_TEST_ROOT', str(tmp_path))
+    assert expanded_path('$WVCSC_CALIBRATION_TEST_ROOT/result.yaml') == (
+        tmp_path / 'result.yaml')

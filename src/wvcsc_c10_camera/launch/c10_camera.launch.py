@@ -74,7 +74,7 @@ def generate_launch_description():
                 'c10_intrinsics.yaml'),
             description=(
                 'CameraInfo URL. After calibration pass '
-                'file://$HOME/.ros/camera_info/c10.yaml explicitly.')),
+                'the calibrated package config file explicitly.')),
         camera,
         watchdog,
     ])

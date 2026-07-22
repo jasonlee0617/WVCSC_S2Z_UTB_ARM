@@ -9,8 +9,8 @@ auto_calibration_collector:
     joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
     planner_id: RRTConnectFast
     planning_pipeline_id: ompl
-    velocity_scaling: 0.05
-    acceleration_scaling: 0.05
+    velocity_scaling: 0.10
+    acceleration_scaling: 0.10
     planning_time: 5.0
     execution_timeout: 90.0
 
@@ -33,7 +33,15 @@ auto_calibration_collector:
     target_samples: 18
     maximum_samples: 22
     minimum_safe_candidates: 14
-    # 官方参考姿态优先保证桌面码可见，可能接近腕部奇异位形。
+    # marker 固定在车顶、相对 alicia_base_link 的位置。采集器先由此生成
+    # 自适应初始观察位，随后才等待相机实际检测到 marker TF。
+    marker_position_base_m: [0.0, 0.25, 0.0]
+    seed_height_candidates_m: [0.25, 0.30, 0.35]
+    seed_radial_backoff_candidates_m: [0.0, 0.05, 0.10]
+    seed_tangential_offset_candidates_m: [0.0, -0.05, 0.05]
+    # 优先把标定码移到几何图像中心；若该平移姿态不满足IK、奇异度或关节
+    # 余量门槛，则逐级减少补偿，绝不通过放宽安全门槛换取可见性。
+    camera_centering_scale_candidates: [1.0, 0.75, 0.5, 0.25, 0.0]
     # 候选不足时，先移动到一个已经通过IK/关节余量/条件数门控的视角，
     # 再围绕该视角重新生成同一套21个marker-relative候选。
     safe_anchor_recovery_limit: 3
@@ -66,4 +74,4 @@ auto_calibration_collector:
     maximum_marker_position_rms_m: 0.005
     maximum_marker_rotation_rms_deg: 1.0
     easy_service_timeout_sec: 10.0
-    output_file: ~/.ros/wvcsc_calibration/c10_handeye.yaml
+    output_file: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml

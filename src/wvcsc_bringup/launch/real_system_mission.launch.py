@@ -31,6 +31,10 @@ def _include(launch_dir, filename, arguments=None):
     )
 
 
+def _expand_path(path):
+    return os.path.expanduser(os.path.expandvars(os.fspath(path)))
+
+
 def _rpy_matrix(roll, pitch, yaw):
     cr, sr = math.cos(roll), math.sin(roll)
     cp, sp = math.cos(pitch), math.sin(pitch)
@@ -79,7 +83,7 @@ def _matrix_rpy(matrix):
 
 
 def _load_calibrated_mount(path):
-    with open(os.path.expanduser(path), encoding='utf-8') as stream:
+    with open(_expand_path(path), encoding='utf-8') as stream:
         calibration = (yaml.safe_load(stream) or {}).get('calibration', {})
     if (calibration.get('parent_frame') != 'tool0' or
             calibration.get('child_frame') != 'camera_color_optical_frame'):
@@ -99,7 +103,7 @@ def _load_calibrated_mount(path):
 
 
 def _load_nozzle_calibration(path):
-    with open(os.path.expanduser(path), encoding='utf-8') as stream:
+    with open(_expand_path(path), encoding='utf-8') as stream:
         data = yaml.safe_load(stream) or {}
     if int(data.get('schema_version', 0)) != 1:
         raise RuntimeError('nozzle calibration schema_version must be 1')
@@ -135,8 +139,9 @@ def _resolve_calibrations(context, *, launch_dir):
     initial_actions = []
 
     # --- hand-eye calibration ---
-    calibration_path = LaunchConfiguration('handeye_calibration').perform(context)
-    if not os.path.isfile(os.path.expanduser(calibration_path)):
+    calibration_path = _expand_path(
+        LaunchConfiguration('handeye_calibration').perform(context))
+    if not os.path.isfile(calibration_path):
         raise RuntimeError(
             f'hand-eye calibration is required but not found: {calibration_path}')
     xyz, rpy = _load_calibrated_mount(calibration_path)
@@ -149,8 +154,9 @@ def _resolve_calibrations(context, *, launch_dir):
     ])
 
     # --- nozzle calibration ---
-    nozzle_path = LaunchConfiguration('nozzle_calibration').perform(context)
-    if not os.path.isfile(os.path.expanduser(nozzle_path)):
+    nozzle_path = _expand_path(
+        LaunchConfiguration('nozzle_calibration').perform(context))
+    if not os.path.isfile(nozzle_path):
         raise RuntimeError(
             f'nozzle calibration is required but not found: {nozzle_path}')
     nozzle_xyz, nozzle_rpy, aim_range, aim_tolerance, trim_uv = (
@@ -170,7 +176,7 @@ def _resolve_calibrations(context, *, launch_dir):
     ])
 
     # --- C10 camera info ---
-    camera_info = os.path.expanduser(
+    camera_info = _expand_path(
         LaunchConfiguration('camera_info_file').perform(context))
     if os.path.isfile(camera_info):
         initial_actions.extend([
@@ -201,8 +207,7 @@ def _resolve_calibrations(context, *, launch_dir):
             '--map', LaunchConfiguration('map').perform(context),
             '--yolo-python', LaunchConfiguration(
                 'yolo_python_executable').perform(context),
-            '--camera-info', LaunchConfiguration(
-                'camera_info_file').perform(context),
+            '--camera-info', camera_info,
             '--handeye-calibration', calibration_path,
             '--nozzle-calibration', nozzle_path,
             '--require-nozzle-calibration', 'true',
@@ -275,6 +280,7 @@ def _resolve_calibrations(context, *, launch_dir):
 
 def generate_launch_description():
     bringup_share = get_package_share_directory('wvcsc_bringup')
+    c10_share = get_package_share_directory('wvcsc_c10_camera')
     launch_dir = os.path.join(bringup_share, 'launch')
 
     return LaunchDescription([
@@ -302,8 +308,9 @@ def generate_launch_description():
         DeclareLaunchArgument('nozzle_mount_rpy', default_value='0 0 0'),
         DeclareLaunchArgument(
             'handeye_calibration',
-            default_value=os.path.expanduser(
-                '~/.ros/wvcsc_calibration/c10_handeye.yaml')),
+            default_value=(
+                '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
+                'c10_handeye.yaml')),
         DeclareLaunchArgument(
             'nozzle_calibration',
             default_value=os.path.expanduser(
@@ -314,7 +321,8 @@ def generate_launch_description():
         DeclareLaunchArgument('aim_trim_v_px', default_value='0.0'),
         DeclareLaunchArgument(
             'camera_info_file',
-            default_value=os.path.expanduser('~/.ros/camera_info/c10.yaml')),
+            default_value=os.path.join(
+                c10_share, 'config', 'c10_intrinsics.yaml')),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(

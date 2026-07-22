@@ -83,8 +83,8 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 
 | 产物 | 解决的问题 | 默认路径 |
 |---|---|---|
-| C10 内参 | 像素射线、畸变 | `~/.ros/camera_info/c10.yaml` |
-| 手眼外参 | `tool0→camera_color_optical_frame` | `~/.ros/wvcsc_calibration/c10_handeye.yaml` |
+| C10 内参 | 像素射线、畸变 | `wvcsc_c10_camera/config/c10_intrinsics.yaml` |
+| 手眼外参 | `tool0→camera_color_optical_frame` | `$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml` |
 | 喷嘴外参 | `tool0→spray_nozzle_link`、工距、落点微调 | `~/.ros/wvcsc_calibration/nozzle.yaml` |
 
 实机任务模式默认 `require_nozzle_calibration:=true`。CameraInfo、手眼或喷嘴标定缺失时，前置检查必须阻止自动喷洒。
@@ -213,15 +213,11 @@ Alicia-M 候选必须基于当前真实标记位置和本机运动学自适应�
 
 ### 5.3 Gazebo Classic 真值校验
 
-仿真标定场景与实机共享同一个 `auto_calibration_collector.py`。Gazebo Classic
-使用独立的桌面场景：桌面为 `1.20 × 0.80 m`，四条桌腿具有 visual 与 collision；
-仿真和实机均使用70 mm编码区域、90 mm背板的标定码，放置在桌面 `(0.45, 0, 0.752)`，朝上。Gazebo严格外参基准采用无噪声图像、68.8度水平视场和静止后的15帧位姿平均，以降低平面PnP量化误差；实机仍以C10内参标定结果为准。
+仿真标定场景与实机共享同一个 `auto_calibration_collector.py`、完整小车/车顶机械臂模型和车体碰撞几何。Gazebo 中的70 mm编码区域、90 mm背板 marker 相对 `alicia_base_link` 位于 `(0, 0.25, 0.002)`；采集器先根据该先验生成安全观察位，再等待实际 marker TF。桌面与独立机械臂资产保留为注释参考，不参与默认启动。
 
-仿真采集器先进入 Alicia 官方参考姿态
-`[0.0, -1.09, -0.87, 0.0, -0.77, 0.0]`，再生成 Alicia 自适应候选。Gazebo 在解除暂停前使用零重力，启动顺序固定为 `spawn → unpause → joint_state_broadcaster → arm_controller → gripper_controller`，从而避免控制器无更新周期或未激活机械臂下落。采集时
-向 MoveIt 加入仅覆盖机械臂前方区域的桌面碰撞盒，不覆盖底座安装区域。
+Gazebo 在解除暂停前使用零重力，启动顺序固定为 `整车生成 → marker生成 → unpause → joint_state_broadcaster → arm_controller → gripper_controller`。C10 渲染使用真实 `c10_intrinsics.yaml` 的 K/D；Gazebo CameraInfo 的 K 焦距近似限制保留在仿真验收中。
 
-仿真结果写入 `~/.ros/wvcsc_calibration/c10_handeye_sim.yaml`，并在保存前与URDF
+仿真结果写入 `$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye_sim.yaml`，并在保存前与URDF
 已知 `tool0→camera_color_optical_frame` 外参比较。平移必须不超过 `3 mm`、旋转
 必须不超过 `1°`；超限时仅保留诊断日志，不保存或覆盖结果。
 

@@ -1,14 +1,10 @@
-"""Gazebo Classic Alicia-M/C10 eye-in-hand calibration environment.
-
-This launch deliberately mirrors the proven WVCSC controller and MoveIt startup
-chain.  It does not reuse Fairino's Ignition Gazebo launch mechanics: only the
-two-terminal calibration workflow and quality gates are shared.
-"""
+"""Gazebo Classic vehicle-mounted Alicia-M/C10 eye-in-hand calibration."""
 
 import os
 import re
 import subprocess
 from functools import partial
+from xml.etree import ElementTree
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -25,6 +21,14 @@ from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from tf_transformations import (
+    concatenate_matrices,
+    euler_from_matrix,
+    euler_matrix,
+    identity_matrix,
+    translation_from_matrix,
+    translation_matrix,
+)
 
 
 def _load_yaml(package_name, relative_path):
@@ -43,7 +47,21 @@ def _sanitize_robot_description(description):
 
 def _generate_robot_description(xacro_file, controllers_file):
     result = subprocess.run(
-        ['xacro', xacro_file, f'gazebo_controllers_file:={controllers_file}'],
+        [
+            'xacro', xacro_file,
+            f'gazebo_controllers_file:={controllers_file}',
+            'enable_arm_control:=true',
+            # Calibration keeps the chassis stationary, but MoveIt still needs
+            # all six vehicle joints on /joint_states for a complete state.
+            'enable_ackermann:=true',
+            'enable_gazebo_ros2_control:=true',
+            'enable_c10_camera:=true',
+            'enable_c10_gazebo:=true',
+            'use_collision_meshes:=true',
+            'calibration_fix_base:=true',
+            'ros2_control_plugin:=gazebo_ros2_control/GazeboSystem',
+            'c10_noise_stddev:=0.0',
+        ],
         check=False, capture_output=True, text=True)
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
@@ -56,7 +74,7 @@ def _semantic_description(moveit_share):
     with open(path, encoding='utf-8') as stream:
         semantic = stream.read()
     semantic = semantic.replace(
-        'name="alicia_m_v1_1_follower"', 'name="alicia_calibration"')
+        'name="alicia_m_v1_1_follower"', 'name="wvcsc_utb_alicia"')
     semantic = semantic.replace('base_link="base_link"',
                                 'base_link="alicia_base_link"')
     semantic = semantic.replace('link1="base_link"',
@@ -65,12 +83,6 @@ def _semantic_description(moveit_share):
         '<virtual_joint name="virtual_joint" type="fixed" '
         'parent_frame="world" child_link="base_link"/>', '')
     disabled = '''
-    <!-- The supplied collision meshes report link1/link6 contact in Alicia-M's
-         documented downward calibration pose although the links are physically
-         separated.  Without this calibration-only SRDF correction OMPL marks
-         every seed trajectory invalid before C10 can see the tabletop target.
-         Table, joint-limit and all other self-collision checks remain active. -->
-    <disable_collisions link1="link1" link2="link6" reason="Never"/>
     <disable_collisions link1="tool0" link2="camera_link" reason="Adjacent"/>
     <disable_collisions link1="link6" link2="camera_link" reason="Mount"/>
     <disable_collisions link1="link7" link2="camera_link" reason="Mount"/>
@@ -85,6 +97,51 @@ def _after_success(event, _context, *, process_name, success_actions):
     return [Shutdown(reason=f'{process_name} exited with code {event.returncode}')]
 
 
+def _marker_position(simulation_parameters):
+    values = tuple(float(value) for value in simulation_parameters[
+        'marker_position_base_m'])
+    if len(values) != 3:
+        raise RuntimeError('marker_position_base_m must contain three values')
+    return values
+
+
+def _marker_spawn_pose(robot_description, marker_position):
+    """Express an Alicia-base marker pose in Gazebo's retained root link."""
+    root = ElementTree.fromstring(robot_description)
+    by_child = {}
+    for joint in root.findall('joint'):
+        child = joint.find('child')
+        if child is not None:
+            by_child[child.attrib['link']] = joint
+
+    chain = []
+    link = 'alicia_base_link'
+    while link != 'base_footprint':
+        joint = by_child.get(link)
+        if joint is None or joint.attrib.get('type') != 'fixed':
+            raise RuntimeError(
+                'robot description has no fixed base_footprint to '
+                'alicia_base_link chain')
+        chain.append(joint)
+        link = joint.find('parent').attrib['link']
+
+    transform = identity_matrix()
+    for joint in reversed(chain):
+        origin = joint.find('origin')
+        xyz = tuple(float(value) for value in (
+            origin.attrib.get('xyz', '0 0 0').split()))
+        rpy = tuple(float(value) for value in (
+            origin.attrib.get('rpy', '0 0 0').split()))
+        transform = concatenate_matrices(
+            transform, translation_matrix(xyz), euler_matrix(*rpy))
+    transform = concatenate_matrices(
+        transform,
+        translation_matrix(marker_position),
+        euler_matrix(1.57079632679, 0.0, 0.0),
+    )
+    return translation_from_matrix(transform), euler_from_matrix(transform)
+
+
 def generate_launch_description():
     simulation_share = get_package_share_directory('wvcsc_simulation')
     calibration_share = get_package_share_directory('wvcsc_calibration')
@@ -96,7 +153,7 @@ def generate_launch_description():
     controllers_file = os.path.join(
         description_share, 'config', 'ros2_controllers.yaml')
     xacro_file = os.path.join(
-        calibration_share, 'xacro', 'calibration_arm_camera.urdf.xacro')
+        description_share, 'urdf', 'wvcsc_utb_alicia.urdf.xacro')
     urdf = _generate_robot_description(xacro_file, controllers_file)
     robot_description = {'robot_description': urdf}
     robot_description_semantic = {
@@ -135,6 +192,14 @@ def generate_launch_description():
         },
     ]
 
+    simulation_parameters = _load_yaml(
+        'wvcsc_calibration', 'config/auto_handeye_alicia_sim.yaml')[
+            'auto_calibration_collector']['ros__parameters']
+    marker_position = _marker_position(simulation_parameters)
+    marker_xyz, marker_rpy = _marker_spawn_pose(urdf, marker_position)
+    marker_model = os.path.join(
+        simulation_share, 'models', 'aruco_marker', 'model.sdf')
+
     gazebo_model_path = os.pathsep.join(filter(None, [
         os.path.join(simulation_share, 'models'),
         os.path.dirname(description_share),
@@ -153,7 +218,7 @@ def generate_launch_description():
             os.path.join(gazebo_share, 'launch', 'gazebo.launch.py')),
         launch_arguments={
             'world': os.path.join(
-                simulation_share, 'worlds', 'calibration_table.world'),
+                simulation_share, 'worlds', 'calibration_vehicle.world'),
             'verbose': 'false',
             'pause': 'true',
             'gui': LaunchConfiguration('gui'),
@@ -162,10 +227,23 @@ def generate_launch_description():
     state_publisher = Node(
         package='robot_state_publisher', executable='robot_state_publisher',
         parameters=[robot_description, {'use_sim_time': True}], output='screen')
-    spawn = Node(
+    spawn_vehicle = Node(
         package='gazebo_ros', executable='spawn_entity.py',
-        arguments=['-topic', '/robot_description', '-entity', 'alicia_calibration',
-                   '-x', '0', '-y', '0', '-z', '0'],
+        arguments=[
+            '-topic', '/robot_description', '-entity', 'wvcsc_calibration_vehicle',
+            '-x', '0', '-y', '0', '-z', '0',
+        ],
+        output='screen')
+    spawn_marker = Node(
+        package='gazebo_ros', executable='spawn_entity.py',
+        arguments=[
+            '-file', marker_model, '-entity', 'calibration_aruco',
+            '-reference_frame', 'wvcsc_calibration_vehicle::base_footprint',
+            '-x', str(marker_xyz[0]), '-y', str(marker_xyz[1]),
+            '-z', str(marker_xyz[2]),
+            '-R', str(marker_rpy[0]), '-P', str(marker_rpy[1]),
+            '-Y', str(marker_rpy[2]),
+        ],
         output='screen')
     move_group = Node(
         package='moveit_ros_move_group', executable='move_group',
@@ -199,8 +277,8 @@ def generate_launch_description():
             'tool_link': 'tool0',
             'planning_pipeline_id': 'ompl',
             'planner_id': 'RRTConnectFast',
-            'velocity_scaling': 0.05,
-            'acceleration_scaling': 0.05,
+            'velocity_scaling': 0.20,
+            'acceleration_scaling': 0.20,
             'planning_time': 5.0,
             'execution_timeout': 90.0,
             'use_sim_time': True,
@@ -224,8 +302,6 @@ def generate_launch_description():
             'tracking_marker_frame': 'calibration_aruco',
             'marker_id': 1,
             'aruco_topic': '/aruco_markers',
-            # Sampling occurs after 1 s settling, so a short stable-window
-            # average reduces planar-PnP quantization without hiding motion.
             'smoothing_window': 15,
             'stable_pose_topic': '/calibration/stable_marker_pose',
             'stable_pose_hold_sec': 1.0,
@@ -245,15 +321,50 @@ def generate_launch_description():
             'use_sim_time': True,
         }],
         output='screen')
+    collector = Node(
+        package='wvcsc_calibration', executable='auto_calibration_collector',
+        parameters=[
+            os.path.join(calibration_share, 'config', 'auto_handeye_alicia.yaml'),
+            os.path.join(
+                calibration_share, 'config', 'auto_handeye_alicia_sim.yaml'),
+        ],
+        output='screen')
 
-    # Gazebo starts paused to make model spawn deterministic.  ros2_control
-    # cannot activate a controller while physics is paused because its update
-    # loop is not running.  The dedicated calibration world uses zero gravity,
-    # therefore it is safe to unpause before loading controllers.
-    start_unpause = RegisterEventHandler(OnProcessExit(
-        target_action=spawn,
+    # -----------------------------------------------------------------------
+    # LEGACY DESK CALIBRATION ENVIRONMENT - REFERENCE ONLY
+    #
+    # The original desk + standalone-arm setup remains in the repository for
+    # historical comparison and manual rollback.  It is intentionally not an
+    # active launch branch: it omits the vehicle roof mount and chassis
+    # collision geometry, so its safe poses cannot be migrated one-to-one to
+    # the vehicle.  To restore it manually, replace the active xacro/world and
+    # spawn path below as one set.  Never start both sets of state publishers,
+    # controller managers, MoveIt nodes, or Gazebo entities together.
+    #
+    # legacy_xacro_file = os.path.join(
+    #     calibration_share, 'xacro', 'calibration_arm_camera.urdf.xacro')
+    # legacy_urdf = _generate_robot_description(legacy_xacro_file, controllers_file)
+    # legacy_world = os.path.join(
+    #     simulation_share, 'worlds', 'calibration_table.world')
+    # legacy_spawn = Node(
+    #     package='gazebo_ros', executable='spawn_entity.py',
+    #     arguments=['-topic', '/robot_description', '-entity',
+    #                'alicia_calibration', '-x', '0', '-y', '0', '-z', '0'],
+    #     output='screen')
+    # -----------------------------------------------------------------------
+
+    # Gazebo starts paused to make both vehicle and marker spawn deterministic.
+    # The calibration world has zero gravity, so unpausing before controllers
+    # activate is safe and gives ros2_control an update cycle.
+    start_marker = RegisterEventHandler(OnProcessExit(
+        target_action=spawn_vehicle,
         on_exit=partial(
-            _after_success, process_name='Gazebo entity spawn',
+            _after_success, process_name='vehicle entity spawn',
+            success_actions=[spawn_marker])))
+    start_unpause = RegisterEventHandler(OnProcessExit(
+        target_action=spawn_marker,
+        on_exit=partial(
+            _after_success, process_name='ArUco entity spawn',
             success_actions=[unpause])))
     start_joint_state = RegisterEventHandler(OnProcessExit(
         target_action=unpause,
@@ -274,7 +385,9 @@ def generate_launch_description():
         target_action=gripper,
         on_exit=partial(
             _after_success, process_name='gripper_controller spawner',
-            success_actions=[motion_control, aruco, marker_tf, handeye_server])))
+            success_actions=[
+                motion_control, aruco, marker_tf, handeye_server, collector,
+            ])))
 
     return LaunchDescription([
         DeclareLaunchArgument('gui', default_value='true'),
@@ -283,8 +396,9 @@ def generate_launch_description():
         SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),
         gazebo,
         state_publisher,
-        spawn,
+        spawn_vehicle,
         move_group,
+        start_marker,
         start_unpause,
         start_joint_state,
         start_arm,

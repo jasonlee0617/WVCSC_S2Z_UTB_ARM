@@ -9,6 +9,11 @@ import tempfile
 import yaml
 
 
+def expanded_path(path):
+    """Expand the portable ``$HOME`` and ``~`` forms used by calibration YAML."""
+    return Path(os.path.expanduser(os.path.expandvars(os.fspath(path))))
+
+
 def _finite(mapping, keys):
     values = []
     for key in keys:
@@ -62,8 +67,7 @@ def normalized_calibration(data):
 
 
 def export_calibration(input_path, output_path):
-    source = Path(input_path).expanduser()
-    destination = Path(output_path).expanduser()
+    source = expanded_path(input_path)
     with source.open(encoding='utf-8') as stream:
         normalized = normalized_calibration(yaml.safe_load(stream))
     return _write_normalized_calibration(normalized, output_path)
@@ -88,7 +92,7 @@ def write_calibration(transform, output_path):
 
 
 def _write_normalized_calibration(normalized, output_path):
-    destination = Path(output_path).expanduser()
+    destination = expanded_path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = yaml.safe_dump(normalized, sort_keys=False)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -113,7 +117,9 @@ def main():
     parser.add_argument(
         '--input', default='~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib')
     parser.add_argument(
-        '--output', default='~/.ros/wvcsc_calibration/c10_handeye.yaml')
+        '--output', default=(
+            '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
+            'c10_handeye.yaml'))
     args = parser.parse_args()
     output = export_calibration(args.input, args.output)
     print(f'Validated WVCSC hand-eye calibration written to {output}')

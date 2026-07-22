@@ -5,6 +5,7 @@
   <xacro:arg name="enable_gazebo_ros2_control" default="false"/>
   <xacro:arg name="enable_c10_camera" default="true"/>
   <xacro:arg name="enable_c10_gazebo" default="false"/>
+  <xacro:arg name="c10_noise_stddev" default="0.007"/>
   <xacro:arg name="calibration_fix_base" default="false"/>
 
     <!-- 机械臂车顶安装参数 -->
@@ -140,6 +141,20 @@
     </joint>
 
     <xacro:if value="$(arg enable_c10_gazebo)">
+      <!-- Keep Gazebo rendering tied to the same measured C10 calibration
+           used by the real usb_cam driver. -->
+      <xacro:property name="c10_calibration" value="${xacro.load_yaml('$(find wvcsc_c10_camera)/config/c10_intrinsics.yaml')}"/>
+      <xacro:property name="c10_width" value="${c10_calibration['image_width']}"/>
+      <xacro:property name="c10_height" value="${c10_calibration['image_height']}"/>
+      <xacro:property name="c10_fx" value="${c10_calibration['camera_matrix']['data'][0]}"/>
+      <xacro:property name="c10_fy" value="${c10_calibration['camera_matrix']['data'][4]}"/>
+      <xacro:property name="c10_cx" value="${c10_calibration['camera_matrix']['data'][2]}"/>
+      <xacro:property name="c10_cy" value="${c10_calibration['camera_matrix']['data'][5]}"/>
+      <xacro:property name="c10_k1" value="${c10_calibration['distortion_coefficients']['data'][0]}"/>
+      <xacro:property name="c10_k2" value="${c10_calibration['distortion_coefficients']['data'][1]}"/>
+      <xacro:property name="c10_p1" value="${c10_calibration['distortion_coefficients']['data'][2]}"/>
+      <xacro:property name="c10_p2" value="${c10_calibration['distortion_coefficients']['data'][3]}"/>
+      <xacro:property name="c10_k3" value="${c10_calibration['distortion_coefficients']['data'][4]}"/>
       <!-- Gazebo lumps fixed camera_link into link6, so attach its sensor to
            the retained parent link with the equivalent fixed transform. -->
       <gazebo reference="link6">
@@ -149,14 +164,25 @@
           <visualize>false</visualize>
           <pose>-0.055 0 0.05 0 -1.57079632679 0</pose>
           <camera name="c10_optical">
-            <horizontal_fov>1.8</horizontal_fov>
+            <horizontal_fov>${2.0 * atan(c10_width / (2.0 * c10_fx))}</horizontal_fov>
             <image>
-              <width>1280</width>
-              <height>720</height>
+              <width>${c10_width}</width>
+              <height>${c10_height}</height>
               <format>R8G8B8</format>
             </image>
             <clip><near>0.02</near><far>300</far></clip>
-            <noise><type>gaussian</type><mean>0.0</mean><stddev>0.007</stddev></noise>
+            <distortion>
+              <k1>${c10_k1}</k1><k2>${c10_k2}</k2><k3>${c10_k3}</k3>
+              <p1>${c10_p1}</p1><p2>${c10_p2}</p2>
+              <center>${c10_cx / c10_width} ${c10_cy / c10_height}</center>
+            </distortion>
+            <lens>
+              <intrinsics>
+                <fx>${c10_fx}</fx><fy>${c10_fy}</fy>
+                <cx>${c10_cx}</cx><cy>${c10_cy}</cy><s>0</s>
+              </intrinsics>
+            </lens>
+            <noise><type>gaussian</type><mean>0.0</mean><stddev>$(arg c10_noise_stddev)</stddev></noise>
           </camera>
           <plugin name="c10_camera_plugin" filename="libgazebo_ros_camera.so">
             <ros>
@@ -178,6 +204,13 @@
             </ros>
             <camera_name>color</camera_name>
             <frame_name>camera_color_optical_frame</frame_name>
+            <!-- gazebo_ros_camera publishes K with one focal length; retain
+                 measured fy in P while rendering uses the full fx/fy pair. -->
+            <focal_length>${c10_fx}</focal_length>
+            <cx>${c10_cx}</cx><cy>${c10_cy}</cy>
+            <P_fx>${c10_fx}</P_fx><P_fy>${c10_fy}</P_fy>
+            <P_cx>${c10_cx}</P_cx><P_cy>${c10_cy}</P_cy>
+            <border_crop>false</border_crop>
           </plugin>
         </sensor>
       </gazebo>

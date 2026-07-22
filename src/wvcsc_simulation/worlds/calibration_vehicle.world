@@ -1,0 +1,13 @@
+<sdf version="1.6">
+  <world name="calibration_vehicle">
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <!-- Hand-eye calibration evaluates geometry rather than vehicle dynamics.
+         Zero gravity allows ros2_control to activate after unpausing without
+         an unactuated arm sagging while the full vehicle remains fixed. -->
+    <physics type="ode">
+      <gravity>0 0 0</gravity>
+    </physics>
+  </world>
+</sdf>

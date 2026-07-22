@@ -46,6 +46,17 @@ Nav2 参数和 `tf_buffer_size`；硬件子 RViz 被关闭，只启动复制到
 `real_sensors.launch.py` 和 C10。Nav2 速度平滑器的最终输出直接发布到
 `/cmd_vel`；不启动 `wvcsc_safety` 速度门控。
 
+当前车载 FDI AHRS 是 CH9102。首次部署或更换工控机时，先安装稳定串口别名：
+
+```bash
+cd "${HOME}/WVCSC_S2Z_UTB_ARM/src/fdilink_ahrs_ROS2"
+sudo ./udev.sh
+ls -l /dev/FDI_IMU_GNSS
+```
+
+随后启动导航，确认 AHRS 日志出现 `Serial Port initialized`，并确认
+`ros2 topic hz /imu` 持续有数据。不要在 AHRS 参数中写死 `/dev/ttyACM0`。
+
 ## 3. 逐树实测停靠点
 
 AMCL稳定后，人工驾驶并停稳。卷尺必须从车体上标记的
@@ -74,6 +85,8 @@ ros2 run wvcsc_bringup validate_site_mission -- \
 ```
 
 任务文件与地图YAML及图片SHA256绑定；地图改变后旧任务会被拒绝。
+采点脚本会自行调用 AMCL 的 `/request_nomotion_update`，无需额外终端循环调用该
+服务；若 IMU、EKF、AMCL、静止判定、TF 或协方差门限任一不满足，脚本不会写入文件。
 
 ## 4. 完整定位与作业
 
@@ -92,8 +105,8 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 - 独立 YOLO Python 环境；
 - `yolov8s_real.pt`: `detect`, `{0: tree}`；
 - `yolov8s_seg_real.pt`: `segment`, `{0: disease_leaf}`。
-- `~/.ros/camera_info/c10.yaml`；
-- `~/.ros/wvcsc_calibration/c10_handeye.yaml`；
+- `wvcsc_c10_camera/config/c10_intrinsics.yaml`；
+- `$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml`；
 - `~/.ros/wvcsc_calibration/nozzle.yaml`。
 
 实机权重需由用户放入
@@ -151,12 +164,14 @@ wvcsc_calibration/config/auto_handeye_alicia.yaml
 ros2 run wvcsc_arm_task motion_control_keyboard
 ```
 
-`x` 会发送机械臂 `stop`。当前完整实机系统不启动底盘软件安全门，因此它不会
-替代底盘物理急停。
+手眼标定 launch 不加载 `real_sensors.launch.py`：不会启动底盘、LiDAR、IMU、EKF
+或 Nav2。车辆必须保持停稳，并保留可触达的物理急停。
 
-默认手眼输出为 `~/.ros/wvcsc_calibration/c10_handeye.yaml`。自动采集会清空
-上一轮服务端样本，逐候选执行碰撞IK、Jacobian条件数、关节余量和OMPL门控，
-并以Park/Horaud/Tsai-Lenz共识及离群剔除后结果原子写入。
+默认手眼输出为
+`$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml`。
+自动采集会先根据 marker 相对 `alicia_base_link` 的配置生成安全初始观察位，
+再清空上一轮服务端样本，逐候选执行碰撞IK、Jacobian条件数、关节余量和OMPL
+门控，并以Park/Horaud/Tsai-Lenz共识及离群剔除后结果原子写入。
 
 随后根据实际喷嘴安装填写并验证：
 

@@ -137,12 +137,26 @@ def test_handeye_session_enables_standalone_robot_tf():
     assert "executable='motion_control'" in handeye
     assert "package='easy_handeye2', executable='handeye_server'" in handeye
     assert 'rqt_calibrator' not in handeye
+    assert 'real_sensors.launch.py' not in handeye
+    assert 'lslidar_driver' not in handeye
+    assert 'fdilink_ahrs' not in handeye
+    assert 'wtb_car_driver' not in handeye
+    assert 'package://wvcsc_c10_camera/config/c10_intrinsics.yaml' in handeye
 
     collector = (PACKAGE.parent / 'wvcsc_calibration' /
                  'wvcsc_calibration' /
                  'auto_calibration_collector.py').read_text(encoding='utf-8')
     assert "RemoveSample.Request(sample_index=count - 1)" in collector
     assert "'minimum_solution_samples': 14" in collector
+    assert '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/' in collector
+
+
+def test_real_mission_uses_portable_handeye_and_c10_calibration_paths():
+    source = _source('real_system_mission.launch.py')
+    assert 'def _expand_path(path):' in source
+    assert 'os.path.expandvars' in source
+    assert '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/' in source
+    assert "c10_share, 'config', 'c10_intrinsics.yaml'" in source
 
 
 def test_nozzle_frame_and_compensated_aim_are_wired_through_real_stack():

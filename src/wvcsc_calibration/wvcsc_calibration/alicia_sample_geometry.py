@@ -24,6 +24,64 @@ class CalibrationCandidate:
     tool_quaternion: tuple
 
 
+def generate_initial_anchor_candidates(
+        marker_position, tool_to_camera_translation, tool_to_camera_quaternion,
+        height_candidates, radial_backoff_candidates,
+        tangential_offset_candidates, aim_yaw_deg=0.0, aim_pitch_deg=0.0):
+    """Generate marker-prior views before the marker is visible in C10.
+
+    The marker is fixed on the vehicle relative to ``alicia_base_link``.  The
+    first view therefore needs no camera-to-marker TF, but it must still point
+    C10 at the configured marker centre and pass the normal MoveIt safety gate
+    in the caller.
+    """
+    marker = tuple(float(value) for value in marker_position)
+    if len(marker) != 3 or not all(math.isfinite(value) for value in marker):
+        raise ValueError('marker_position must contain three finite values')
+    horizontal_distance = math.hypot(marker[0], marker[1])
+    if horizontal_distance < 0.05:
+        raise ValueError('marker_position must be offset from the arm base')
+
+    radial = (marker[0] / horizontal_distance,
+              marker[1] / horizontal_distance, 0.0)
+    tangential = (-radial[1], radial[0], 0.0)
+    candidates = []
+    for height in height_candidates:
+        height = float(height)
+        if not math.isfinite(height) or height <= 0.0:
+            raise ValueError('anchor heights must be finite and positive')
+        for backoff in radial_backoff_candidates:
+            backoff = float(backoff)
+            if not math.isfinite(backoff) or backoff < 0.0:
+                raise ValueError('anchor radial backoffs must be finite and non-negative')
+            for offset in tangential_offset_candidates:
+                offset = float(offset)
+                if not math.isfinite(offset):
+                    raise ValueError('anchor tangential offsets must be finite')
+                camera = (
+                    marker[0] - radial[0] * backoff + tangential[0] * offset,
+                    marker[1] - radial[1] * backoff + tangential[1] * offset,
+                    marker[2] + height,
+                )
+                camera_quaternion = _camera_look_at(
+                    marker, camera, 0.0, (1.0, 0.0, 0.0))
+                camera = _camera_position_for_aim(
+                    marker, camera, camera_quaternion,
+                    aim_yaw_deg, aim_pitch_deg)
+                tool_position, tool_quaternion = tool_pose_from_camera_pose(
+                    camera, camera_quaternion,
+                    tool_to_camera_translation, tool_to_camera_quaternion)
+                candidates.append(CalibrationCandidate(
+                    candidate_id=(
+                        f'initial_h{height:.3f}_r{backoff:.3f}_t{offset:+.3f}'),
+                    camera_position=camera,
+                    camera_quaternion=camera_quaternion,
+                    tool_position=tool_position,
+                    tool_quaternion=tool_quaternion,
+                ))
+    return tuple(candidates)
+
+
 def _unit(vector):
     values = tuple(float(value) for value in vector)
     norm = math.sqrt(sum(value * value for value in values))
@@ -86,10 +144,31 @@ def _local_tilt(quaternion, yaw_deg, pitch_deg):
         quaternion, _quaternion_multiply(yaw_quaternion, pitch_quaternion))
 
 
+def _camera_position_for_aim(
+        marker, camera, camera_quaternion, yaw_deg, pitch_deg):
+    """Centre the target by translation while preserving wrist orientation."""
+    yaw = math.radians(float(yaw_deg))
+    pitch = math.radians(float(pitch_deg))
+    if abs(math.cos(pitch)) <= 1.0e-6:
+        raise ValueError('camera aim pitch is invalid')
+    target_ray = _unit((
+        -math.tan(yaw) / math.cos(pitch),
+        math.tan(pitch),
+        1.0,
+    ))
+    world_ray = rotate_vector(target_ray, camera_quaternion)
+    distance = math.sqrt(sum(
+        (float(marker[index]) - float(camera[index])) ** 2
+        for index in range(3)))
+    return tuple(
+        float(marker[index]) - distance * world_ray[index]
+        for index in range(3))
+
+
 def generate_alicia_candidates(
         marker_position, current_camera_position, current_camera_quaternion,
         tool_to_camera_translation, tool_to_camera_quaternion,
-        include_fine=False):
+        include_fine=False, aim_yaw_deg=0.0, aim_pitch_deg=0.0):
     """Generate baseline 21, or 49 excitation-expanded, marker-relative views.
 
     ``include_fine`` is intentionally opt-in.  The default set mirrors the
@@ -201,6 +280,9 @@ def generate_alicia_candidates(
             )
             camera_quaternion = _camera_look_at(
                 marker, camera, roll_deg, preferred_x)
+            camera = _camera_position_for_aim(
+                marker, camera, camera_quaternion,
+                aim_yaw_deg, aim_pitch_deg)
             camera_quaternion = _local_tilt(
                 camera_quaternion, yaw_deg, pitch_deg)
         tool_position, tool_quaternion = tool_pose_from_camera_pose(

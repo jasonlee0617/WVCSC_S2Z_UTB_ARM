@@ -137,10 +137,13 @@ ros2 run wvcsc_bringup capture_site_pose \
 ```
 
 脚本执行流程：
-1. 等待 AMCL 定位稳定 + EKF 停稳 1 秒
+1. 自行调用 AMCL 的 `/request_nomotion_update`，等待 AHRS、AMCL 定位稳定 + EKF 停稳 1 秒
 2. 连续采集 30 个样本（0.1 秒/次，共 3 秒），验证位置散布 ≤ 0.03 m
 3. 调用 `tree_hint_from_offset()` 自动计算树根 map 坐标
 4. 写入 `~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml`（自动创建或追加）
+
+采点前必须确认 `/dev/FDI_IMU_GNSS` 存在且 `ros2 topic hz /imu` 有持续输出；
+AMCL 位置和偏航标准差均须不大于 `0.08`，不满足时脚本会拒绝写入。
 
 成功输出示例：
 ```

@@ -22,8 +22,8 @@ def generate_launch_description():
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument(
             'camera_info_url',
-            default_value='file://' + os.path.expanduser(
-                '~/.ros/camera_info/c10.yaml')),
+            default_value=(
+                'package://wvcsc_c10_camera/config/c10_intrinsics.yaml')),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 c10_share, 'launch', 'c10_camera.launch.py')),
@@ -31,6 +31,8 @@ def generate_launch_description():
                 'video_device': LaunchConfiguration('video_device'),
                 'camera_info_url': LaunchConfiguration('camera_info_url'),
             }.items()),
+        # 手眼标定只需要机械臂、C10 和其 TF；不加载完整传感器启动链，
+        # 因而不会启动底盘、LiDAR、IMU、EKF 或 Nav2。
         Node(
             package='wvcsc_arm_task', executable='motion_control',
             parameters=[{

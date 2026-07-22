@@ -21,6 +21,9 @@ install(PROGRAMS
   scripts/nav_validate_sites.py
   scripts/validate_site_mission.py
   DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/capture_site_pose.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME capture_site_pose)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
@@ -28,6 +31,8 @@ if(BUILD_TESTING)
   # tests hermetic so CMake can discover and execute the system pytest.
   set(ENV{PYTEST_DISABLE_PLUGIN_AUTOLOAD} "1")
   ament_add_pytest_test(test_real_bringup test/test_real_bringup.py
+    ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+  ament_add_pytest_test(test_capture_site_pose test/test_capture_site_pose.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
   ament_add_pytest_test(test_site_mission test/test_site_mission.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")

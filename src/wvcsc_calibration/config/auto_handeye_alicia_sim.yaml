@@ -1,10 +1,13 @@
 auto_calibration_collector:
   ros__parameters:
     use_sim_time: true
-    # CI/无桌面回归时没有可输入 s 的终端；仍调用与手动模式完全相同的
+    # CI/无交互仿真回归时没有可输入 s 的终端；仍调用与手动模式完全相同的
     # 采集状态机。实机配置未设置该参数，默认必须人工按 s/Enter 启动。
     auto_start: true
-    output_file: ~/.ros/wvcsc_calibration/c10_handeye_sim.yaml
+    output_file: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye_sim.yaml
+    velocity_scaling: 0.20
+    acceleration_scaling: 0.20
+    marker_position_base_m: [0.0, 0.25, 0.002]
     marker_size_m: 0.070
     stable_marker_pose_topic: /calibration/stable_marker_pose
     stable_tf_settle_sec: 0.15
@@ -24,12 +27,8 @@ auto_calibration_collector:
     maximum_algorithm_translation_delta_m: 0.005
     maximum_algorithm_rotation_delta_deg: 1.0
 
-    # Target-side table segment: x=0.10..0.60 m, outside the arm base footprint.
-    calibration_surface_enabled: true
-    calibration_surface_id: calibration_surface
-    calibration_surface_frame: alicia_base_link
-    calibration_surface_size_m: [0.50, 0.80, 0.04]
-    calibration_surface_position_m: [0.35, 0.0, -0.03]
+    # 默认仿真使用完整车体碰撞模型，车顶已是规划场景中的真实碰撞边界。
+    calibration_surface_enabled: false
 
     ground_truth_check_enabled: true
     ground_truth_translation_m: [-0.055, 0.0, -0.10]

@@ -10,7 +10,6 @@ the operator must press ``s`` again.
 
 from collections import deque
 import math
-import os
 import select
 import sys
 import threading
@@ -45,7 +44,10 @@ from wvcsc_arm_task.observation import (
     tool_pose_from_camera_pose,
 )
 
-from .alicia_sample_geometry import generate_alicia_candidates
+from .alicia_sample_geometry import (
+    generate_alicia_candidates,
+    generate_initial_anchor_candidates,
+)
 from .calibration_io import write_calibration
 from .calibration_quality import (
     MarkerObservation,
@@ -73,6 +75,24 @@ def _wait_future(future, timeout_sec):
 def _transform_tuple(stamped):
     transform = stamped.transform
     return transform_components(transform)
+
+
+def camera_center_aim_offsets(camera_info):
+    """Return local yaw/pitch that projects the optical target at image centre."""
+    camera, _distortion, width, height = camera_info
+    matrix = np.asarray(camera, dtype=float).reshape(3, 3)
+    fx, fy = float(matrix[0, 0]), float(matrix[1, 1])
+    cx, cy = float(matrix[0, 2]), float(matrix[1, 2])
+    values = (fx, fy, cx, cy, float(width), float(height))
+    if (not all(math.isfinite(value) for value in values)
+            or fx <= 0.0 or fy <= 0.0 or width <= 0 or height <= 0):
+        raise ValueError('CameraInfo contains invalid image geometry')
+    pitch = math.atan2(float(height) * 0.5 - cy, fy)
+    # _local_tilt composes yaw before pitch.  cos(pitch) therefore keeps the
+    # horizontal projection exact when the vertical principal-point offset is
+    # non-zero (as it is for the calibrated C10).
+    yaw = math.atan2((cx - float(width) * 0.5) * math.cos(pitch), fx)
+    return math.degrees(yaw), math.degrees(pitch)
 
 
 def estimate_refined_aruco_pose(corners, marker_size_m, camera_matrix, distortion):
@@ -191,11 +211,7 @@ class AutoCalibrationCollector(Node):
         # 日常标定仍坚持由独立终端的 s/Enter 启动，避免机械臂在操作者
         # 未确认工作区安全时自行运动。``auto_start`` 只用于无 TTY 的
         # Gazebo 回归验证；它保留同一套采集与安全状态机，而非另建测试路径。
-        if sys.stdin.isatty():
-            self._keyboard_thread = threading.Thread(
-                target=self._keyboard_loop, daemon=True)
-            self._keyboard_thread.start()
-        elif self._auto_start_pending:
+        if self._auto_start_pending:
             self._auto_start_timer = self.create_timer(
                 0.1, self._start_automatic_session, callback_group=self._group)
         else:
@@ -256,8 +272,14 @@ class AutoCalibrationCollector(Node):
             'maximum_marker_position_rms_m': 0.005,
             'maximum_marker_rotation_rms_deg': 1.0,
             'easy_service_timeout_sec': 10.0,
-            'output_file': '~/.ros/wvcsc_calibration/c10_handeye.yaml',
-            'initial_joint_positions': [0.0, -1.09, -0.87, 0.0, -0.77, 0.0],
+            'output_file': (
+                '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
+                'c10_handeye.yaml'),
+            'marker_position_base_m': [0.0, 0.25, 0.0],
+            'seed_height_candidates_m': [0.25, 0.30, 0.35],
+            'seed_radial_backoff_candidates_m': [0.0, 0.05, 0.10],
+            'seed_tangential_offset_candidates_m': [0.0, -0.05, 0.05],
+            'camera_centering_scale_candidates': [1.0, 0.75, 0.5, 0.25, 0.0],
             'calibration_surface_enabled': False,
             'calibration_surface_id': 'calibration_surface',
             'calibration_surface_frame': 'alicia_base_link',
@@ -310,10 +332,33 @@ class AutoCalibrationCollector(Node):
         if (not all(math.isfinite(value) for value in quality_limits)
                 or min(quality_limits) <= 0.0):
             raise ValueError('calibration quality limits must be finite and positive')
-        initial = tuple(float(value) for value in self.get_parameter(
-            'initial_joint_positions').value)
-        if len(initial) != 6 or not all(math.isfinite(value) for value in initial):
-            raise ValueError('initial_joint_positions must contain six finite values')
+        marker_position = tuple(float(value) for value in self.get_parameter(
+            'marker_position_base_m').value)
+        if (len(marker_position) != 3
+                or not all(math.isfinite(value) for value in marker_position)
+                or math.hypot(marker_position[0], marker_position[1]) < 0.05):
+            raise ValueError(
+                'marker_position_base_m must contain a finite X/Y offset from base')
+        for name, positive in (
+                ('seed_height_candidates_m', True),
+                ('seed_radial_backoff_candidates_m', False),
+                ('seed_tangential_offset_candidates_m', False)):
+            values = tuple(float(value) for value in self.get_parameter(name).value)
+            if (not values or not all(math.isfinite(value) for value in values)
+                    or (positive and min(values) <= 0.0)
+                    or (not positive and name == 'seed_radial_backoff_candidates_m'
+                        and min(values) < 0.0)):
+                raise ValueError(f'{name} contains invalid anchor candidates')
+        centering_scales = tuple(float(value) for value in self.get_parameter(
+            'camera_centering_scale_candidates').value)
+        if (not centering_scales
+                or not all(math.isfinite(value) and 0.0 <= value <= 1.0
+                           for value in centering_scales)
+                or any(centering_scales[index] <= centering_scales[index + 1]
+                       for index in range(len(centering_scales) - 1))):
+            raise ValueError(
+                'camera_centering_scale_candidates must be strictly descending '
+                'values in [0, 1]')
         for name, expected_size in (
                 ('ground_truth_translation_m', 3),
                 ('ground_truth_rotation_xyzw', 4)):
@@ -508,9 +553,9 @@ class AutoCalibrationCollector(Node):
     def _run_session_guarded(self):
         seed = None
         try:
-            # 开始姿态通常不会看见桌面上的标定码。因此这里只等待机械臂、
-            # 相机内参与自身TF，先保存可安全回退的真实起始关节；标定码TF
-            # 必须在移动到 Alicia 标定参考姿态之后才作为会话前置条件。
+            # 开始姿态通常不会看见安装在车体上的标定码。因此这里只等待
+            # 机械臂、相机内参与自身TF，先保存可安全回退的真实起始关节；
+            # 标定码TF必须在移动到自适应初始观察位之后才作为会话前置条件。
             seed, _camera, _transforms = self._wait_robot_inputs()
             self._run_session()
         except Exception as error:
@@ -588,10 +633,9 @@ class AutoCalibrationCollector(Node):
     def _wait_robot_inputs(self, timeout_sec=10.0):
         """等待移动到参考姿态前就应存在的机械臂和相机输入。
 
-        桌面标定码被设计为由相机在 Alicia 官方参考姿态正对。因此不能在
-        会话刚开始时等待 ``base -> marker`` TF：初始 HOME 或上一次姿态可能
-        根本不在标定码视野内。该阶段只确认可记录安全回退姿态的关节、
-        CameraInfo，以及 ``base/tool/camera`` 静态运动链。
+        初始 HOME 或上一次姿态可能根本不在车顶 marker 视野内，因此不能在
+        会话刚开始时等待 ``base -> marker`` TF。该阶段只确认可记录安全回退
+        姿态的关节、CameraInfo，以及 ``base/tool/camera`` 静态运动链。
         """
         deadline = time.monotonic() + timeout_sec
         while rclpy.ok() and time.monotonic() < deadline:
@@ -640,7 +684,7 @@ class AutoCalibrationCollector(Node):
         with self._data_lock:
             return self._joint_positions
 
-    def _safe_plan(self, candidate, optimizer):
+    def _safe_plan_details(self, candidate, optimizer):
         joints = self._current_joints()
         if joints is None:
             return None
@@ -654,10 +698,10 @@ class AutoCalibrationCollector(Node):
             ik_joints = tuple(float(by_name[name]) for name in names)
         except KeyError:
             return None
-        if (optimizer.condition_number(ik_joints) >= float(
-                self.get_parameter('max_condition_number').value)
-                or optimizer.minimum_joint_margin(ik_joints) < float(
-                    self.get_parameter('min_joint_margin_rad').value)):
+        ik_condition = optimizer.condition_number(ik_joints)
+        ik_margin = optimizer.minimum_joint_margin(ik_joints)
+        if (ik_condition >= float(self.get_parameter('max_condition_number').value)
+                or ik_margin < float(self.get_parameter('min_joint_margin_rad').value)):
             return None
         trajectory = self._arm.plan_pose(
             candidate.tool_position, candidate.tool_quaternion,
@@ -667,23 +711,73 @@ class AutoCalibrationCollector(Node):
             tolerance_orientation=float(
                 self.get_parameter('orientation_tolerance_rad').value))
         final = self._arm.trajectory_final_positions(trajectory, names)
-        if (final is None
-                or optimizer.condition_number(final) >= float(
-                    self.get_parameter('max_condition_number').value)
-                or optimizer.minimum_joint_margin(final) < float(
+        if final is None:
+            return None
+        final_condition = optimizer.condition_number(final)
+        final_margin = optimizer.minimum_joint_margin(final)
+        if (final_condition >= float(
+                self.get_parameter('max_condition_number').value)
+                or final_margin < float(
                     self.get_parameter('min_joint_margin_rad').value)):
             return None
-        return trajectory
+        joint_motion = math.sqrt(sum(
+            (final[index] - joints[index]) ** 2 for index in range(len(joints))))
+        return (
+            trajectory,
+            max(ik_condition, final_condition),
+            min(ik_margin, final_margin),
+            joint_motion,
+        )
 
-    def _move_to_calibration_seed(self):
-        """Reach Alicia-M's official downward-facing calibration seed pose."""
-        positions = tuple(float(value) for value in self.get_parameter(
-            'initial_joint_positions').value)
+    def _safe_plan(self, candidate, optimizer):
+        details = self._safe_plan_details(candidate, optimizer)
+        return details[0] if details is not None else None
+
+    def _move_to_initial_anchor(self, optimizer, tool_camera, requested_aim):
+        """Move to the safest marker-prior view before waiting for marker TF."""
+        marker_position = tuple(float(value) for value in self.get_parameter(
+            'marker_position_base_m').value)
+        safe = []
+        selected_scale = None
+        selected_aim = None
+        for scale in self.get_parameter(
+                'camera_centering_scale_candidates').value:
+            scale = float(scale)
+            aim_offsets = tuple(value * scale for value in requested_aim)
+            candidates = generate_initial_anchor_candidates(
+                marker_position,
+                tool_camera[0], tool_camera[1],
+                self.get_parameter('seed_height_candidates_m').value,
+                self.get_parameter('seed_radial_backoff_candidates_m').value,
+                self.get_parameter('seed_tangential_offset_candidates_m').value,
+                aim_yaw_deg=aim_offsets[0], aim_pitch_deg=aim_offsets[1])
+            for candidate in candidates:
+                details = self._safe_plan_details(candidate, optimizer)
+                if details is not None:
+                    trajectory, condition, margin, joint_motion = details
+                    safe.append((condition, -margin, joint_motion,
+                                 candidate.candidate_id, candidate, trajectory))
+            if safe:
+                selected_scale = scale
+                selected_aim = aim_offsets
+                break
+        if not safe:
+            raise RuntimeError(
+                'no collision-safe initial anchor for marker_position_base_m')
+        _condition, negative_margin, motion, _identifier, candidate, trajectory = min(
+            safe, key=lambda item: item[:4])
+        if not self._arm.execute_trajectory(trajectory):
+            raise RuntimeError(
+                f'failed to execute initial calibration anchor {candidate.candidate_id}')
         self.get_logger().info(
-            '[CALIBRATION] moving to Alicia-M calibration seed pose')
-        if not self._arm.move_joints(positions):
-            raise RuntimeError('failed to reach Alicia-M calibration seed pose')
+            '[CALIBRATION] initial-anchor='
+            f'{candidate.candidate_id} condition={_condition:.2f} '
+            f'joint_margin={-negative_margin:.2f}rad '
+            f'joint_motion={motion:.2f}rad centering_scale={selected_scale:.2f} '
+            f'aim_yaw={selected_aim[0]:+.2f}deg '
+            f'aim_pitch={selected_aim[1]:+.2f}deg')
         time.sleep(float(self.get_parameter('settle_time_sec').value))
+        return selected_aim
 
     def _install_calibration_surface(self):
         """Publish the target-side tabletop as a collision object for OMPL."""
@@ -869,14 +963,22 @@ class AutoCalibrationCollector(Node):
 
     def _run_session(self):
         self._install_calibration_surface()
-        self._move_to_calibration_seed()
         # easy_handeye2 intentionally exposes its service API only after the
-        # camera->marker TF exists.  The marker is on the tabletop and first
-        # becomes visible after the Alicia seed motion, so clearing samples
-        # must occur after this readiness gate rather than before it.
+        # camera->marker TF exists.  Use the configured base-frame marker
+        # prior to reach a collision-safe view first; only then require the
+        # camera->marker TF and clear previous samples.
+        _joints, camera_info, robot_transforms = self._wait_robot_inputs()
+        _base_tool, _base_camera, tool_camera = robot_transforms
+        requested_aim = camera_center_aim_offsets(camera_info)
+        self.get_logger().info(
+            '[CALIBRATION] requested camera-centre aim offsets: '
+            f'yaw={requested_aim[0]:+.2f}deg '
+            f'pitch={requested_aim[1]:+.2f}deg')
+        optimizer = self._optimizer()
+        _anchor_aim = self._move_to_initial_anchor(
+            optimizer, _transform_tuple(tool_camera), requested_aim)
         _joints, _camera, transforms = self._wait_inputs()
         self._clear_easy_samples()
-        optimizer = self._optimizer()
         _base_tool, base_camera, base_marker, tool_camera = transforms
         marker_position, _marker_quaternion = _transform_tuple(base_marker)
         camera_position, camera_quaternion = _transform_tuple(base_camera)
@@ -889,20 +991,33 @@ class AutoCalibrationCollector(Node):
         candidates = ()
         safe = ()
         used_anchor_ids = set()
+        selected_candidate_scale = None
         for recovery_index in range(recovery_limit + 1):
-            candidates = generate_alicia_candidates(
-                marker_position, camera_position, camera_quaternion,
-                mount_translation, mount_quaternion)
-            safe = self._safe_candidates(candidates, optimizer)
-            # 21 broad views are easy to audit.  When their strict-safe subset
-            # cannot even supply the target sample count, add only small,
-            # still marker-facing perturbations instead of lowering safety
-            # thresholds or reusing duplicate sample poses.
-            if len(safe) < required_safe:
+            for scale in self.get_parameter(
+                    'camera_centering_scale_candidates').value:
+                scale = float(scale)
+                aim_offsets = tuple(value * scale for value in requested_aim)
                 candidates = generate_alicia_candidates(
                     marker_position, camera_position, camera_quaternion,
-                    mount_translation, mount_quaternion, include_fine=True)
+                    mount_translation, mount_quaternion,
+                    aim_yaw_deg=aim_offsets[0], aim_pitch_deg=aim_offsets[1])
                 safe = self._safe_candidates(candidates, optimizer)
+                # 21 broad views are easy to audit.  When their strict-safe
+                # subset cannot supply the target sample count, add the
+                # excitation-expanded views without weakening safety limits.
+                if len(safe) < required_safe:
+                    candidates = generate_alicia_candidates(
+                        marker_position, camera_position, camera_quaternion,
+                        mount_translation, mount_quaternion, include_fine=True,
+                        aim_yaw_deg=aim_offsets[0],
+                        aim_pitch_deg=aim_offsets[1])
+                    safe = self._safe_candidates(candidates, optimizer)
+                self.get_logger().info(
+                    '[CALIBRATION] candidate-centering probe: '
+                    f'scale={scale:.2f} safe={len(safe)}/{len(candidates)}')
+                if len(safe) >= required_safe:
+                    selected_candidate_scale = scale
+                    break
             if len(safe) >= required_safe:
                 break
             if not safe or recovery_index >= recovery_limit:
@@ -919,26 +1034,33 @@ class AutoCalibrationCollector(Node):
             # anchored: it leaves the arm in exactly the same configuration
             # and cannot improve safe-candidate coverage.  Prefer a distinct
             # non-seed perturbation while preserving the existing safety gate.
-            anchor = next(
-                (candidate for candidate in safe
-                 if candidate.candidate_id != 'seed'
-                 and candidate.candidate_id not in used_anchor_ids),
-                None)
-            if anchor is None:
-                anchor = next(
-                    (candidate for candidate in safe
-                     if candidate.candidate_id != 'seed'),
-                    None)
+            eligible = [
+                candidate for candidate in safe
+                if candidate.candidate_id != 'seed'
+                and candidate.candidate_id not in used_anchor_ids]
+            if not eligible:
+                eligible = [
+                    candidate for candidate in safe
+                    if candidate.candidate_id != 'seed']
+            anchor = None
+            for candidate in eligible:
+                used_anchor_ids.add(candidate.candidate_id)
+                trajectory = self._safe_plan(candidate, optimizer)
+                if trajectory is None:
+                    self.get_logger().warn(
+                        '[CALIBRATION] recovery anchor became unplannable: '
+                        f'{candidate.candidate_id}')
+                    continue
+                if not self._arm.execute_trajectory(trajectory):
+                    self.get_logger().warn(
+                        '[CALIBRATION] recovery anchor execution rejected: '
+                        f'{candidate.candidate_id}')
+                    continue
+                anchor = candidate
+                break
             if anchor is None:
                 raise RuntimeError(
-                    f'only {len(safe)} safe Alicia-M candidates; need '
-                    f'{required_safe}')
-            used_anchor_ids.add(anchor.candidate_id)
-            trajectory = self._safe_plan(anchor, optimizer)
-            if trajectory is None or not self._arm.execute_trajectory(trajectory):
-                raise RuntimeError(
-                    f'failed to execute safe calibration anchor '
-                    f'{anchor.candidate_id}')
+                    'no previously safe calibration anchor remained executable')
             self.get_logger().info(
                 f'[CALIBRATION] safe-anchor={anchor.candidate_id} '
                 f'attempt={recovery_index + 1}/{recovery_limit}')
@@ -950,7 +1072,8 @@ class AutoCalibrationCollector(Node):
             mount_translation, mount_quaternion = _transform_tuple(tool_camera)
         self.get_logger().info(
             f'[CALIBRATION] {len(safe)}/{len(candidates)} candidates passed '
-            'collision IK, Jacobian, joint-margin and OMPL checks')
+            'collision IK, Jacobian, joint-margin and OMPL checks; '
+            f'centering_scale={selected_candidate_scale:.2f}')
 
         accepted_poses = []
         sample_count = 0
@@ -1110,7 +1233,7 @@ class AutoCalibrationCollector(Node):
             raise RuntimeError('easy_handeye2 sample save failed')
         output = write_calibration(
             handeye,
-            os.path.expanduser(str(self.get_parameter('output_file').value)))
+            str(self.get_parameter('output_file').value))
         self.get_logger().info(
             '[CALIBRATION] SUCCESS '
             f'algorithm={selected_algorithm} samples={len(samples)} '
