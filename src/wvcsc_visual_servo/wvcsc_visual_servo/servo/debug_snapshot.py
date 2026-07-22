@@ -41,6 +41,10 @@ DEBUG_DEFAULTS = {
     'lifecycle_transition': '',
     'service_latency_sec': 0.0,
     'joint_positions': [],
+    'servo_output_count': 0,
+    'servo_output_points': 0,
+    'max_commanded_joint_delta_rad': 0.0,
+    'max_joint_delta_rad': 0.0,
     'result_code': -1,
     'message': '',
 }

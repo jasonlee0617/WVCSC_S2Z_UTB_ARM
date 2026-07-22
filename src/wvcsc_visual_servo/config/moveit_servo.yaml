@@ -9,32 +9,32 @@
 # 该配置通过 `system_sim.launch.py` 传入 `moveit_servo` 参数命名空间。
 #
 
-# 仿真兼容性标志。
-# `false` 表示禁用旧版 Gazebo 的轨迹多点多发兼容层，采用 1 个轨迹点指令。
-# 这能让 MoveIt Servo 真实反映 100 Hz 的控制器节拍，避免视觉反馈延迟。
-use_gazebo: false
+# Gazebo Classic 的 joint_trajectory_controller 可能跳过只有一个、且执行时刻很近
+# 的 Servo 轨迹点。Humble MoveIt Servo 在该开关为 true 时会附加冗余轨迹点，
+# 防止 Twist 正常发布、status=0，但机械臂完全不动。实机配置仍保持 false。
+use_gazebo: true
 
 # 接收的输入命令类型。
 # `speed_units` 表示接收速度/角速度指令；`position_units` 表示接收位置偏移指令。
 command_in_type: speed_units
 
-# 输入命令的缩放系数。
-# 限制视觉伺服节点 `visual_servo_node.py` 计算出的线速度和角速度最大值，
-# 防止指令过快导致机械臂冲击。
+# `scale` 仅在 command_in_type=unitless 时生效；当前 speed_units 模式直接使用
+# visual_servo.yaml 中的 m/s、rad/s 限速，这里保留 MoveIt Servo 必需的完整配置。
 scale:
   linear: 0.10       # 线速度缩放系数
   rotational: 0.20   # 角速度缩放系数
   joint: 0.50        # 关节速度缩放系数
 
 # 伺服更新频率设置（重要参数）。
-# 原值为 `0.05 s` (20 Hz)。
-# 根据您项目文档中 `11.9` 节 "MoveIt Servo 100 Hz 分层升级" 的说明，
-# 若升级到 100 Hz，此值应改为 `0.01`。
-publish_period: 0.05
+# Gazebo 运行日志已确认碰撞检查开启时单次 Servo 计算约为 0.10 s。
+# 让积分周期与可实现的 10 Hz 执行周期一致，避免按 0.05 s 生成增量、却每
+# 0.10 s 才执行一次而使实际角速度减半。实机继续使用独立的 0.05 s 配置。
+publish_period: 0.10
 
-# 低延迟模式。
-# 关闭不必要的同步锁和校准，使伺服响应速度最快。
-low_latency_mode: true
+# 必须按固定周期输出。视觉节点以 30 Hz 发指令，而每个 JTC 轨迹首点
+# 位于 100 ms；若启用 low_latency，33 ms 到来的下一条命令会在上一条轨迹到达
+# 首点前不断替换它，表现为 Servo status=0、命令饱和但机械臂几乎不动。
+low_latency_mode: false
 
 # 节点输出给控制器的数据类型。
 # 输出标准的 JointTrajectory（关节空间轨迹）。
@@ -42,7 +42,9 @@ command_out_type: trajectory_msgs/JointTrajectory
 
 # 是否通过输出话题发布期望的关节位置和速度。
 publish_joint_positions: true
-publish_joint_velocities: false
+# JTC 虽然使用 position command interface，但速度字段会参与轨迹插值；保留
+# Servo 计算出的速度可避免连续短轨迹退化为重复的零边界速度插值。
+publish_joint_velocities: true
 publish_joint_accelerations: false
 
 # 平滑滤波器。

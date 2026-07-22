@@ -11,7 +11,8 @@ from wvcsc_arm_task.spray_task import SprayTask
 from wvcsc_arm_task.target_flow import (
     FruitTarget, TargetAttempt, completion_feedback_allowed,
     deduplicate_candidates, detection_candidates, final_spray_outcome,
-    spray_summary, target_accounting_is_complete, target_requires_recenter)
+    spray_summary, target_accounting, target_accounting_is_complete,
+    target_requires_recenter)
 from wvcsc_arm_task.observation import ObservationCandidate
 
 
@@ -110,6 +111,19 @@ def test_disappeared_pending_target_is_not_silently_completed():
 def test_target_accounting_requires_every_detection_to_be_resolved():
     assert target_accounting_is_complete(2, 1, 1)
     assert not target_accounting_is_complete(2, 1, 0)
+
+
+def test_target_accounting_merges_transitive_recovery_snapshots():
+    task = _QueueHarness()
+    first = _target('fruit-1', 640.0, 360.0)
+    bridge = _target('fruit-9', 675.0, 360.0)
+    latest = _target('fruit-18', 710.0, 360.0)
+    other = _target('fruit-2', 900.0, 360.0)
+
+    detected, sprayed, unresolved, pending = target_accounting(
+        [first, bridge, latest, other], [first], [other], task._same_target)
+
+    assert (detected, sprayed, unresolved, pending) == (2, 1, 1, [])
 
 
 def test_iou_is_zero_for_disjoint_targets():
@@ -726,7 +740,6 @@ class _PartialRecenterHarness(_RecenterAttemptHarness):
     @staticmethod
     def _wait_for_target_confirmation(
             _target_id, _cancel_requested, *, require_workspace):
-        assert require_workspace
         return True
 
     @staticmethod
@@ -760,6 +773,7 @@ def test_recenter_uses_a_larger_residual_when_precise_rotation_lacks_margin():
 def test_recenter_residual_outside_strict_tolerance_is_not_sent_to_servo():
     task = _PartialRecenterHarness()
     task._recenter_config['trigger_px'] = 1.5
+    task._recenter_config['workspace_px'] = 1.5
     attempt = TargetAttempt(_target('fruit-1', 740.0, 360.0))
 
     ok, message = task._recenter_target(
@@ -768,6 +782,24 @@ def test_recenter_residual_outside_strict_tolerance_is_not_sent_to_servo():
     assert not ok
     assert 'Servo entry tolerance 1.5px' in message
     assert task.debug_events == ['target_recenter_failed']
+
+
+def test_recenter_hands_a_safe_90px_residual_to_visual_servo_workspace():
+    task = _PartialRecenterHarness()
+    task._recenter_config.update({
+        'trigger_px': 48.0,
+        'workspace_px': 128.0,
+        'max_iterations': 1,
+    })
+    task._latest_target = lambda: _target('fruit-1', 730.0, 388.0)
+    attempt = TargetAttempt(_target('fruit-1', 740.0, 360.0))
+
+    ok, message = task._recenter_target(
+        attempt.target, attempt, lambda: False)
+
+    assert ok
+    assert message == 'target reconfirmed after recenter'
+    assert task.debug_events == ['target_recenter_confirmed']
 
 
 class _NoRecenterDriftHarness:
@@ -788,7 +820,7 @@ class _NoRecenterDriftHarness:
     @staticmethod
     def _wait_for_target_confirmation(
             _target_id, _cancel_requested, *, require_workspace):
-        assert require_workspace
+        assert not require_workspace
         return True
 
     @staticmethod
@@ -950,23 +982,30 @@ class _PostRecenterHarness:
     @staticmethod
     def _wait_for_target_confirmation(
             _target_id, _cancel_requested, *, require_workspace):
-        assert require_workspace
-        return False
+        return not require_workspace
+
+    @staticmethod
+    def _latest_target():
+        return _target('fruit-1', 650.0, 390.0)
 
     def _publish_observation_debug(self, event, *_args, **_kwargs):
         self.debug_events.append(event)
 
+    @staticmethod
+    def get_logger():
+        return SimpleNamespace(info=lambda *_args: None)
 
-def test_post_recenter_target_outside_workspace_blocks_alignment():
+
+def test_post_recenter_jitter_gate_does_not_block_servo_handoff():
     task = _PostRecenterHarness()
     attempt = TargetAttempt(_target('fruit-1', 740.0, 360.0))
 
     ok, message = task._recenter_target(
         attempt.target, attempt, lambda: False)
 
-    assert not ok
-    assert message == 'target was not reconfirmed after recenter'
-    assert task.debug_events == ['target_recenter_failed']
+    assert ok
+    assert message == 'target reconfirmed after recenter'
+    assert task.debug_events == ['target_recenter_confirmed']
 
 
 class _AlignHarness:

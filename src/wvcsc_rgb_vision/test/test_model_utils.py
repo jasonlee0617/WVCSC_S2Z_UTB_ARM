@@ -117,7 +117,7 @@ def test_locked_template_rejects_an_unrelated_search_region():
         search_radius_px=10, min_score=0.90) is None
 
 
-def test_template_replaces_a_low_confidence_yolo_update():
+def test_valid_low_confidence_yolo_is_not_replaced_by_template():
     initial = np.zeros((100, 120, 3), dtype=np.uint8)
     pattern = np.arange(5 * 5 * 3, dtype=np.uint8).reshape(5, 5, 3)
     initial[20:25, 30:35] = pattern
@@ -156,10 +156,90 @@ def test_template_replaces_a_low_confidence_yolo_update():
         moved, [low_confidence])
 
     assert reason == 'none'
+    assert event == 'target_reassociated'
+    assert tracked.confidence == pytest.approx(0.12)
+    assert tracked.aim_u == pytest.approx(43.0)
+    assert tracked.aim_v == pytest.approx(34.0)
+
+
+def test_template_only_bridges_a_frame_with_no_yolo_candidates():
+    initial = np.zeros((100, 120, 3), dtype=np.uint8)
+    pattern = np.arange(5 * 5 * 3, dtype=np.uint8).reshape(5, 5, 3)
+    initial[20:25, 30:35] = pattern
+    reference = Instance(
+        'fruit-1', 'diseased_fruit', 0.80,
+        30, 20, 35, 25, 32, 22)
+    template = capture_target_template(
+        initial, reference, padding_ratio=0.0, min_padding_px=0.0)
+    moved = np.zeros_like(initial)
+    moved[44:49, 52:57] = pattern
+    node = object.__new__(TwoStageYolo)
+    node._selected_target_id = 'fruit-1'
+    node._selected_target_reference = reference
+    node._selected_target_template = template
+    node._target_class_name = 'diseased_fruit'
+    node.get_parameter = lambda name: SimpleNamespace(value={
+        'track_iou_threshold': 0.20,
+        'target_reassociation_distance_px': 50.0,
+        'target_reassociation_iou_margin': 0.10,
+        'target_reassociation_distance_margin_px': 8.0,
+        'target_equivalent_aim_distance_px': 8.0,
+        'target_lock_ema_alpha': 0.50,
+        'target_template_tracking_enabled': True,
+        'target_template_update_min_confidence': 0.30,
+        'target_template_padding_ratio': 0.0,
+        'target_template_min_padding_px': 0.0,
+        'target_template_search_radius_px': 50.0,
+        'target_template_min_score': 0.90,
+    }[name])
+
+    tracked, reason, event = node._resolve_or_track_selected_target(moved, [])
+
+    assert reason == 'none'
     assert event == 'target_template_tracked'
-    assert tracked.confidence == pytest.approx(0.80)
     assert tracked.aim_u == pytest.approx(54.0)
     assert tracked.aim_v == pytest.approx(46.0)
+
+
+def test_template_does_not_bypass_an_ambiguous_yolo_frame():
+    initial = np.zeros((80, 120, 3), dtype=np.uint8)
+    pattern = np.arange(5 * 5 * 3, dtype=np.uint8).reshape(5, 5, 3)
+    initial[20:25, 30:35] = pattern
+    reference = Instance(
+        'fruit-1', 'diseased_fruit', 0.80,
+        30, 20, 35, 25, 32, 22)
+    node = object.__new__(TwoStageYolo)
+    node._selected_target_id = 'fruit-1'
+    node._selected_target_reference = reference
+    node._selected_target_template = capture_target_template(
+        initial, reference, padding_ratio=0.0, min_padding_px=0.0)
+    node._target_class_name = 'diseased_fruit'
+    node.get_parameter = lambda name: SimpleNamespace(value={
+        'track_iou_threshold': 0.20,
+        'target_reassociation_distance_px': 50.0,
+        'target_reassociation_require_unique_candidate': True,
+        'target_reassociation_iou_margin': 0.10,
+        'target_reassociation_distance_margin_px': 8.0,
+        'target_equivalent_aim_distance_px': 8.0,
+        'target_lock_ema_alpha': 0.50,
+        'target_template_tracking_enabled': True,
+        'target_template_update_min_confidence': 0.30,
+        'target_template_padding_ratio': 0.0,
+        'target_template_min_padding_px': 0.0,
+        'target_template_search_radius_px': 50.0,
+        'target_template_min_score': 0.50,
+    }[name])
+    candidates = [
+        Instance('fruit-9', 'diseased_fruit', 0.8, 31, 20, 36, 25, 33, 22),
+        Instance('fruit-10', 'diseased_fruit', 0.8, 60, 20, 65, 25, 62, 22),
+    ]
+
+    target, reason, event = node._resolve_or_track_selected_target(
+        initial, candidates)
+
+    assert target is None
+    assert reason == 'selected_id_missing_multiple_candidates'
+    assert event == 'target_invalid'
 
 
 def _target_selection_node(selected_id, reference):
@@ -266,6 +346,26 @@ def test_selected_target_refuses_ambiguous_reassociation():
 
     assert target is None
     assert reason == 'ambiguous_reassociation'
+    assert event == 'target_invalid'
+
+
+def test_selected_target_rejects_id_switch_when_multiple_candidates_are_locked_out():
+    reference = Instance('fruit-1', 'diseased_fruit', 0.9, 10, 10, 30, 30, 20, 20)
+    node = _target_selection_node('fruit-1', reference)
+    original_get_parameter = node.get_parameter
+    node.get_parameter = lambda name: (
+        SimpleNamespace(value=True)
+        if name == 'target_reassociation_require_unique_candidate'
+        else original_get_parameter(name))
+    candidates = [
+        Instance('fruit-9', 'diseased_fruit', 0.9, 11, 10, 31, 30, 21, 20),
+        Instance('fruit-10', 'diseased_fruit', 0.9, 80, 10, 100, 30, 90, 20),
+    ]
+
+    target, reason, event = node._resolve_selected_target(candidates)
+
+    assert target is None
+    assert reason == 'selected_id_missing_multiple_candidates'
     assert event == 'target_invalid'
 
 

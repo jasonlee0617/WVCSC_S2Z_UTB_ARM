@@ -763,19 +763,19 @@ class ObservationFlowMixin:
         pre_error_u, pre_error_v = target_pixel_error(
             target.center_u, target.center_v, desired_u, desired_v)
         
-        # 如果目标已经在视觉伺服的 48px 工作窗口内，则跳过重心动作
+        # 如果目标已经在配置的视觉伺服工作窗口内，则跳过重心动作
         if not target_requires_recenter(
                 target.center_u, target.center_v, desired_u, desired_v,
                 self._recenter_config['trigger_px']):
             if not self._wait_for_target_confirmation(
-                    target.target_id, cancel_requested, require_workspace=True):
+                    target.target_id, cancel_requested, require_workspace=False):
                 return False, (
-                    'target did not remain reliable inside fine-servo workspace')
+                    'target was not freshly reconfirmed before visual servo')
             confirmed = self._latest_target()
             post_error_u, post_error_v = target_pixel_error(
                 confirmed.center_u, confirmed.center_v, desired_u, desired_v)
             post_error_norm = math.hypot(post_error_u, post_error_v)
-            if post_error_norm > self._recenter_config['trigger_px']:
+            if post_error_norm > self._recenter_config['workspace_px']:
                 self._publish_observation_debug(
                     'target_recenter_failed',
                     target_id=target.target_id,
@@ -788,7 +788,7 @@ class ObservationFlowMixin:
                 return False, (
                     f'target drifted to {post_error_norm:.1f}px outside '
                     f'Servo entry tolerance '
-                    f'{self._recenter_config["trigger_px"]:.1f}px')
+                    f'{self._recenter_config["workspace_px"]:.1f}px')
             self._publish_observation_debug(
                 'target_recenter_not_required',
                 target_id=target.target_id,
@@ -812,15 +812,19 @@ class ObservationFlowMixin:
         camera_pose = self._current_camera_pose()
         if camera_pose is None:
             return False, 'actual camera pose unavailable for target recenter'
+        maximum_total_angle = self._recenter_config.get(
+            'max_total_angle_deg', math.inf)
         candidate, angle_deg, rejection_reason = self._move_recenter_step(
-            observation, target, camera, current_joints, camera_pose=camera_pose)
+            observation, target, camera, current_joints, camera_pose=camera_pose,
+            max_angle_deg=min(
+                self._recenter_config['max_angle_deg'], maximum_total_angle))
         if candidate is None:
             return False, f'target recenter rejected: {rejection_reason}'
         if self._aborted(cancel_requested):
             return False, 'spray goal canceled'
         self._reset_target_confirmation(target.target_id)
         if not self._wait_for_target_confirmation(
-                target.target_id, cancel_requested, require_workspace=True):
+                target.target_id, cancel_requested, require_workspace=False):
             self._publish_observation_debug(
                 'target_recenter_failed', candidate,
                 target_id=target.target_id,
@@ -835,10 +839,16 @@ class ObservationFlowMixin:
             confirmed.center_u, confirmed.center_v, desired_u, desired_v)
         total_angle_deg = angle_deg
         iterations = 1
+        self.get_logger().info(
+            f'[ARM][RECENTER_STEP] target={target.target_id} iteration=1 '
+            f'angle={angle_deg:.1f}deg total={total_angle_deg:.1f}deg '
+            f'error={math.hypot(pre_error_u, pre_error_v):.1f}px'
+            f'→{math.hypot(post_error_u, post_error_v):.1f}px')
         
         # 循环细化重心，直到误差小于 refine_goal_px 或达到最大迭代次数
         while (
                 iterations < self._recenter_config['max_iterations'] and
+                total_angle_deg < maximum_total_angle and
                 math.hypot(post_error_u, post_error_v) >
                 self._recenter_config['refine_goal_px']):
             inputs = self._wait_for_observation_inputs()
@@ -863,7 +873,9 @@ class ObservationFlowMixin:
                 break
             refined, refine_angle, rejection_reason = self._move_recenter_step(
                 candidate, confirmed, camera, current_joints, camera_pose=camera_pose,
-                suffix=f'_refine{iterations}')
+                suffix=f'_refine{iterations}', max_angle_deg=min(
+                    self._recenter_config['max_angle_deg'],
+                    maximum_total_angle - total_angle_deg))
             if refined is None:
                 self._publish_observation_debug(
                     'target_recenter_refine_skipped', candidate,
@@ -874,6 +886,11 @@ class ObservationFlowMixin:
                     post_error_v_px=post_error_v,
                     planned_angle_deg=total_angle_deg,
                     rejection_reason=rejection_reason)
+                self.get_logger().warn(
+                    f'[ARM][RECENTER_STEP] target={target.target_id} '
+                    f'iteration={iterations + 1} rejected '
+                    f'error={math.hypot(post_error_u, post_error_v):.1f}px '
+                    f'reason={rejection_reason}')
                 break
             candidate = refined
             total_angle_deg += refine_angle
@@ -881,7 +898,7 @@ class ObservationFlowMixin:
             self._reset_target_confirmation(target.target_id)
             if not self._wait_for_target_confirmation(
                     target.target_id, cancel_requested,
-                    require_workspace=True):
+                    require_workspace=False):
                 self._publish_observation_debug(
                     'target_recenter_failed', candidate,
                     target_id=target.target_id,
@@ -891,10 +908,17 @@ class ObservationFlowMixin:
                     rejection_reason='target_not_reconfirmed_after_refine')
                 return False, 'target was not reconfirmed after recenter refinement'
             confirmed = self._latest_target()
+            previous_error_norm = math.hypot(post_error_u, post_error_v)
             post_error_u, post_error_v = target_pixel_error(
                 confirmed.center_u, confirmed.center_v, desired_u, desired_v)
+            self.get_logger().info(
+                f'[ARM][RECENTER_STEP] target={target.target_id} '
+                f'iteration={iterations} angle={refine_angle:.1f}deg '
+                f'total={total_angle_deg:.1f}deg '
+                f'error={previous_error_norm:.1f}px'
+                f'→{math.hypot(post_error_u, post_error_v):.1f}px')
         post_error_norm = math.hypot(post_error_u, post_error_v)
-        if post_error_norm > self._recenter_config['trigger_px']:
+        if post_error_norm > self._recenter_config['workspace_px']:
             self._publish_observation_debug(
                 'target_recenter_failed', candidate,
                 target_id=target.target_id,
@@ -907,7 +931,13 @@ class ObservationFlowMixin:
             return False, (
                 f'target recenter residual {post_error_norm:.1f}px exceeds '
                 f'Servo entry tolerance '
-                f'{self._recenter_config["trigger_px"]:.1f}px')
+                f'{self._recenter_config["workspace_px"]:.1f}px '
+                f'after {iterations} step(s), total_angle='
+                f'{total_angle_deg:.1f}deg')
+        # 粗对准只负责把一个新鲜、有效的锁定目标送入 Servo 可控窗口。
+        # 不在这里重复要求检测点连续 0.2s 漂移小于 4px：低置信度分割框在
+        # 静止画面也可能有数像素抖动，这个前置门控会阻止 Servo 启动；真正的
+        # 对准稳定性由 AlignTarget 的 4px/0.5s 闭环成功条件统一判定。
         self._publish_observation_debug(
             'target_recenter_confirmed', candidate,
             target_id=target.target_id,
@@ -927,7 +957,7 @@ class ObservationFlowMixin:
 
     def _move_recenter_step(
             self, observation, target, camera, current_joints, *, camera_pose=None,
-            suffix=''):
+            suffix='', max_angle_deg=None):
         """用真实 C10 起点生成并执行一次安全的重心姿态。
 
         ``observation`` 只提供候选的距离、高度、方位和诊断身份；若调用方传入
@@ -944,6 +974,10 @@ class ObservationFlowMixin:
         desired_aim = self._active_aim_pixel(camera[4], camera[5])
         if desired_aim is None:
             return None, 0.0, 'calibrated nozzle aim is unavailable'
+        if max_angle_deg is None:
+            max_angle_deg = self._recenter_config['max_angle_deg']
+        if max_angle_deg <= 0.0:
+            return None, 0.0, 'recenter total angle limit reached'
         # 尝试不同的残差，以逐步逼近目标而不是一次超大幅运动
         for residual_px in self._recenter_config['residual_candidates_px']:
             try:
@@ -951,7 +985,7 @@ class ObservationFlowMixin:
                     start_camera_position, start_camera_quat,
                     camera, target.center_u, target.center_v,
                     *desired_aim,
-                    self._recenter_config['max_angle_deg'],
+                    max_angle_deg,
                     residual_error_px=residual_px)
                 tool_position, tool_quat = tool_pose_from_camera_pose(
                     camera_position, camera_quat,

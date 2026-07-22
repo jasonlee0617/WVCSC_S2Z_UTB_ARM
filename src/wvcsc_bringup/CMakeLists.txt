@@ -17,6 +17,7 @@ install(PROGRAMS
   DESTINATION share/${PROJECT_NAME}/scripts)
 install(PROGRAMS
   scripts/capture_site_pose.py
+  scripts/arm_spray_once.py
   scripts/load_site_mission.py
   scripts/nav_validate_sites.py
   scripts/validate_site_mission.py
@@ -24,6 +25,9 @@ install(PROGRAMS
 install(PROGRAMS scripts/capture_site_pose.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME capture_site_pose)
+install(PROGRAMS scripts/arm_spray_once.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME arm_spray_once)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)

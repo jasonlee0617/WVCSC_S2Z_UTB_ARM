@@ -101,6 +101,31 @@ def test_real_orchestration_uses_real_leaf_and_measured_mission_contracts():
     assert 'strict_model_classes: true' in vision
 
 
+def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
+    source = _source('real_arm_spray_test.launch.py')
+    script = (PACKAGE / 'scripts' / 'arm_spray_once.py').read_text(
+        encoding='utf-8')
+
+    assert 'real_navigation.launch.py' not in source
+    assert 'real_sensors.launch.py' not in source
+    assert 'mission_manager' not in source
+    assert 'wtb_car_driver' not in source
+    assert 'lslidar_driver' not in source
+    assert 'yesense_std_ros2' not in source
+    assert "'publish_robot_state': 'true'" in source
+    assert "_load_calibrated_mount(handeye_path)" in source
+    assert "_load_nozzle_calibration(nozzle_path)" in source
+    assert 'c10_camera.launch.py' in source
+    assert 'vision_real.yaml' in source
+    assert "executable='spray_task'" in source
+    assert "executable='spray_simulator'" in source
+
+    assert 'MissionStatus.ARM_SPRAYING' in script
+    assert "default='alicia_base_link'" in script
+    assert 'tree_hint.header.frame_id = self.args.frame_id' in script
+    assert 'ActionClient(self, ExecuteSpray, \'/arm/execute_spray\')' in script
+
+
 def test_real_sensor_stack_has_one_unified_robot_state_publisher():
     source = _source('real_sensors.launch.py')
 
@@ -270,4 +295,5 @@ def test_real_arm_keeps_camera_clearance_and_servo_collision_checks():
     assert arm_parameters['camera_height_max_m'] == pytest.approx(0.40)
     assert arm_parameters['camera_height_step_m'] == pytest.approx(0.10)
     assert 'observation_min_camera_z_in_base_m' not in arm_parameters
+    assert servo_parameters['use_gazebo'] is False
     assert servo_parameters['check_collisions'] is True

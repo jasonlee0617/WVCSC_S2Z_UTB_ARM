@@ -34,7 +34,8 @@ from .node_parameters import create_alicia_moveit
 from .observation import ObservationFlowMixin, ObservationOptimizer
 from .target_flow import (TargetAttempt, TargetFlowMixin,
                           completion_feedback_allowed, final_spray_outcome,
-                          spray_summary, target_accounting_is_complete)
+                          spray_summary, target_accounting,
+                          target_accounting_is_complete)
 
 
 class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, Node):
@@ -226,10 +227,12 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'target_recenter_trigger_px': 48.0,
             'target_recenter_workspace_px': 48.0,
             'target_recenter_max_angle_deg': 20.0,
+            'target_recenter_max_total_angle_deg': 30.0,
             'target_recenter_refine_goal_px': 8.0,
-            'target_recenter_max_iterations': 2,
+            'target_recenter_max_iterations': 8,
             'target_recenter_residual_candidates_px': [
-                3.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0, 1.0, 0.0],
+                3.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0, 64.0, 96.0,
+                128.0, 160.0, 240.0, 320.0, 1.0, 0.0],
             'target_recenter_position_tolerance_m': 0.002,
             'target_recenter_orientation_tolerance_rad': 0.002,
             'target_post_recenter_stable_sec': 0.20,
@@ -361,6 +364,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'workspace_px': float(
                 self.get_parameter('target_recenter_workspace_px').value),
             'max_angle_deg': float(self.get_parameter('target_recenter_max_angle_deg').value),
+            'max_total_angle_deg': float(self.get_parameter(
+                'target_recenter_max_total_angle_deg').value),
             'refine_goal_px': float(
                 self.get_parameter('target_recenter_refine_goal_px').value),
             'max_iterations': int(
@@ -389,15 +394,17 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         if (not all(math.isfinite(value) for value in scalar_values) or
                 values['trigger_px'] <= 0.0 or values['max_angle_deg'] <= 0.0 or
                 values['max_angle_deg'] > 180.0 or
+                values['max_total_angle_deg'] < values['max_angle_deg'] or
+                values['max_total_angle_deg'] > 180.0 or
                 values['workspace_px'] < values['trigger_px'] or
                 values['refine_goal_px'] <= 0.0 or
                 values['refine_goal_px'] > values['trigger_px'] or
                 values['position_tolerance_m'] <= 0.0 or
                 values['orientation_tolerance_rad'] <= 0.0 or
-                not 1 <= values['max_iterations'] <= 5 or
+                not 1 <= values['max_iterations'] <= 8 or
                 not values['residual_candidates_px'] or
                 any(not math.isfinite(value) or value < 0.0 or
-                    value >= values['workspace_px']
+                    value > 4096.0
                     for value in values['residual_candidates_px']) or
                 values['post_stable_sec'] <= 0.0 or
                 values['post_max_drift_px'] <= 0.0 or
@@ -818,16 +825,24 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 return ExecuteSpray.Result.HOME_FAILED, 'observation return failed'
             self._reset_fruit_tracking()
 
-        # 队列处理后，强制校验逻辑一致性
-        for target in self._pending_targets(
-                known_targets, processed, exhausted):
+        # 队列处理后，按快照的传递关联统计物理目标，避免恢复位的框漂移重复计数。
+        detected, accounted_sprayed, unresolved, pending = target_accounting(
+            known_targets, processed, exhausted, self._same_target)
+        for target in pending:
             self._mark_unresolved(target, exhausted)
-        if sprayed != len(processed) or not target_accounting_is_complete(
-                len(known_targets), sprayed, len(exhausted)):
+        detected, accounted_sprayed, unresolved, pending = target_accounting(
+            known_targets, processed, exhausted, self._same_target)
+        if len(known_targets) != detected:
+            self.get_logger().info(
+                f'[ARM][{tree}] target accounting reconciled '
+                f'raw_detected={len(known_targets)} logical_detected={detected}')
+        if (sprayed != len(processed) or sprayed != accounted_sprayed or pending or
+                not target_accounting_is_complete(
+                    detected, accounted_sprayed, unresolved)):
             message = (
                 'target accounting invariant failed: '
-                f'detected={len(known_targets)} sprayed={sprayed} '
-                f'unresolved={len(exhausted)} treated={len(processed)}')
+                f'detected={detected} sprayed={accounted_sprayed} '
+                f'unresolved={unresolved} treated={len(processed)}')
             self.get_logger().error(f'[ARM][{tree}] {message}')
             return self._recover_failure(
                 ExecuteSpray.Result.VISION_FAILED, message, cancel_requested)
@@ -842,14 +857,14 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
 
         # 生成任务摘要与结果
         summary = spray_summary(
-            len(known_targets), sprayed, len(exhausted), alignment_failures,
+            detected, accounted_sprayed, unresolved, alignment_failures,
             recenter_attempts, recenter_failures, alignment_attempts)
         self.get_logger().info(
             f'[ARM][{tree}] ═══ SUMMARY ═══ '
             f'side={request.spray_side} distance={self._observation_distance}m '
             f'{summary}')
         code, message = final_spray_outcome(
-            sprayed, len(exhausted), saw_disease, summary)
+            accounted_sprayed, unresolved, saw_disease, summary)
         if completion_feedback_allowed(code):
             feedback(ExecuteSpray.Feedback.COMPLETED, 1.0, 'COMPLETED')
         return code, message

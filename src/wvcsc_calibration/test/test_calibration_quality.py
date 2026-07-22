@@ -16,6 +16,7 @@ from wvcsc_calibration.calibration_quality import (
     transform_error,
 )
 from wvcsc_calibration.auto_calibration_collector import (
+    balanced_candidate_order,
     camera_center_aim_offsets,
     estimate_refined_aruco_pose,
 )
@@ -25,6 +26,7 @@ def _observation(index=0, margin=100.0):
     return MarkerObservation(
         center_px=(640.0 + 0.1 * index, 360.0 - 0.1 * index),
         margin_px=margin,
+        side_px=100.0,
         translation=(0.0, 0.0, 0.50 + 0.0001 * index),
         rotation_vector=(0.0, 0.01, 0.0),
         received_monotonic=float(index))
@@ -45,6 +47,34 @@ def test_marker_window_enforces_count_edge_and_stability():
         maximum_center_std_px=4.0, maximum_depth_std_m=0.003,
         maximum_angle_std_deg=0.8)
     assert not invalid and 'edge' in message
+
+
+def test_marker_window_rejects_small_marker_images():
+    values = [_observation(index) for index in range(10)]
+    values[-1] = MarkerObservation(
+        center_px=values[-1].center_px,
+        margin_px=values[-1].margin_px,
+        side_px=20.0,
+        translation=values[-1].translation,
+        rotation_vector=values[-1].rotation_vector,
+        received_monotonic=values[-1].received_monotonic)
+    valid, message = stable_marker_window(
+        values, required_frames=10, min_distance_m=0.25,
+        max_distance_m=0.80, minimum_margin_px=60.0,
+        minimum_marker_side_px=90.0, maximum_center_std_px=4.0,
+        maximum_depth_std_m=0.003, maximum_angle_std_deg=0.8)
+    assert not valid and 'small' in message
+
+
+def test_candidate_order_interleaves_view_families():
+    candidates = [
+        SimpleNamespace(candidate_id='roll_-14'),
+        SimpleNamespace(candidate_id='roll_-8'),
+        SimpleNamespace(candidate_id='horizontal_-10'),
+        SimpleNamespace(candidate_id='horizontal_+10'),
+    ]
+    assert [candidate.candidate_id for candidate in balanced_candidate_order(candidates)] == [
+        'roll_-14', 'horizontal_-10', 'roll_-8', 'horizontal_+10']
 
 
 def test_camera_center_aim_offsets_use_live_camera_info():
@@ -121,7 +151,23 @@ def test_collector_waits_for_marker_only_after_the_adaptive_anchor_move():
     assert run_session.index('self._move_to_initial_anchor(') < \
         run_session.index('self._wait_inputs()')
     assert run_session.index('self._wait_inputs()') < \
+        run_session.index('self._wait_easy_services()')
+    assert run_session.index('self._wait_easy_services()') < \
         run_session.index('self._clear_easy_samples()')
+
+
+def test_collector_waits_for_moveit_before_anchor_search():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    assert "'startup_service_timeout_sec': 20.0" in source
+    assert "self._compute_ik_client = self.create_client(" in source
+    assert "self._plan_path_client = self.create_client(" in source
+    assert "self._execute_trajectory_client = ActionClient(" in source
+    run_session = source.split('    def _run_session(self):', 1)[1].split(
+        '    def _solve', 1)[0]
+    assert run_session.index('self._wait_moveit_services()') < \
+        run_session.index('self._move_to_initial_anchor(')
 
 
 def test_collector_does_not_overwrite_rclpy_node_client_storage():
@@ -165,7 +211,33 @@ def test_collector_recovers_from_a_visible_but_near_singular_seed():
     assert 'required_safe = max(minimum_safe, target_samples)' in run_session
     assert 'safe-anchor={anchor.candidate_id}' in run_session
     assert 'self._wait_inputs()' in run_session
-    assert 'self._safe_candidates(candidates, optimizer)' in run_session
+    assert 'self._screen_candidate_plans(' in run_session
+
+
+def test_collector_screens_ik_before_limited_ompl_planning():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    assert "'candidate_plan_attempts_per_family': 3" in source
+    screening = source.split('    def _screen_candidate_plans(', 1)[1].split(
+        '    def _execute_candidate_plan(', 1)[0]
+    assert 'self._candidate_ik_details(' in screening
+    assert 'ranked[:attempts_per_family]' in screening
+    assert 'self._checked_candidate_plan(' in screening
+    assert "'ik_ok': 0" in screening
+    assert "'planned_ok': 0" in screening
+    assert "'rejected_condition': 0" in screening
+
+
+def test_collector_reuses_plans_only_when_start_joints_still_match():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    execution = source.split('    def _execute_candidate_plan(', 1)[1].split(
+        '    def _move_to_initial_anchor(', 1)[0]
+    assert 'plan.start_joints' in execution
+    assert '<= 0.01' in execution
+    assert 'self._safe_plan(plan.candidate, optimizer)' in execution
 
 
 def test_collector_uses_marker_prior_for_the_first_safe_anchor():
@@ -176,8 +248,32 @@ def test_collector_uses_marker_prior_for_the_first_safe_anchor():
     anchor = source.split('    def _move_to_initial_anchor(', 1)[1].split(
         '    def _install_calibration_surface(', 1)[0]
     assert 'generate_initial_anchor_candidates(' in anchor
-    assert 'self._safe_plan_details(candidate, optimizer)' in anchor
+    assert 'self._candidate_ik_details(' in anchor
+    assert 'self._checked_candidate_plan(' in anchor
     assert "'no collision-safe initial anchor" in anchor
+
+
+def test_collector_initial_anchor_scores_joint_margin_before_condition():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'auto_calibration_collector.py').read_text(encoding='utf-8')
+    anchor = source.split('    def _move_to_initial_anchor(', 1)[1].split(
+        '    def _install_calibration_surface(', 1)[0]
+    assert 'seed_height_candidates_m' in anchor
+    assert 'seed_radial_backoff_candidates_m' in anchor
+    assert 'seed_tangential_offset_candidates_m' in anchor
+    assert '-item.margin' in anchor
+    assert 'item.condition' in anchor
+    assert 'joint_margin={selected.margin:.2f}rad' in anchor
+
+
+def test_aruco_overlay_does_not_overwrite_rclpy_parameter_storage():
+    source = (
+        Path(__file__).parents[1] / 'wvcsc_calibration' /
+        'visualize_aruco_marker.py').read_text(encoding='utf-8')
+    assert 'self._detector_parameters = (' in source
+    assert 'parameters=self._detector_parameters' in source
+    assert 'self._parameters =' not in source
 
 
 def test_collector_applies_live_camera_centre_aim_to_all_candidate_sets():

@@ -75,8 +75,8 @@ wvcsc_two_stage_yolo:
     # 如果由于相机镜头畸变导致 IoU 不再重叠，但中心距离 < 50px，也判定为同一目标。
     track_center_distance_px: 50.0
     # 允许 YOLO 连续漏检的最大帧数。
-    # 设定为 5 帧，对应约 0.16 秒（~30Hz），可容纳 YOLO 短暂卡顿。
-    track_max_missed_frames: 5
+    # 设定为 15 帧，对应约 0.5 秒（~30Hz），覆盖 MoveIt 重心过程中的短时遮挡。
+    track_max_missed_frames: 15
 
     # ----------------------------------------------------------------------
     # 5. 选中目标重关联 (Target Re-association) 配置
@@ -84,6 +84,8 @@ wvcsc_two_stage_yolo:
     # 当视觉伺服导致机械臂大幅运动（粗定位），目标在画面中明显漂移时，
     # 使用更宽泛的距离容差 (160px) 重新关联锁定目标。
     target_reassociation_distance_px: 160.0
+    # 多病果重心期间不允许依靠宽像素门限切换到另一个实例；模板跟踪仍可保留原目标。
+    target_reassociation_require_unique_candidate: true
 
     # 重关联时的歧义防护：如果候选目标与参考目标的 IoU 差值小于 0.10，
     # 则认为出现了重关联歧义（两个果实长得太像），此时节点会丢弃目标，

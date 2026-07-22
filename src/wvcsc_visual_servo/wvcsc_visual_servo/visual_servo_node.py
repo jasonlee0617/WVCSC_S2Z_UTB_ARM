@@ -32,6 +32,7 @@ from sensor_msgs.msg import CameraInfo, JointState
 from std_msgs.msg import Int8, String
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
+from trajectory_msgs.msg import JointTrajectory
 from wvcsc_interfaces.action import AlignTarget
 from wvcsc_interfaces.msg import Target2D
 from wvcsc_interfaces.srv import ComputeSprayAim
@@ -68,7 +69,12 @@ class _GoalState:
     last_debug_publish: float | None = None        # 上次发布高频调试信息的时间
     last_terminal_status_log: float | None = None  # 上次打印终端人类可读日志的时间
     last_terminal_phase: tuple | None = None       # 上次记录的终端阶段状态
-    alignment_hold_latched: bool = False           # 收敛迟滞保持标志（防止误差在 1.5px 附近反复跳动）
+    alignment_hold_latched: bool = False           # 收敛迟滞保持标志（防止误差在容差边缘反复跳动）
+    initial_joint_positions: tuple = ()             # Action 开始时的机械臂关节快照
+    max_joint_delta_rad: float = 0.0                # Action 期间实际最大关节位移
+    servo_output_count: int = 0                     # MoveIt Servo 输出轨迹条数
+    servo_output_points: int = 0                    # 最近一条输出轨迹的点数
+    max_commanded_joint_delta_rad: float = 0.0      # Servo 轨迹相对实测关节的最大位移
 
 
 def _positive_finite_rate(node, name):
@@ -168,6 +174,10 @@ class VisualServo(Node):
             JointState, str(self.get_parameter('joint_state_topic').value),
             self._on_joint_state, qos_profile_sensor_data,
             callback_group=self._group)
+        self.create_subscription(
+            JointTrajectory,
+            str(self.get_parameter('servo_command_out_topic').value),
+            self._on_servo_output, 10, callback_group=self._group)
 
         # 6. MoveIt Servo 只在本节点首个对齐任务前启动一次。后续目标用零
         # Twist 制动，而不是在 Gazebo 组件容器中反复 pause/unpause；后者会
@@ -202,6 +212,7 @@ class VisualServo(Node):
             'twist_topic': '/servo_node/delta_twist_cmds',
             'servo_status_topic': '/servo_node/status',
             'joint_state_topic': '/joint_states',
+            'servo_command_out_topic': '/arm_controller/joint_trajectory',
             'debug_topic': '/vision/visual_servo_debug',
             'debug_rate_hz': 5.0,
             'terminal_status_rate_hz': 1.0,
@@ -525,6 +536,33 @@ class VisualServo(Node):
             return
         with self._lock:
             self._joint_positions = arm_positions
+            initial = self._goal_state.initial_joint_positions
+            if self._busy and len(initial) == len(arm_positions):
+                self._goal_state.max_joint_delta_rad = max(
+                    self._goal_state.max_joint_delta_rad,
+                    max(abs(current - start) for current, start in zip(
+                        arm_positions, initial)))
+
+    def _on_servo_output(self, message):
+        """记录 Servo 是否真的向 ros2_control 发布了可执行关节轨迹。"""
+        if not message.points:
+            return
+        with self._lock:
+            if not self._busy:
+                return
+            self._goal_state.servo_output_count += 1
+            self._goal_state.servo_output_points = len(message.points)
+            current = dict(zip(self._ARM_JOINT_NAMES, self._joint_positions))
+            point = message.points[0]
+            if len(point.positions) != len(message.joint_names):
+                return
+            commanded = dict(zip(message.joint_names, point.positions))
+            if all(name in commanded and name in current
+                   for name in self._ARM_JOINT_NAMES):
+                self._goal_state.max_commanded_joint_delta_rad = max(
+                    self._goal_state.max_commanded_joint_delta_rad,
+                    max(abs(float(commanded[name]) - current[name])
+                        for name in self._ARM_JOINT_NAMES))
 
     def _on_servo_status(self, message):
         """仲裁 MoveIt Servo 的安全状态，并将不可恢复的错误直接传递给主循环。"""
@@ -564,8 +602,11 @@ class VisualServo(Node):
             self._active_mission = request.mission_id
             self._active_tree = request.tree_id
             self._active_target = request.target_id
-            self._goal_state = _GoalState(target_unavailable_since=started,
-                                    alignment_started=started)
+            self._goal_state = _GoalState(
+                target_unavailable_since=started,
+                alignment_started=started,
+                initial_joint_positions=tuple(
+                    getattr(self, '_joint_positions', ())))
             self._servo_status = 0
             self._predictor.reset()
             self._controller.reset()
@@ -915,6 +956,10 @@ class VisualServo(Node):
             f'{self._goal_state.last_command[1]:.3f}) '
             f'peak_command_{self._command_labels()[1]}={self._goal_state.peak_command_norm:.3f} '
             f'control_cycles={self._goal_state.control_cycles} control_dt={self._goal_state.last_control_dt:.3f}s '
+            f'servo_outputs={self._goal_state.servo_output_count} '
+            f'servo_output_points={self._goal_state.servo_output_points} '
+            f'commanded_joint_delta={self._goal_state.max_commanded_joint_delta_rad:.5f}rad '
+            f'actual_joint_delta={self._goal_state.max_joint_delta_rad:.5f}rad '
             f'servo_status={self._servo_status} message={message}')
         self._publish_debug(
             event, result_code=code, message=message, force=True,
@@ -1191,6 +1236,11 @@ class VisualServo(Node):
             lifecycle_transition=self._last_lifecycle_transition,
             service_latency_sec=self._last_service_latency_sec,
             joint_positions=list(self._joint_positions),
+            servo_output_count=int(self._goal_state.servo_output_count),
+            servo_output_points=int(self._goal_state.servo_output_points),
+            max_commanded_joint_delta_rad=float(
+                self._goal_state.max_commanded_joint_delta_rad),
+            max_joint_delta_rad=float(self._goal_state.max_joint_delta_rad),
             result_code=int(result_code),
             message=message,
         )

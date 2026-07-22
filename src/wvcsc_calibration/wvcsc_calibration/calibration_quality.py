@@ -9,6 +9,7 @@ import statistics
 class MarkerObservation:
     center_px: tuple
     margin_px: float
+    side_px: float
     translation: tuple
     rotation_vector: tuple
     received_monotonic: float
@@ -46,7 +47,8 @@ def transform_error(actual, expected):
 def stable_marker_window(
         observations, *, required_frames, min_distance_m, max_distance_m,
         minimum_margin_px, maximum_center_std_px,
-        maximum_depth_std_m, maximum_angle_std_deg):
+        maximum_depth_std_m, maximum_angle_std_deg,
+        minimum_marker_side_px=0.0):
     """Validate the latest consecutive ArUco observations."""
     required = int(required_frames)
     window = list(observations)[-required:]
@@ -54,6 +56,8 @@ def stable_marker_window(
         return False, 'insufficient stable marker frames'
     if any(obs.margin_px < float(minimum_margin_px) for obs in window):
         return False, 'marker is too close to the image edge'
+    if any(obs.side_px < float(minimum_marker_side_px) for obs in window):
+        return False, 'marker is too small in the image'
     distances = [_norm(obs.translation) for obs in window]
     if min(distances) < float(min_distance_m) or max(distances) > float(max_distance_m):
         return False, 'marker distance is outside the calibration range'

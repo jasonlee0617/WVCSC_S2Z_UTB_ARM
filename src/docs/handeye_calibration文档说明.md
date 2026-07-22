@@ -41,7 +41,7 @@ source install/setup.bash
 ros2 launch wvcsc_simulation calibration_sim.launch.py
 ```
 
-该命令自动启动 Gazebo、整车模型、marker、控制器、MoveIt、C10、ArUco、marker TF、easy_handeye2 和采集器。仿真配置 `auto_start: true`，不需要第二个终端按键。
+该命令自动启动 Gazebo、整车模型、marker、控制器、MoveIt、C10、ArUco、ArUco 可视化、marker TF、easy_handeye2 和采集器。仿真配置 `auto_start: true`，不需要第二个终端按键。
 
 启动顺序为：
 
@@ -51,7 +51,7 @@ ros2 launch wvcsc_simulation calibration_sim.launch.py
 -> MoveIt / ArUco / easy_handeye2 -> 自动采集
 ```
 
-采集器先根据 marker 先验生成 18 个初始相机观察位，再依次执行碰撞 IK、Jacobian 条件数、关节余量和 OMPL 门控。它不再使用固定关节角作为初始观察位。
+采集器先根据 marker 先验生成一组更高、更远、更偏移的初始 anchor 候选，再依次执行碰撞 IK、Jacobian 条件数、关节余量和 OMPL 门控。它不再使用固定关节角作为初始观察位。
 
 仿真默认输出：
 
@@ -59,11 +59,23 @@ ros2 launch wvcsc_simulation calibration_sim.launch.py
 $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye_sim.yaml
 ```
 
-22 个样本、三算法共识和真值误差 `<= 3 mm / 1 deg` 均通过后才允许进入实机标定。
+调试画面：
+
+```bash
+rqt_image_view /calibration/aruco_debug_image
+```
+
+在 `rqt_image_view` 中查看该话题时使用 `raw` 传输。不要选择
+`compressedDepth`；`/calibration/aruco_debug_image` 是 RGB/BGR 图像，
+compressedDepth 只适用于深度图。若终端出现
+`compressed_depth_image_transport` 提示 RGB 图像不能压缩为深度图，这是
+rqt 传输方式选择噪声，不是 ArUco 检测或手眼标定算法失败。
+
+22 个样本、三算法共识、真值平移范数 `<= 4 mm`、X/Y 单轴误差 `<= 2 mm`、旋转误差 `<= 1 deg` 均通过后才允许进入实机标定。
 
 ## 3. 实机自动标定
 
-实机标定只启动机械臂和相机最小链路：Alicia-M 驱动、MoveIt、统一 TF、C10、ArUco、marker TF、easy_handeye2、motion_control 和采集器。
+实机标定只启动机械臂和相机最小链路：Alicia-M 驱动、MoveIt、统一 TF、C10、ArUco、ArUco 可视化、marker TF、easy_handeye2、motion_control 和采集器。
 
 不启动底盘 CAN、底盘驱动、LiDAR、IMU、EKF、Nav2 或 MissionManager。车辆必须停稳、制动并禁止任何 `/cmd_vel` 输入。
 
@@ -136,9 +148,16 @@ Gazebo 渲染使用其中的 `fx`、`fy`、`cx`、`cy` 与畸变参数。Gazebo 
 ```bash
 ros2 control list_controllers
 ros2 topic hz /camera/color/image_raw
+ros2 topic echo /calibration/aruco_debug_image --once
 ros2 topic echo /aruco_markers --once
 ros2 run tf2_ros tf2_echo tool0 camera_color_optical_frame
 ros2 run tf2_ros tf2_echo camera_color_optical_frame calibration_aruco
 ```
 
 控制器必须为 `active`，marker 必须稳定可见；若没有安全初始观察位、marker 不可见或质量门控失败，采集器不会降低碰撞、奇异性或关节余量阈值。
+
+`handeye_server` 启动早期如果提示 `calibration_aruco` TF 暂不可用，
+通常是可恢复状态：机械臂移动到初始 anchor 并且相机稳定看到标定码后，
+marker TF 会发布，随后出现 `All expected transforms are available` 才表示
+easy_handeye2 采样服务真正可用。只有长时间无法出现该 ready 日志，才应继续
+检查相机图像、ArUco 可视化、marker 位置先验和 TF 链路。

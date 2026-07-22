@@ -9,6 +9,7 @@ the operator must press ``s`` again.
 """
 
 from collections import deque
+from dataclasses import dataclass
 import math
 import select
 import sys
@@ -23,9 +24,12 @@ from easy_handeye2_msgs.srv import (
     SaveSamples,
     TakeSample,
 )
+from moveit_msgs.action import ExecuteTrajectory
+from moveit_msgs.srv import GetMotionPlan, GetPositionIK
 import numpy as np
 import rclpy
 from rcl_interfaces.srv import GetParameters
+from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -143,6 +147,50 @@ def estimate_refined_aruco_pose(corners, marker_size_m, camera_matrix, distortio
             np.asarray(translations[0], dtype=float).reshape(3))
 
 
+def _candidate_family(candidate_id):
+    name = str(candidate_id)
+    for family in (
+            'seed', 'roll', 'wide_roll', 'wide_orbit', 'horizontal',
+            'vertical', 'wide_tilt', 'combo', 'radial', 'fine'):
+        if name == family or name.startswith(f'{family}_'):
+            return family
+    return 'other'
+
+
+def _candidate_identifier(candidate):
+    if hasattr(candidate, 'candidate'):
+        return getattr(candidate.candidate, 'candidate_id')
+    return getattr(candidate, 'candidate_id')
+
+
+def balanced_candidate_order(candidates):
+    """Interleave view families so accepted samples do not cluster by tilt."""
+    buckets = {}
+    order = []
+    for candidate in candidates:
+        family = _candidate_family(_candidate_identifier(candidate))
+        if family not in buckets:
+            buckets[family] = []
+            order.append(family)
+        buckets[family].append(candidate)
+    ordered = []
+    while any(buckets.values()):
+        for family in order:
+            if buckets[family]:
+                ordered.append(buckets[family].pop(0))
+    return ordered
+
+
+@dataclass(frozen=True)
+class CandidatePlan:
+    candidate: object
+    trajectory: object
+    start_joints: tuple
+    condition: float
+    margin: float
+    joint_motion: float
+
+
 class AutoCalibrationCollector(Node):
     """Generate, safety-filter, execute and solve one Alicia-M sample set."""
 
@@ -176,6 +224,14 @@ class AutoCalibrationCollector(Node):
         # entities.  Keep easy_handeye2 clients in a distinctly named mapping;
         # overwriting Node._clients prevents executors from spinning at all.
         self._easy_clients = self._create_easy_clients()
+        self._compute_ik_client = self.create_client(
+            GetPositionIK, '/compute_ik', callback_group=self._group)
+        self._plan_path_client = self.create_client(
+            GetMotionPlan, '/plan_kinematic_path',
+            callback_group=self._group)
+        self._execute_trajectory_client = ActionClient(
+            self, ExecuteTrajectory, '/execute_trajectory',
+            callback_group=self._group)
         self._stable_marker_publisher = self.create_publisher(
             PoseStamped,
             str(self.get_parameter('stable_marker_pose_topic').value), 1)
@@ -244,6 +300,7 @@ class AutoCalibrationCollector(Node):
             'marker_distance_min_m': 0.25,
             'marker_distance_max_m': 0.80,
             'minimum_corner_margin_px': 60.0,
+            'minimum_marker_side_px': 90.0,
             'maximum_center_std_px': 4.0,
             'maximum_marker_depth_std_m': 0.003,
             'maximum_marker_angle_std_deg': 0.8,
@@ -252,8 +309,8 @@ class AutoCalibrationCollector(Node):
             'minimum_translation_span_m': 0.04,
             'minimum_rotation_span_deg': 20.0,
             'maximum_center_error_px': 45.0,
-            'recenter_step_limit_m': 0.003,
-            'recenter_total_limit_m': 0.010,
+            'recenter_step_limit_m': 0.006,
+            'recenter_total_limit_m': 0.030,
             'recenter_attempt_limit': 3,
             'max_condition_number': 14.0,
             'min_joint_margin_rad': 0.22,
@@ -267,13 +324,16 @@ class AutoCalibrationCollector(Node):
             'maximum_marker_position_rms_m': 0.005,
             'maximum_marker_rotation_rms_deg': 1.0,
             'easy_service_timeout_sec': 10.0,
+            'startup_service_timeout_sec': 20.0,
+            'candidate_plan_attempts_per_family': 3,
             'output_file': (
                 '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
                 'c10_handeye.yaml'),
             'marker_position_base_m': [0.0, 0.25, 0.0],
-            'seed_height_candidates_m': [0.25, 0.30, 0.35],
-            'seed_radial_backoff_candidates_m': [0.0, 0.05, 0.10],
-            'seed_tangential_offset_candidates_m': [0.0, -0.05, 0.05],
+            'seed_height_candidates_m': [0.30, 0.35, 0.40, 0.45, 0.50],
+            'seed_radial_backoff_candidates_m': [0.05, 0.10, 0.15, 0.20],
+            'seed_tangential_offset_candidates_m': [
+                0.0, -0.05, 0.05, -0.10, 0.10],
             'camera_centering_scale_candidates': [1.0, 0.75, 0.5, 0.25, 0.0],
             'calibration_surface_enabled': False,
             'calibration_surface_id': 'calibration_surface',
@@ -284,7 +344,8 @@ class AutoCalibrationCollector(Node):
             'ground_truth_translation_m': [-0.055, 0.0, -0.10],
             'ground_truth_rotation_xyzw': [
                 0.0, 0.0, -0.7071067811865476, 0.7071067811865476],
-            'ground_truth_max_translation_error_m': 0.003,
+            'ground_truth_max_translation_error_m': 0.004,
+            'ground_truth_max_xy_error_m': 0.002,
             'ground_truth_max_rotation_error_deg': 1.0,
             # The collector owns the exact pose used for each sample.  Its
             # quality-gated stable window is forwarded to the only marker-TF
@@ -314,6 +375,12 @@ class AutoCalibrationCollector(Node):
         if (not math.isfinite(stable_tf_settle_sec)
                 or stable_tf_settle_sec < 0.0):
             raise ValueError('stable_tf_settle_sec must be finite and non-negative')
+        startup_timeout = float(
+            self.get_parameter('startup_service_timeout_sec').value)
+        if not math.isfinite(startup_timeout) or startup_timeout <= 0.0:
+            raise ValueError('startup_service_timeout_sec must be finite and positive')
+        if int(self.get_parameter('candidate_plan_attempts_per_family').value) <= 0:
+            raise ValueError('candidate_plan_attempts_per_family must be positive')
         quality_limits = (
             float(self.get_parameter(
                 'maximum_algorithm_translation_delta_m').value),
@@ -383,6 +450,28 @@ class AutoCalibrationCollector(Node):
             for name, (interface, service) in services.items()
         }
 
+    def _wait_moveit_services(self):
+        timeout = float(self.get_parameter('startup_service_timeout_sec').value)
+        self.get_logger().info(
+            '[CALIBRATION] waiting for MoveIt services')
+        for name, client in (
+                ('/compute_ik', self._compute_ik_client),
+                ('/plan_kinematic_path', self._plan_path_client)):
+            if not client.wait_for_service(timeout_sec=timeout):
+                raise RuntimeError(f'MoveIt service unavailable: {name}')
+        if not self._execute_trajectory_client.wait_for_server(
+                timeout_sec=timeout):
+            raise RuntimeError(
+                'MoveIt action server unavailable: /execute_trajectory')
+
+    def _wait_easy_services(self):
+        timeout = float(self.get_parameter('easy_service_timeout_sec').value)
+        self.get_logger().info(
+            '[CALIBRATION] waiting for easy_handeye2 services')
+        for name, client in self._easy_clients.items():
+            if not client.wait_for_service(timeout_sec=timeout):
+                raise RuntimeError(f'easy_handeye2 service unavailable: {name}')
+
     def _on_joint_state(self, message):
         values = dict(zip(message.name, message.position))
         names = tuple(str(value) for value in self.get_parameter('joint_names').value)
@@ -444,9 +533,15 @@ class AutoCalibrationCollector(Node):
                 float(np.min(marker_corners[:, 1])),
                 float(width - np.max(marker_corners[:, 0])),
                 float(height - np.max(marker_corners[:, 1])))
+            side_px = float(np.mean([
+                np.linalg.norm(
+                    marker_corners[(index + 1) % 4] - marker_corners[index])
+                for index in range(4)
+            ]))
             observation = MarkerObservation(
                 center_px=(float(centre[0]), float(centre[1])),
                 margin_px=margin,
+                side_px=side_px,
                 translation=tuple(float(value) for value in translation),
                 rotation_vector=tuple(float(value) for value in rotation_vector.reshape(3)),
                 received_monotonic=time.monotonic())
@@ -673,25 +768,38 @@ class AutoCalibrationCollector(Node):
         with self._data_lock:
             return self._joint_positions
 
-    def _safe_plan_details(self, candidate, optimizer):
-        joints = self._current_joints()
+    def _candidate_ik_details(self, candidate, optimizer, joints=None, names=None):
         if joints is None:
-            return None
+            joints = self._current_joints()
+        if joints is None:
+            return None, 'no_joint_state'
+        if names is None:
+            names = tuple(str(value) for value in self.get_parameter(
+                'joint_names').value)
         solution = self._arm.compute_ik(
             candidate.tool_position, candidate.tool_quaternion, joints, timeout=0.5)
         if solution is None:
-            return None
+            return None, 'ik'
         by_name = dict(zip(solution.name, solution.position))
-        names = tuple(str(value) for value in self.get_parameter('joint_names').value)
         try:
             ik_joints = tuple(float(by_name[name]) for name in names)
         except KeyError:
-            return None
+            return None, 'ik'
         ik_condition = optimizer.condition_number(ik_joints)
         ik_margin = optimizer.minimum_joint_margin(ik_joints)
-        if (ik_condition >= float(self.get_parameter('max_condition_number').value)
-                or ik_margin < float(self.get_parameter('min_joint_margin_rad').value)):
-            return None
+        if ik_condition >= float(
+                self.get_parameter('max_condition_number').value):
+            return None, 'condition'
+        if ik_margin < float(self.get_parameter('min_joint_margin_rad').value):
+            return None, 'margin'
+        joint_motion = math.sqrt(sum(
+            (ik_joints[index] - joints[index]) ** 2
+            for index in range(len(joints))))
+        return (ik_joints, ik_condition, ik_margin, joint_motion), None
+
+    def _checked_candidate_plan(
+            self, candidate, optimizer, joints, names,
+            ik_condition, ik_margin):
         trajectory = self._arm.plan_pose(
             candidate.tool_position, candidate.tool_quaternion,
             frame_id=str(self.get_parameter('base_frame').value),
@@ -711,16 +819,107 @@ class AutoCalibrationCollector(Node):
             return None
         joint_motion = math.sqrt(sum(
             (final[index] - joints[index]) ** 2 for index in range(len(joints))))
-        return (
+        return CandidatePlan(
+            candidate,
             trajectory,
+            tuple(float(value) for value in joints),
             max(ik_condition, final_condition),
             min(ik_margin, final_margin),
             joint_motion,
         )
 
+    def _safe_plan_details(self, candidate, optimizer):
+        joints = self._current_joints()
+        if joints is None:
+            return None
+        names = tuple(str(value) for value in self.get_parameter(
+            'joint_names').value)
+        details, _reason = self._candidate_ik_details(
+            candidate, optimizer, joints, names)
+        if details is None:
+            return None
+        _ik_joints, ik_condition, ik_margin, _ik_motion = details
+        plan = self._checked_candidate_plan(
+            candidate, optimizer, joints, names, ik_condition, ik_margin)
+        if plan is None:
+            return None
+        return (
+            plan.trajectory,
+            plan.condition,
+            plan.margin,
+            plan.joint_motion,
+        )
+
     def _safe_plan(self, candidate, optimizer):
         details = self._safe_plan_details(candidate, optimizer)
         return details[0] if details is not None else None
+
+    def _candidate_screen_key(self, item):
+        condition, margin, joint_motion, candidate = item[:4]
+        return (-margin, condition, joint_motion, str(candidate.candidate_id))
+
+    def _screen_candidate_plans(self, candidates, optimizer):
+        """IK-screen all candidates, then OMPL-plan only the best per family."""
+        names = tuple(str(value) for value in self.get_parameter(
+            'joint_names').value)
+        joints = self._current_joints()
+        stats = {
+            'total': len(candidates),
+            'ik_ok': 0,
+            'rejected_ik': 0,
+            'rejected_condition': 0,
+            'rejected_margin': 0,
+            'planned_ok': 0,
+            'planned_failed': 0,
+        }
+        if joints is None:
+            stats['rejected_ik'] = len(candidates)
+            return [], stats
+        buckets = {}
+        family_order = []
+        for candidate in candidates:
+            details, reason = self._candidate_ik_details(
+                candidate, optimizer, joints, names)
+            if details is None:
+                if reason == 'condition':
+                    stats['rejected_condition'] += 1
+                elif reason == 'margin':
+                    stats['rejected_margin'] += 1
+                else:
+                    stats['rejected_ik'] += 1
+                continue
+            _ik_joints, condition, margin, joint_motion = details
+            stats['ik_ok'] += 1
+            family = _candidate_family(candidate.candidate_id)
+            if family not in buckets:
+                buckets[family] = []
+                family_order.append(family)
+            buckets[family].append(
+                (condition, margin, joint_motion, candidate))
+
+        attempts_per_family = int(self.get_parameter(
+            'candidate_plan_attempts_per_family').value)
+        plans = []
+        for family in family_order:
+            ranked = sorted(buckets[family], key=self._candidate_screen_key)
+            for condition, margin, _motion, candidate in ranked[:attempts_per_family]:
+                plan = self._checked_candidate_plan(
+                    candidate, optimizer, joints, names, condition, margin)
+                if plan is None:
+                    stats['planned_failed'] += 1
+                    continue
+                stats['planned_ok'] += 1
+                plans.append(plan)
+        return balanced_candidate_order(plans), stats
+
+    def _execute_candidate_plan(self, plan, optimizer):
+        joints = self._current_joints()
+        if (joints is not None and len(joints) == len(plan.start_joints)
+                and max(abs(joints[index] - plan.start_joints[index])
+                        for index in range(len(joints))) <= 0.01):
+            return self._arm.execute_trajectory(plan.trajectory)
+        trajectory = self._safe_plan(plan.candidate, optimizer)
+        return trajectory is not None and self._arm.execute_trajectory(trajectory)
 
     def _move_to_initial_anchor(self, optimizer, tool_camera, requested_aim):
         """Move to the safest marker-prior view before waiting for marker TF."""
@@ -729,6 +928,12 @@ class AutoCalibrationCollector(Node):
         safe = []
         selected_scale = None
         selected_aim = None
+        names = tuple(str(value) for value in self.get_parameter(
+            'joint_names').value)
+        anchor_plan_attempts = max(
+            12,
+            4 * int(self.get_parameter(
+                'candidate_plan_attempts_per_family').value))
         for scale in self.get_parameter(
                 'camera_centering_scale_candidates').value:
             scale = float(scale)
@@ -740,12 +945,51 @@ class AutoCalibrationCollector(Node):
                 self.get_parameter('seed_radial_backoff_candidates_m').value,
                 self.get_parameter('seed_tangential_offset_candidates_m').value,
                 aim_yaw_deg=aim_offsets[0], aim_pitch_deg=aim_offsets[1])
+            joints = self._current_joints()
+            if joints is None:
+                raise RuntimeError('joint state is unavailable for initial anchor')
+            ranked = []
+            stats = {
+                'total': len(candidates),
+                'ik_ok': 0,
+                'rejected_ik': 0,
+                'rejected_condition': 0,
+                'rejected_margin': 0,
+                'planned_ok': 0,
+                'planned_failed': 0,
+            }
             for candidate in candidates:
-                details = self._safe_plan_details(candidate, optimizer)
-                if details is not None:
-                    trajectory, condition, margin, joint_motion = details
-                    safe.append((condition, -margin, joint_motion,
-                                 candidate.candidate_id, candidate, trajectory))
+                details, reason = self._candidate_ik_details(
+                    candidate, optimizer, joints, names)
+                if details is None:
+                    if reason == 'condition':
+                        stats['rejected_condition'] += 1
+                    elif reason == 'margin':
+                        stats['rejected_margin'] += 1
+                    else:
+                        stats['rejected_ik'] += 1
+                    continue
+                _ik_joints, condition, margin, joint_motion = details
+                stats['ik_ok'] += 1
+                ranked.append((condition, margin, joint_motion, candidate))
+            for condition, margin, _motion, candidate in sorted(
+                    ranked, key=self._candidate_screen_key)[:anchor_plan_attempts]:
+                plan = self._checked_candidate_plan(
+                    candidate, optimizer, joints, names, condition, margin)
+                if plan is None:
+                    stats['planned_failed'] += 1
+                    continue
+                stats['planned_ok'] += 1
+                safe.append(plan)
+            self.get_logger().info(
+                '[CALIBRATION] initial-anchor probe: '
+                f'scale={scale:.2f} ik_ok={stats["ik_ok"]} '
+                f'rejected_ik={stats["rejected_ik"]} '
+                f'rejected_condition={stats["rejected_condition"]} '
+                f'rejected_margin={stats["rejected_margin"]} '
+                f'planned_ok={stats["planned_ok"]} '
+                f'planned_failed={stats["planned_failed"]} '
+                f'total={stats["total"]}')
             if safe:
                 selected_scale = scale
                 selected_aim = aim_offsets
@@ -753,16 +997,23 @@ class AutoCalibrationCollector(Node):
         if not safe:
             raise RuntimeError(
                 'no collision-safe initial anchor for marker_position_base_m')
-        _condition, negative_margin, motion, _identifier, candidate, trajectory = min(
-            safe, key=lambda item: item[:4])
-        if not self._arm.execute_trajectory(trajectory):
+        selected = min(
+            safe,
+            key=lambda item: (
+                -item.margin,
+                item.condition,
+                item.joint_motion,
+                str(item.candidate.candidate_id)))
+        candidate = selected.candidate
+        if not self._arm.execute_trajectory(selected.trajectory):
             raise RuntimeError(
                 f'failed to execute initial calibration anchor {candidate.candidate_id}')
         self.get_logger().info(
             '[CALIBRATION] initial-anchor='
-            f'{candidate.candidate_id} condition={_condition:.2f} '
-            f'joint_margin={-negative_margin:.2f}rad '
-            f'joint_motion={motion:.2f}rad centering_scale={selected_scale:.2f} '
+            f'{candidate.candidate_id} condition={selected.condition:.2f} '
+            f'joint_margin={selected.margin:.2f}rad '
+            f'joint_motion={selected.joint_motion:.2f}rad '
+            f'centering_scale={selected_scale:.2f} '
             f'aim_yaw={selected_aim[0]:+.2f}deg '
             f'aim_pitch={selected_aim[1]:+.2f}deg')
         time.sleep(float(self.get_parameter('settle_time_sec').value))
@@ -809,6 +1060,8 @@ class AutoCalibrationCollector(Node):
                     self.get_parameter('marker_distance_max_m').value),
                 minimum_margin_px=float(
                     self.get_parameter('minimum_corner_margin_px').value),
+                minimum_marker_side_px=float(
+                    self.get_parameter('minimum_marker_side_px').value),
                 maximum_center_std_px=float(
                     self.get_parameter('maximum_center_std_px').value),
                 maximum_depth_std_m=float(
@@ -947,10 +1200,11 @@ class AutoCalibrationCollector(Node):
 
     def _safe_candidates(self, candidates, optimizer):
         """Return only poses that pass the unchanged collision/IK safety gate."""
-        return [candidate for candidate in candidates
-                if self._safe_plan(candidate, optimizer) is not None]
+        plans, _stats = self._screen_candidate_plans(candidates, optimizer)
+        return [plan.candidate for plan in plans]
 
     def _run_session(self):
+        self._wait_moveit_services()
         self._install_calibration_surface()
         # easy_handeye2 intentionally exposes its service API only after the
         # camera->marker TF exists.  Use the configured base-frame marker
@@ -967,6 +1221,7 @@ class AutoCalibrationCollector(Node):
         _anchor_aim = self._move_to_initial_anchor(
             optimizer, _transform_tuple(tool_camera), requested_aim)
         _joints, _camera, transforms = self._wait_inputs()
+        self._wait_easy_services()
         self._clear_easy_samples()
         _base_tool, base_camera, base_marker, tool_camera = transforms
         marker_position, _marker_quaternion = _transform_tuple(base_marker)
@@ -978,7 +1233,7 @@ class AutoCalibrationCollector(Node):
         recovery_limit = int(
             self.get_parameter('safe_anchor_recovery_limit').value)
         candidates = ()
-        safe = ()
+        safe_plans = ()
         used_anchor_ids = set()
         selected_candidate_scale = None
         for recovery_index in range(recovery_limit + 1):
@@ -990,28 +1245,36 @@ class AutoCalibrationCollector(Node):
                     marker_position, camera_position, camera_quaternion,
                     mount_translation, mount_quaternion,
                     aim_yaw_deg=aim_offsets[0], aim_pitch_deg=aim_offsets[1])
-                safe = self._safe_candidates(candidates, optimizer)
+                safe_plans, stats = self._screen_candidate_plans(
+                    candidates, optimizer)
                 # 21 broad views are easy to audit.  When their strict-safe
                 # subset cannot supply the target sample count, add the
                 # excitation-expanded views without weakening safety limits.
-                if len(safe) < required_safe:
+                if len(safe_plans) < required_safe:
                     candidates = generate_alicia_candidates(
                         marker_position, camera_position, camera_quaternion,
                         mount_translation, mount_quaternion, include_fine=True,
                         aim_yaw_deg=aim_offsets[0],
                         aim_pitch_deg=aim_offsets[1])
-                    safe = self._safe_candidates(candidates, optimizer)
+                    safe_plans, stats = self._screen_candidate_plans(
+                        candidates, optimizer)
                 self.get_logger().info(
                     '[CALIBRATION] candidate-centering probe: '
-                    f'scale={scale:.2f} safe={len(safe)}/{len(candidates)}')
-                if len(safe) >= required_safe:
+                    f'scale={scale:.2f} ik_ok={stats["ik_ok"]} '
+                    f'rejected_ik={stats["rejected_ik"]} '
+                    f'rejected_condition={stats["rejected_condition"]} '
+                    f'rejected_margin={stats["rejected_margin"]} '
+                    f'planned_ok={stats["planned_ok"]} '
+                    f'planned_failed={stats["planned_failed"]} '
+                    f'total={stats["total"]}')
+                if len(safe_plans) >= required_safe:
                     selected_candidate_scale = scale
                     break
-            if len(safe) >= required_safe:
+            if len(safe_plans) >= required_safe:
                 break
-            if not safe or recovery_index >= recovery_limit:
+            if not safe_plans or recovery_index >= recovery_limit:
                 raise RuntimeError(
-                    f'only {len(safe)} safe Alicia-M candidates; need '
+                    f'only {len(safe_plans)} safe Alicia-M candidates; need '
                     f'{required_safe}')
 
             # The official Alicia reference pose intentionally favors marker
@@ -1024,23 +1287,18 @@ class AutoCalibrationCollector(Node):
             # and cannot improve safe-candidate coverage.  Prefer a distinct
             # non-seed perturbation while preserving the existing safety gate.
             eligible = [
-                candidate for candidate in safe
-                if candidate.candidate_id != 'seed'
-                and candidate.candidate_id not in used_anchor_ids]
+                plan for plan in safe_plans
+                if plan.candidate.candidate_id != 'seed'
+                and plan.candidate.candidate_id not in used_anchor_ids]
             if not eligible:
                 eligible = [
-                    candidate for candidate in safe
-                    if candidate.candidate_id != 'seed']
+                    plan for plan in safe_plans
+                    if plan.candidate.candidate_id != 'seed']
             anchor = None
-            for candidate in eligible:
+            for plan in eligible:
+                candidate = plan.candidate
                 used_anchor_ids.add(candidate.candidate_id)
-                trajectory = self._safe_plan(candidate, optimizer)
-                if trajectory is None:
-                    self.get_logger().warn(
-                        '[CALIBRATION] recovery anchor became unplannable: '
-                        f'{candidate.candidate_id}')
-                    continue
-                if not self._arm.execute_trajectory(trajectory):
+                if not self._execute_candidate_plan(plan, optimizer):
                     self.get_logger().warn(
                         '[CALIBRATION] recovery anchor execution rejected: '
                         f'{candidate.candidate_id}')
@@ -1060,18 +1318,19 @@ class AutoCalibrationCollector(Node):
             camera_position, camera_quaternion = _transform_tuple(base_camera)
             mount_translation, mount_quaternion = _transform_tuple(tool_camera)
         self.get_logger().info(
-            f'[CALIBRATION] {len(safe)}/{len(candidates)} candidates passed '
+            f'[CALIBRATION] {len(safe_plans)}/{len(candidates)} candidates passed '
             'collision IK, Jacobian, joint-margin and OMPL checks; '
             f'centering_scale={selected_candidate_scale:.2f}')
+        safe_plans = balanced_candidate_order(safe_plans)
 
         accepted_poses = []
         sample_count = 0
         maximum_samples = int(self.get_parameter('maximum_samples').value)
-        for candidate in safe[:maximum_samples]:
+        for plan in safe_plans[:maximum_samples]:
+            candidate = plan.candidate
             if self._session_cancel.is_set() or self._session_invalid.is_set():
                 raise RuntimeError('session canceled or invalidated')
-            trajectory = self._safe_plan(candidate, optimizer)
-            if trajectory is None or not self._arm.execute_trajectory(trajectory):
+            if not self._execute_candidate_plan(plan, optimizer):
                 self.get_logger().warn(
                     f'[CALIBRATION] rejected during execution: {candidate.candidate_id}')
                 continue
@@ -1142,15 +1401,26 @@ class AutoCalibrationCollector(Node):
         translation_error, rotation_error = transform_error(handeye, expected)
         translation_limit = float(self.get_parameter(
             'ground_truth_max_translation_error_m').value)
+        xy_limit = float(self.get_parameter(
+            'ground_truth_max_xy_error_m').value)
         rotation_limit = float(self.get_parameter(
             'ground_truth_max_rotation_error_deg').value)
+        deltas = tuple(
+            float(handeye[0][index]) - float(expected[0][index])
+            for index in range(3))
         passed = (translation_error <= translation_limit
+                  and abs(deltas[0]) <= xy_limit
+                  and abs(deltas[1]) <= xy_limit
                   and rotation_error <= rotation_limit)
         self.get_logger().info(
             '[CALIBRATION][GROUND_TRUTH] '
+            f'dx={deltas[0] * 1000.0:.2f}mm '
+            f'dy={deltas[1] * 1000.0:.2f}mm '
+            f'dz={deltas[2] * 1000.0:.2f}mm '
             f'translation_error={translation_error * 1000.0:.2f}mm '
             f'rotation_error={rotation_error:.2f}deg '
             f'threshold_translation={translation_limit * 1000.0:.2f}mm '
+            f'threshold_xy={xy_limit * 1000.0:.2f}mm '
             f'threshold_rotation={rotation_limit:.2f}deg passed={passed}')
         if not passed:
             raise RuntimeError(

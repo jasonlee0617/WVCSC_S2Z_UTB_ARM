@@ -27,6 +27,8 @@ wvcsc_visual_servo:
     servo_status_topic: /servo_node/status
     # 输入话题：机械臂的关节状态反馈（当前仅用于调试日志）。
     joint_state_topic: /joint_states
+    # MoveIt Servo 发给 ros2_control 的最终轨迹；仅订阅用于闭环执行诊断。
+    servo_command_out_topic: /arm_controller/joint_trajectory
 
     # 调试信息：以 JSON 格式发布的高频全状态诊断信息。
     debug_topic: /vision/visual_servo_debug
@@ -76,12 +78,11 @@ wvcsc_visual_servo:
     # ----------------------------------------------------------------------
     # 粗调阈值：当像素误差小于 20px 时，伺服进入减速区（配合近目标速度缩放）。
     coarse_tolerance_px: 20.0
-    # 仿真 YOLO 分割中心在静止时约有 2~3px 抖动。以 4px 圆形误差作为成功
-    # 半径，在 1.30m / fx=1079px 时约为 4.8mm，仍明显严于 ±8px 的喷洒
-    # 验收线；1.5px 会使已稳定的真实目标永远无法完成稳定计时。
-    fine_tolerance_px: 4.0
-    # 6px 迟滞带防止 4px 附近的分割抖动反复启动/停止控制。
-    control_resume_tolerance_px: 6.0
+    # 单树实测分割点在静止时会抖动到 6.4px。统一使用 8px 圆形误差，
+    # 取消“零速保持但又不判成功”的死区，与 ±8px 喷洒验收线一致。
+    fine_tolerance_px: 8.0
+    # 与成功阈值保持一致，不再额外引入迟滞区间。
+    control_resume_tolerance_px: 8.0
 
     # 稳定时间：误差连续保持在 `fine_tolerance_px` 内的秒数，达到此值才上报对齐成功。
     stable_duration_sec: 0.50

@@ -226,7 +226,7 @@ def generate_launch_description():
     )
     state_publisher = Node(
         package='robot_state_publisher', executable='robot_state_publisher',
-        parameters=[robot_description, {'use_sim_time': True}], output='screen')
+        parameters=[robot_description, {'use_sim_time': True}], output='both')
     spawn_vehicle = Node(
         package='gazebo_ros', executable='spawn_entity.py',
         arguments=[
@@ -247,7 +247,7 @@ def generate_launch_description():
         output='screen')
     move_group = Node(
         package='moveit_ros_move_group', executable='move_group',
-        parameters=common_moveit, output='screen')
+        parameters=common_moveit, output='both')
 
     spawner_args = [
         '--controller-manager', '/controller_manager',
@@ -283,7 +283,7 @@ def generate_launch_description():
             'execution_timeout': 90.0,
             'use_sim_time': True,
         }],
-        output='screen')
+        output='both')
     aruco = Node(
         package='ros2_aruco', executable='aruco_node',
         parameters=[{
@@ -294,7 +294,20 @@ def generate_launch_description():
             'camera_frame': 'camera_color_optical_frame',
             'use_sim_time': True,
         }],
-        output='screen')
+        output='both')
+    aruco_overlay = Node(
+        package='wvcsc_calibration', executable='visualize_aruco_marker',
+        name='wvcsc_aruco_overlay',
+        parameters=[{
+            'marker_size_m': 0.070,
+            'aruco_dictionary_id': 'DICT_5X5_250',
+            'marker_id': 1,
+            'image_topic': '/camera/color/image_raw',
+            'camera_info_topic': '/camera/color/camera_info',
+            'output_topic': '/calibration/aruco_debug_image',
+            'use_sim_time': True,
+        }],
+        output='both')
     marker_tf = Node(
         package='wvcsc_calibration', executable='marker_tf',
         parameters=[{
@@ -307,7 +320,7 @@ def generate_launch_description():
             'stable_pose_hold_sec': 1.0,
             'use_sim_time': True,
         }],
-        output='screen')
+        output='both')
     handeye_server = Node(
         package='easy_handeye2', executable='handeye_server',
         name='handeye_server',
@@ -320,7 +333,7 @@ def generate_launch_description():
             'tracking_marker_frame': 'calibration_aruco',
             'use_sim_time': True,
         }],
-        output='screen')
+        output='both')
     collector = Node(
         package='wvcsc_calibration', executable='auto_calibration_collector',
         parameters=[
@@ -328,7 +341,7 @@ def generate_launch_description():
             os.path.join(
                 calibration_share, 'config', 'auto_handeye_alicia_sim.yaml'),
         ],
-        output='screen')
+        output='both')
 
     # -----------------------------------------------------------------------
     # LEGACY DESK CALIBRATION ENVIRONMENT - REFERENCE ONLY
@@ -386,7 +399,8 @@ def generate_launch_description():
         on_exit=partial(
             _after_success, process_name='gripper_controller spawner',
             success_actions=[
-                motion_control, aruco, marker_tf, handeye_server, collector,
+                motion_control, aruco, aruco_overlay, marker_tf,
+                handeye_server, collector,
             ])))
 
     return LaunchDescription([

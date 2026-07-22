@@ -144,7 +144,7 @@ def test_simulation_loads_the_canonical_alicia_ompl_config():
     assert 'AnytimePathShortening' in config['arm']['planner_configs']
 
 
-def test_simulation_control_stack_uses_layered_100_30_hz_rates():
+def test_simulation_control_stack_uses_executable_layered_rates():
     source_root = Path(__file__).parents[2]
     controller_config = yaml.safe_load((
         source_root / 'wvcsc_description' / 'config' /
@@ -161,8 +161,10 @@ def test_simulation_control_stack_uses_layered_100_30_hz_rates():
 
     assert controller_config['controller_manager']['ros__parameters'][
         'update_rate'] == 100
-    assert servo_config['publish_period'] == pytest.approx(0.05)
-    assert servo_config['low_latency_mode'] is True
+    assert servo_config['publish_period'] == pytest.approx(0.10)
+    assert servo_config['low_latency_mode'] is False
+    assert servo_config['use_gazebo'] is True
+    assert servo_config['publish_joint_velocities'] is True
     assert servo_config['incoming_command_timeout'] == pytest.approx(0.30)
     assert servo_config['check_collisions'] is True
     assert visual_config['control_rate_hz'] == pytest.approx(30.0)
@@ -181,3 +183,9 @@ def test_simulation_observation_keeps_camera_above_the_vehicle_roof():
     assert parameters['camera_height_max_m'] == pytest.approx(0.40)
     assert parameters['camera_height_step_m'] == pytest.approx(0.10)
     assert 'observation_min_camera_z_in_base_m' not in parameters
+    assert parameters['target_recenter_trigger_px'] == pytest.approx(16.0)
+    assert parameters['target_recenter_workspace_px'] == pytest.approx(16.0)
+    assert parameters['target_recenter_max_total_angle_deg'] == pytest.approx(45.0)
+    assert parameters['target_recenter_max_iterations'] == 8
+    assert parameters['max_alignment_attempts'] == 3
+    assert parameters['target_post_recenter_min_confidence'] == pytest.approx(0.20)

@@ -537,6 +537,7 @@ class TwoStageYolo(Node):
             # 机械臂大幅度重心重定位可能使目标漂移超过 50px；
             # 专用 160px 宽关口仅允许在同一明确任务目标下恢复关联。
             'target_reassociation_distance_px': 160.0,
+            'target_reassociation_require_unique_candidate': False,
             'target_equivalent_aim_distance_px': 8.0,
             'target_lock_ema_alpha': 0.20,
             'target_template_tracking_enabled': True,
@@ -828,6 +829,17 @@ class TwoStageYolo(Node):
                 self.get_parameter('target_lock_ema_alpha').value)
             self._selected_target_reference = exact
             return exact, 'none', 'target_valid'
+        try:
+            require_unique_candidate = bool(self.get_parameter(
+                'target_reassociation_require_unique_candidate').value)
+        except (AttributeError, KeyError):
+            require_unique_candidate = False
+        if require_unique_candidate:
+            same_class_instances = [
+                item for item in instances
+                if item.class_name == self._configured_target_name]
+            if len(same_class_instances) > 1:
+                return None, 'selected_id_missing_multiple_candidates', 'target_invalid'
         target, reason = reassociation_candidate(
             reference,
             instances,
@@ -852,7 +864,12 @@ class TwoStageYolo(Node):
 
     def _resolve_or_track_selected_target(self, image, instances):
         """
-        优先使用 YOLO 进行几何关联，短时低置信度/漏检时则降级到模板跟踪兜底。
+        优先使用 YOLO 进行几何关联，仅在当前帧没有同类 YOLO 候选时才允许
+        模板跟踪兜底。
+
+        已通过模型阈值的低置信度 YOLO 结果仍然比模板匹配更可靠。特别是在机械臂
+        重心运动期间，模板外观会因视角改变而失真；用模板覆盖有效 YOLO 会让目标
+        像素在两套估计之间来回跳变，导致粗对准无法收敛。
         """
         target, invalid_reason, event = self._resolve_selected_target(instances)
         tracking_enabled = (
@@ -864,17 +881,6 @@ class TwoStageYolo(Node):
                 'target_template_update_min_confidence').value)
             if image is not None else 1.0)
         template = getattr(self, '_selected_target_template', None)
-        if (
-                target is not None and tracking_enabled and
-                target.confidence < update_min_confidence and
-                template is not None):
-            tracked = match_target_template(
-                image, template, self._selected_target_reference,
-                self.get_parameter('target_template_search_radius_px').value,
-                self.get_parameter('target_template_min_score').value)
-            if tracked is not None:
-                self._selected_target_reference = tracked
-                return tracked, 'none', 'target_template_tracked'
         if target is not None:
             if (
                     image is not None and
@@ -893,8 +899,14 @@ class TwoStageYolo(Node):
                                 template.confidence, captured.confidence))
                     self._selected_target_template = captured
             return target, invalid_reason, event
+        # 当前帧仍有病果候选但锁定目标缺失/歧义时，禁止模板在相似果实之间
+        # 猜测目标。模板只处理整个病果检测短时为空的真正漏检场景。
+        same_class_instances = [
+            item for item in instances
+            if item.class_name == self._configured_target_name]
         if (
                 not tracking_enabled or
+                same_class_instances or
                 self._selected_target_reference is None or
                 template is None):
             return target, invalid_reason, event

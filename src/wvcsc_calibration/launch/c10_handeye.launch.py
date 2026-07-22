@@ -47,7 +47,7 @@ def generate_launch_description():
                 'execution_timeout': 90.0,
                 'use_sim_time': False,
             }],
-            output='screen'),
+            output='both'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 bringup_share, 'launch', 'real_arm.launch.py')),
@@ -60,7 +60,20 @@ def generate_launch_description():
             package='ros2_aruco', executable='aruco_node',
             parameters=[os.path.join(
                 calibration_share, 'config', 'aruco_c10.yaml')],
-            output='screen'),
+            output='both'),
+        Node(
+            package='wvcsc_calibration', executable='visualize_aruco_marker',
+            name='wvcsc_aruco_overlay',
+            parameters=[{
+                'marker_size_m': 0.070,
+                'aruco_dictionary_id': 'DICT_5X5_250',
+                'marker_id': 1,
+                'image_topic': '/camera/color/image_raw',
+                'camera_info_topic': '/camera/color/camera_info',
+                'output_topic': '/calibration/aruco_debug_image',
+                'use_sim_time': False,
+            }],
+            output='both'),
         Node(
             package='wvcsc_calibration', executable='marker_tf',
             parameters=[{
@@ -71,7 +84,7 @@ def generate_launch_description():
                 # stationary window to reduce planar-PnP quantization.
                 'smoothing_window': 15,
             }],
-            output='screen'),
+            output='both'),
         # 自动采集只需要服务端；不启动会与 s/q 流程重复的 RQt 手工界面。
         Node(
             package='easy_handeye2', executable='handeye_server',
@@ -85,5 +98,5 @@ def generate_launch_description():
                 'tracking_marker_frame': 'calibration_aruco',
                 'use_sim_time': False,
             }],
-            output='screen'),
+            output='both'),
     ])

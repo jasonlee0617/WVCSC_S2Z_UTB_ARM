@@ -38,6 +38,8 @@ def test_launch_uses_vehicle_model_and_full_controller_chain_without_rqt():
     assert "config/ompl_planning.yaml" in LAUNCH_SOURCE
     assert "config/moveit_controllers.yaml" in LAUNCH_SOURCE
     assert "executable='marker_tf'" in LAUNCH_SOURCE
+    assert "executable='visualize_aruco_marker'" in LAUNCH_SOURCE
+    assert "'/calibration/aruco_debug_image'" in LAUNCH_SOURCE
     assert "executable='handeye_server'" in LAUNCH_SOURCE
     assert "executable='auto_calibration_collector'" in LAUNCH_SOURCE
     assert 'calibrate.launch.py' not in LAUNCH_SOURCE
@@ -139,7 +141,8 @@ def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
     assert 'minimum_corner_margin_px' not in config
     assert config['output_file'].startswith('$HOME/WVCSC_S2Z_UTB_ARM/src/')
     assert config['marker_size_m'] == pytest.approx(0.070)
-    assert config['ground_truth_max_translation_error_m'] == pytest.approx(0.003)
+    assert config['ground_truth_max_translation_error_m'] == pytest.approx(0.004)
+    assert config['ground_truth_max_xy_error_m'] == pytest.approx(0.002)
     assert config['ground_truth_max_rotation_error_deg'] == pytest.approx(1.0)
     assert config['maximum_marker_position_rms_m'] == pytest.approx(0.002)
     assert config['maximum_marker_rotation_rms_deg'] == pytest.approx(0.50)

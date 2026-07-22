@@ -53,6 +53,8 @@ def test_limiter_caps_norm_and_acceleration():
 def test_joint_debug_ignores_vehicle_only_joint_state():
     node = object.__new__(VisualServo)
     node._lock = threading.Lock()
+    node._busy = False
+    node._goal_state = _GoalState()
     node._joint_positions = [1.0] * 6
 
     node._on_joint_state(SimpleNamespace(
@@ -63,6 +65,26 @@ def test_joint_debug_ignores_vehicle_only_joint_state():
         name=[f'joint{index}' for index in range(6, 0, -1)],
         position=[float(index) for index in range(6, 0, -1)]))
     assert node._joint_positions == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+
+def test_servo_execution_diagnostics_distinguish_output_from_joint_motion():
+    node = object.__new__(VisualServo)
+    node._lock = threading.Lock()
+    node._busy = True
+    node._joint_positions = [0.0] * 6
+    node._goal_state = _GoalState(initial_joint_positions=(0.0,) * 6)
+
+    node._on_servo_output(SimpleNamespace(
+        joint_names=[f'joint{index}' for index in range(1, 7)],
+        points=[SimpleNamespace(positions=[0.01] * 6)]))
+    node._on_joint_state(SimpleNamespace(
+        name=[f'joint{index}' for index in range(1, 7)],
+        position=[0.004] * 6))
+
+    assert node._goal_state.servo_output_count == 1
+    assert node._goal_state.servo_output_points == 1
+    assert node._goal_state.max_commanded_joint_delta_rad == pytest.approx(0.01)
+    assert node._goal_state.max_joint_delta_rad == pytest.approx(0.004)
 
 
 def test_stop_burst_publishes_zero_for_a_quarter_second(monkeypatch):
@@ -227,6 +249,15 @@ def test_time_based_alignment_is_independent_of_target_frame_rate():
             progress.update(2.4, -2.4, index / rate_hz)
         assert progress.aligned
         assert progress.stable_duration >= 0.5
+
+
+def test_eight_pixel_tolerance_accepts_observed_yolo_jitter():
+    progress = AlignmentProgress(8.0, 0.5, 4.0, 1.0, 8.0)
+    progress.update(4.9, 0.0, 0.0)
+    progress.update(6.3, 0.0, 0.25)
+    progress.update(6.4, 0.0, 0.5)
+
+    assert progress.aligned
 
 
 def test_alignment_requires_euclidean_pixel_tolerance():

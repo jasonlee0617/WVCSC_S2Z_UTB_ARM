@@ -26,6 +26,7 @@ setup(
     license='Apache-2.0',
     entry_points={'console_scripts': [
         'marker_tf = wvcsc_calibration.marker_tf:main',
+        'visualize_aruco_marker = wvcsc_calibration.visualize_aruco_marker:main',
         'export_handeye = wvcsc_calibration.calibration_io:main',
         'auto_calibration_collector = '
         'wvcsc_calibration.auto_calibration_collector:main',

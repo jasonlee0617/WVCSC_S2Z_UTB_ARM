@@ -120,6 +120,48 @@ def target_accounting_is_complete(detected, sprayed, unresolved):
     return int(detected) == int(sprayed) + int(unresolved)
 
 
+def target_accounting(known, processed, exhausted, same_target):
+    """Count logical targets after transitively merging recovery snapshots."""
+    items = (
+        [(target, 'known') for target in known] +
+        [(target, 'processed') for target in processed] +
+        [(target, 'exhausted') for target in exhausted])
+    parents = list(range(len(items)))
+
+    def find(index):
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def join(left, right):
+        left, right = find(left), find(right)
+        if left != right:
+            parents[right] = left
+
+    for left, (candidate, _state) in enumerate(items):
+        for right in range(left):
+            if same_target(candidate, items[right][0]):
+                join(left, right)
+
+    groups = {}
+    for index, item in enumerate(items):
+        groups.setdefault(find(index), []).append(item)
+
+    sprayed = 0
+    unresolved = 0
+    pending = []
+    for snapshots in groups.values():
+        states = {state for _target, state in snapshots}
+        if 'processed' in states:
+            sprayed += 1
+        elif 'exhausted' in states:
+            unresolved += 1
+        else:
+            pending.append(snapshots[0][0])
+    return len(groups), sprayed, unresolved, pending
+
+
 def final_spray_outcome(sprayed, unresolved, saw_disease, summary):
     """根据统计结果返回最终的 ExecuteSpray 结果码。"""
     if sprayed and unresolved:

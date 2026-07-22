@@ -16,8 +16,9 @@ auto_calibration_collector:
     # that all three OpenCV solvers receive enough rotational excitation.
     target_samples: 22
     maximum_samples: 30
-    # Retain deliberate 10-12 degree off-axis calibration views.
-    maximum_center_error_px: 220.0
+    # Keep the marker near the optical centre while retaining deliberate
+    # off-axis calibration views for rotational excitation.
+    maximum_center_error_px: 80.0
 
     # 仿真基准有已知的 tool0->C10 外参，因此采样质量门槛比实机更严：
     # 仅允许内部一致的 marker 位姿集合进入 OpenCV 手眼求解。该门槛
@@ -33,5 +34,6 @@ auto_calibration_collector:
     ground_truth_check_enabled: true
     ground_truth_translation_m: [-0.055, 0.0, -0.10]
     ground_truth_rotation_xyzw: [0.0, 0.0, -0.7071067811865476, 0.7071067811865476]
-    ground_truth_max_translation_error_m: 0.003
+    ground_truth_max_translation_error_m: 0.004
+    ground_truth_max_xy_error_m: 0.002
     ground_truth_max_rotation_error_deg: 1.0

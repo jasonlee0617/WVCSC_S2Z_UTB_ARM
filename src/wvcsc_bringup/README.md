@@ -114,7 +114,65 @@ ros2 run wvcsc_bringup capture_site_pose -- \
 该模式仅保留初始 `/imu`、`/ekf_odom`、`/amcl_pose` 和 30 个有效 TF 样本要求，
 跳过新鲜度、停稳、质量和地图 footprint 门控；仅用于当前调试，不代表站点位姿可靠。
 
-## 4. 完整定位与作业
+## 4. 机械臂单独喷洒测试
+
+此模式用于现场单独验证机械臂喷洒闭环：C10、真实 YOLO、MoveIt、Servo、
+VisualServo、SprayTask 和喷洒 Action。它不启动底盘、LiDAR、IMU、EKF、Nav2
+或 MissionManager；车辆必须人工停稳，底盘电机保持不可运动状态。
+
+先确认真实权重已经放入 `wvcsc_rgb_vision/models/`：
+
+- `yolov8s_real.pt`: `detect`, `{0: tree}`；
+- `yolov8s_seg_real.pt`: `segment`, `{0: disease_leaf}`。
+
+启动前还会读取实机标定：
+
+- `$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml`；
+- `~/.ros/wvcsc_calibration/nozzle.yaml`。
+
+启动机械臂单独测试栈：
+
+```bash
+ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
+  yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python"
+```
+
+另开终端，按机械臂基座 `alicia_base_link` 测量玉米树位置后发送一次喷洒目标。
+坐标约定与采点一致：`+X` 为车头前方，`+Y` 为车体左侧。玉米树放在机械臂正左侧
+时 `--tree-forward-m` 填 `0.0`：
+
+```bash
+ros2 run wvcsc_bringup arm_spray_once -- \
+  --target-id corn_01 \
+  --tree-forward-m 0.0 \
+  --tree-left-m 1.50 \
+  --spray-duration 5.0
+```
+
+检查话题：
+
+```bash
+ros2 topic hz /camera/color/image_raw
+ros2 topic echo /mission/status --once
+ros2 topic echo /vision/inference_mode
+ros2 topic hz /vision/tree_debug_image
+ros2 topic hz /vision/fruit_debug_image
+ros2 topic echo /vision/target
+ros2 topic echo /vision/visual_servo_debug
+ros2 topic echo /spray/simulated_active
+```
+
+通过标准：日志依次出现 `MOVING_TO_OBSERVE`、`SCANNING_TREE`、
+`DETECTING_FRUITS`、`QUEUING`、`ALIGNING`、`SPRAYING`、
+`RETURNING_TO_OBSERVE`、`RETURNING_HOME`；`/vision/tree_debug_image` 能看到
+玉米树框，`/vision/fruit_debug_image` 能看到 `disease_leaf` 标注，
+`/vision/visual_servo_debug` 返回成功，对应喷洒期间
+`/spray/simulated_active` 为 `true`。
+
+当前入口默认使用 `spray_simulator` 验证流程，不直接控制真实泵/阀。接入真实喷洒
+硬件时，只替换 `/spray/execute` 的 Action server，保持 `Spray` Action 接口不变。
+
+## 5. 完整定位与作业
 
 ```bash
 ros2 launch wvcsc_bringup real_system_mission.launch.py \
@@ -147,7 +205,7 @@ ros2 service call /mission/start std_srvs/srv/Trigger "{}"
 实测任务加载后不会自动执行。先检查`/mission/plan`中的树根坐标和停靠位姿，
 再调用 `/mission/start`。
 
-## 5. 停止与恢复
+## 6. 停止与恢复
 
 停止任务时先取消任务或终止 launch，确认 `/cmd_vel` 已归零，再使用机械臂
 控制命令：
@@ -168,7 +226,7 @@ ros2 service call /mission/start std_srvs/srv/Trigger "{}"
 `motion_control_keyboard` 只提供空格停止、`h` 回 HOME、`r` 恢复；不会自动
 取消底盘导航。实车运行必须保留可触达的底盘物理急停，并由操作员确认车辆完全停止。
 
-## 6. 标定
+## 7. 标定
 
 内参（8x6 内角点，25 mm）：
 
