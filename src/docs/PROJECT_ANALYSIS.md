@@ -43,7 +43,7 @@ Mock/Replay UAV
 
 | 层 | 包 | 语言 | 说明 |
 |----|-----|------|------|
-| 硬件驱动 | `serial`, `can_bridge`, `fdilink_ahrs_ROS2`, `wtb_car_driver`, `lslidar_driver`, `lslidar_msgs` | C++ | 串口/CAN/IMU/LiDAR/底盘 |
+| 硬件驱动 | `serial`, `can_bridge`, `yesense_interface`, `yesense_std_ros2`, `wtb_car_driver`, `lslidar_driver`, `lslidar_msgs` | C++ | 串口/CAN/IMU/LiDAR/底盘 |
 | 机械臂 | `alicia_m_descriptions`, `alicia_m_driver`, `alicia_m_moveit_config`, `alicia_m_bringup`, `alicia_m_calibration` | C++ | URDF/ros2_control/MoveIt/手眼标定 |
 | SLAM/导航 | `my_cartographer`, `my_navigation2` | C++ | Cartographer + Nav2 |
 | 运动控制 | `pymoveit2`, `trajectory_retime_server` | C++ | Python MoveIt2 封装 + 轨迹重定时 |
@@ -173,7 +173,7 @@ Gazebo / 真实 Alicia-M 电机
 | `use_sim_time` | `true` | `false` |
 | 底盘 | `ackermann_sim.py` (Twist→odom) | CAN bridge + wtb_car |
 | LiDAR | pointcloud_to_laserscan | 真实 lslidar_driver |
-| IMU | 无 | fdilink_ahrs |
+| IMU | 无 | yesense_std_ros2（旧 fdilink_ahrs 仅保留回滚） |
 | 相机 | Gazebo 插件 | usb_cam + C10 |
 | ros2_control | gazebo_ros2_control/GazeboSystem | alicia_m_driver/AliciaHardwareInterface |
 | base_frame | `alicia_base_link` | `base_link` |

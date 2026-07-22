@@ -142,7 +142,7 @@ ros2 run wvcsc_bringup capture_site_pose \
 3. 调用 `tree_hint_from_offset()` 自动计算树根 map 坐标
 4. 写入 `~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml`（自动创建或追加）
 
-采点前必须确认 `/dev/FDI_IMU_GNSS` 存在且 `ros2 topic hz /imu` 有持续输出；
+采点前必须确认 `/dev/yesense_IMU` 存在且 `ros2 topic hz /imu` 有持续输出；
 AMCL 位置和偏航标准差均须不大于 `0.08`，不满足时脚本会拒绝写入。
 
 成功输出示例：

@@ -30,7 +30,8 @@
 | `serial` | 串口基础库 |
 | `can_bridge` | CAN 设备桥接 |
 | `wtb_car_driver` | 阿克曼底盘驱动 |
-| `fdilink_ahrs` | IMU/GNSS 驱动 |
+| `yesense_std_ros2`、`yesense_interface` | 实车 Yesense IMU 驱动与消息接口；发布 `/imu` |
+| `fdilink_ahrs` | 旧版 FDI IMU，保留用于回滚，默认不启动 |
 | `lslidar_msgs`、`lslidar_driver` | 激光雷达消息与驱动 |
 | `my_cartographer` | Cartographer 建图配置 |
 | `my_navigation2` | 真机 Nav2 与 Qt 操作入口 |

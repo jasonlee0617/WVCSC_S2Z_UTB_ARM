@@ -15,7 +15,15 @@ def generate_launch_description():
     c10_share = get_package_share_directory('wvcsc_c10_camera')
     description_share = get_package_share_directory('wvcsc_description')
     lidar_share = get_package_share_directory('lslidar_driver')
-    imu_share = get_package_share_directory('fdilink_ahrs')
+    # 旧版 FDI IMU 已停用，仅保留注释用于回滚：
+    # imu_share = get_package_share_directory('fdilink_ahrs')
+    # imu = IncludeLaunchDescription(
+    #     PythonLaunchDescriptionSource(os.path.join(
+    #         imu_share, 'launch', 'ahrs_driver.launch.py')),
+    # )
+
+    # 当前实车 IMU 使用 yesense_std_ros2，向下游保持 /imu 接口不变。
+    yesense_share = get_package_share_directory('yesense_std_ros2')
     vehicle_share = get_package_share_directory('wtb_car_driver')
 
     xacro_file = os.path.join(
@@ -56,7 +64,7 @@ def generate_launch_description():
     )
     imu = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
-            imu_share, 'launch', 'ahrs_driver.launch.py')),
+            yesense_share, 'launch', 'yesense_node.launch.py')),
     )
 
     return LaunchDescription([

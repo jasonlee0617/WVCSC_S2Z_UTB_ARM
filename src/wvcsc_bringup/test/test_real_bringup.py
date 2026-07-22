@@ -113,6 +113,25 @@ def test_real_sensor_stack_has_one_unified_robot_state_publisher():
     assert "('/twist_cmd', '/wvcsc_bringup/disabled_twist_cmd')" in source
 
 
+def test_real_sensor_stack_uses_yesense_and_keeps_fdilink_only_for_rollback():
+    for name in ('real_sensors.launch.py',):
+        source = _source(name)
+        assert 'yesense_std_ros2' in source
+        assert 'yesense_node.launch.py' in source
+        assert not any(
+            'fdilink_ahrs' in line and not line.lstrip().startswith('#')
+            for line in source.splitlines())
+
+    vehicle_source = (
+        PACKAGE.parent / 'wtb_car_driver' / 'launch' /
+        'start_wtb_car_fdimu.launch.py').read_text(encoding='utf-8')
+    assert 'yesense_std_ros2' in vehicle_source
+    assert 'yesense_node.launch.py' in vehicle_source
+    assert any(
+        'fdilink_ahrs' in line and line.lstrip().startswith('#')
+        for line in vehicle_source.splitlines())
+
+
 def test_packaged_map_directory_exists():
     assert (PACKAGE / 'maps').is_dir()
 

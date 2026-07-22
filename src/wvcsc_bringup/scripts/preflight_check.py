@@ -15,10 +15,13 @@ from ament_index_python.packages import (
 
 
 COMMON_PACKAGES = (
-    'can_bridge', 'wtb_car_driver', 'lslidar_driver', 'fdilink_ahrs',
+    'can_bridge', 'wtb_car_driver', 'lslidar_driver',
+    'yesense_interface', 'yesense_std_ros2',
     'robot_localization', 'pointcloud_to_laserscan',
     'robot_state_publisher', 'xacro',
 )
+# fdilink_ahrs is intentionally not checked: its launch entrypoint is a
+# commented rollback path, while Yesense is the only active real IMU driver.
 LOCALIZATION_PACKAGES = (
     'nav2_bringup', 'usb_cam', 'wvcsc_c10_camera',
     'wvcsc_description',

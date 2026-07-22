@@ -129,16 +129,24 @@ def generate_launch_description():
             name='pointcloud_to_laserscan'
     )
 
-    # IMU节点
+    # 旧版 FDI IMU 已停用，仅保留注释用于回滚。
+    # 不要与 Yesense 同时启动，否则会产生重复 /imu 发布者并干扰 EKF。
+    # imu_launch = IncludeLaunchDescription(
+    #     PythonLaunchDescriptionSource([
+    #         FindPackageShare('fdilink_ahrs'),
+    #         'launch',
+    #         'ahrs_driver.launch.py'
+    #     ]),
+    #     launch_arguments={'use_sim_time': use_sim_time}.items()
+    # )
+
+    # 当前实车 IMU：Yesense，配置文件固定发布 sensor_msgs/msg/Imu 到 /imu。
     imu_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
-            PathJoinSubstitution([
-                FindPackageShare('fdilink_ahrs'),
-                'launch',
-                'ahrs_driver.launch.py'
-            ])
-        ]),
-        launch_arguments={'use_sim_time': use_sim_time}.items()
+            FindPackageShare('yesense_std_ros2'),
+            'launch',
+            'yesense_node.launch.py'
+        ])
     )
 
     ekf_node = Node(

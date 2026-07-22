@@ -46,16 +46,22 @@ Nav2 参数和 `tf_buffer_size`；硬件子 RViz 被关闭，只启动复制到
 `real_sensors.launch.py` 和 C10。Nav2 速度平滑器的最终输出直接发布到
 `/cmd_vel`；不启动 `wvcsc_safety` 速度门控。
 
-当前车载 FDI AHRS 是 CH9102。首次部署或更换工控机时，先安装稳定串口别名：
+当前实车使用 Yesense IMU。首次部署或更换工控机时，先安装
+`/dev/yesense_IMU` 稳定串口别名：
 
 ```bash
-cd "${HOME}/WVCSC_S2Z_UTB_ARM/src/fdilink_ahrs_ROS2"
-sudo ./udev.sh
-ls -l /dev/FDI_IMU_GNSS
+cd "${HOME}/WVCSC_S2Z_UTB_ARM/src/yesense_ros2"
+sudo ./yesense_udev.sh
+ls -l /dev/yesense_IMU
 ```
 
-随后启动导航，确认 AHRS 日志出现 `Serial Port initialized`，并确认
-`ros2 topic hz /imu` 持续有数据。不要在 AHRS 参数中写死 `/dev/ttyACM0`。
+随后启动导航，确认 Yesense 节点日志显示串口打开成功，并确认
+`ros2 topic hz /imu` 持续有数据。串口路径由
+`yesense_std_ros2/config/yesense_config.yaml` 中的
+`/dev/yesense_IMU` 管理，不要写死 `ttyUSB0` 或 `ttyACM0`。
+
+旧版 `fdilink_ahrs` 代码和包仍保留，但已从默认启动链停用；只有回滚到旧 IMU
+时才恢复对应的注释启动块，禁止两个驱动同时运行。
 
 ## 3. 逐树实测停靠点
 

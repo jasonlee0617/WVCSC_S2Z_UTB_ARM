@@ -16,7 +16,10 @@
   <exec_depend>can_bridge</exec_depend>
   <exec_depend>cartographer_ros</exec_depend>
   <exec_depend>controller_manager</exec_depend>
-  <exec_depend>fdilink_ahrs</exec_depend>
+  <!-- Current real-vehicle IMU driver. fdilink_ahrs is retained only as a
+       commented rollback path and is not a runtime dependency. -->
+  <exec_depend>yesense_std_ros2</exec_depend>
+  <exec_depend>yesense_interface</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
