@@ -121,6 +121,8 @@ class _Validator:
         self._road_center_y = 0.0
         self._road_yaw = 0.0
         self._docking_lateral_offset = 0.5
+        self._arm_base_forward_offset = -0.40
+        self._arm_base_left_offset = 0.0
         self.parameters = {
             'max_targets': 2,
             'max_abs_coordinate': 50.0,
@@ -388,6 +390,8 @@ def _docking_harness(actual, *, state=MissionState.VERIFYING_STOP):
     harness._road_center_y = 0.0
     harness._road_yaw = 0.0
     harness._docking_lateral_offset = 0.2
+    harness._arm_base_forward_offset = -0.40
+    harness._arm_base_left_offset = 0.0
     harness._localization_max_age = 1.0
     harness._max_localization_position_stddev = 0.12
     harness._max_localization_yaw_stddev = 0.12
@@ -411,21 +415,21 @@ def _docking_harness(actual, *, state=MissionState.VERIFYING_STOP):
 
 
 def test_docking_quality_gate_passes_only_fresh_precise_localization():
-    harness = _docking_harness((5.8, 3.03, 0.22, 0.04, 0.05, 0.05))
-    # _Harness._now() is 6.0 and the automatic left docking pose is (3, 0.2, 0).
-    harness._localization_pose = (5.8, 3.03, 0.22, 0.04, 0.05, 0.05)
+    harness = _docking_harness((5.8, 3.43, 0.22, 0.04, 0.05, 0.05))
+    # _Harness._now() is 6.0 and the automatic left docking pose is (3.4, 0.2, 0).
+    harness._localization_pose = (5.8, 3.43, 0.22, 0.04, 0.05, 0.05)
     status, details = MissionManager._docking_quality(harness, 6.0)
     assert status == 'ok'
     assert details['position_error'] < 0.12
 
-    harness._localization_pose = (4.0, 3.03, 0.22, 0.04, 0.05, 0.05)
+    harness._localization_pose = (4.0, 3.43, 0.22, 0.04, 0.05, 0.05)
     assert MissionManager._docking_quality(harness, 6.0)[0] == 'stale'
-    harness._localization_pose = (5.8, 3.03, 0.22, 0.04, 0.20, 0.05)
+    harness._localization_pose = (5.8, 3.43, 0.22, 0.04, 0.20, 0.05)
     assert MissionManager._docking_quality(harness, 6.0)[0] == 'uncertain'
 
 
 def test_outside_docking_tolerance_retries_once_without_spraying():
-    harness = _docking_harness((5.8, 3.4, 0.2, 0.0, 0.05, 0.05))
+    harness = _docking_harness((5.8, 3.8, 0.2, 0.0, 0.05, 0.05))
     harness.nav_sent = 0
     harness._send_nav_goal = lambda: setattr(harness, 'nav_sent', harness.nav_sent + 1)
 
@@ -436,7 +440,7 @@ def test_outside_docking_tolerance_retries_once_without_spraying():
     assert harness.nav_sent == 1
 
     harness.core.nav_succeeded()
-    harness._localization_pose = (6.1, 3.4, 0.2, 0.0, 0.05, 0.05)
+    harness._localization_pose = (6.1, 3.8, 0.2, 0.0, 0.05, 0.05)
     assert not MissionManager._verify_docking_quality(harness, 6.2)
     assert harness.core.state == MissionState.FAILED
     assert harness.failures == [

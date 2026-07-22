@@ -210,7 +210,7 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
                 assert _spin_until(executor, future.done)
                 assert future.result().success
 
-        expected_nav = [(3.0, 0.2), (5.0, -0.2)] * 3
+        expected_nav = [(3.4, 0.2), (5.4, -0.2)] * 3
         assert len(servers.nav_goals) == len(expected_nav)
         for actual, expected in zip(servers.nav_goals, expected_nav):
             assert math.isclose(actual[0], expected[0], abs_tol=1e-6)
@@ -286,7 +286,7 @@ def test_optional_return_home_adds_final_nav_goal():
             ),
         )
         assert servers.nav_goals == [
-            (3.0, 0.2), (5.0, -0.2), (0.25, -0.1)]
+            (3.4, 0.2), (5.4, -0.2), (0.25, -0.1)]
         assert servers.spray_goals == [
             ('tree_01', 'left'), ('tree_02', 'right')]
     finally:
@@ -347,7 +347,8 @@ def test_manual_mission_preserves_rviz_pose_and_yaw():
         assert math.isclose(servers.nav_yaws[0], 0.4, abs_tol=1e-6)
         assert servers.spray_goals == [('single_01', 'left')]
         assert servers.tree_hints[0][0] == 'map'
-        assert servers.tree_hints[0][1:] == pytest.approx((2.615872, 2.081591, 0.0))
+        assert servers.tree_hints[0][1:] == pytest.approx(
+            (2.247448, 1.925824, 0.0))
         assert harness.plan.targets[0].docking_pose.position.x == 3.2
         assert harness.plan.targets[0].docking_pose.position.y == 0.7
     finally:

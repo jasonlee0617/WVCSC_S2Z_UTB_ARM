@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from wvcsc_mission_manager.core import (
@@ -19,12 +21,23 @@ def _targets():
 
 
 def test_docking_pose_offsets_toward_target_side():
-    assert docking_pose(_targets()[0]) == (3.0, 0.2, 0.0)
-    assert docking_pose(_targets()[1]) == (5.0, -0.2, 0.0)
+    assert docking_pose(_targets()[0]) == (3.4, 0.2, 0.0)
+    assert docking_pose(_targets()[1]) == (5.4, -0.2, 0.0)
 
 
 def test_docking_pose_supports_explicit_lateral_offset():
-    assert docking_pose(_targets()[0], lateral_offset=0.5) == (3.0, 0.5, 0.0)
+    assert docking_pose(_targets()[0], lateral_offset=0.5) == (3.4, 0.5, 0.0)
+
+
+def test_docking_aligns_arm_base_with_tree_along_road_heading():
+    target = _targets()[0]
+    goal = docking_pose(target, road_yaw=math.pi / 2.0)
+    arm_x = goal[0] - 0.40 * math.cos(goal[2])
+    arm_y = goal[1] - 0.40 * math.sin(goal[2])
+    tangent_error = (
+        (target.x - arm_x) * math.cos(goal[2]) +
+        (target.y - arm_y) * math.sin(goal[2]))
+    assert tangent_error == pytest.approx(0.0)
 
 
 def test_rejects_side_that_disagrees_with_road_geometry():
@@ -46,8 +59,8 @@ def test_manual_docking_pose_overrides_orchard_offset():
 
 
 def test_manual_tree_hint_uses_docking_yaw_and_spray_side():
-    assert manual_tree_hint((3.0, 0.5, 0.0), 'left', 1.5) == (3.0, 2.0, 0.0)
-    assert manual_tree_hint((3.0, 0.5, 0.0), 'right', 1.5) == (3.0, -1.0, 0.0)
+    assert manual_tree_hint((3.0, 0.5, 0.0), 'left', 1.5) == (2.6, 2.0, 0.0)
+    assert manual_tree_hint((3.0, 0.5, 0.0), 'right', 1.5) == (2.6, -1.0, 0.0)
 
 
 def test_stop_verification_can_return_to_navigation_for_same_target():

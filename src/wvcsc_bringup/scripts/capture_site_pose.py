@@ -352,12 +352,16 @@ def main():
             args.tree_forward_m is None or args.tree_left_m is None):
         raise SystemExit('target capture requires --tree-forward-m and --tree-left-m')
 
+    try:
+        document = _document(args)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+
     rclpy.init(args=sys.argv)
     node = SitePoseCapture()
     try:
         pose, quality = node.capture(
             args.timeout_sec, force_capture=args.force_capture)
-        document = _document(args)
         mission = document['mission']
         pose_mapping = {'x': pose[0], 'y': pose[1], 'yaw': pose[2]}
         if args.capture_home:
@@ -375,12 +379,15 @@ def main():
                 raise ValueError(
                     f'{target_id} already exists; pass --update to replace it')
             hint = tree_hint_from_offset(
-                pose, args.tree_forward_m, args.tree_left_m, 0.0)
+                pose, args.tree_forward_m, args.tree_left_m, 0.0,
+                document['arm_base_mount']['forward_m'],
+                document['arm_base_mount']['left_m'])
             target = {
                 'target_id': target_id,
                 'docking_pose': pose_mapping,
                 'tree_hint': {'x': hint[0], 'y': hint[1], 'z': hint[2]},
                 'measured_tree_offset': {
+                    'reference': 'arm_base_vehicle_axes',
                     'forward_m': float(args.tree_forward_m),
                     'left_m': float(args.tree_left_m),
                 },

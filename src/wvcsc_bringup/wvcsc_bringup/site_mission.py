@@ -15,12 +15,18 @@ import shutil
 import tempfile
 
 import yaml
+from wvcsc_mission_manager.core import (
+    DEFAULT_ARM_BASE_FORWARD_OFFSET,
+    DEFAULT_ARM_BASE_LEFT_OFFSET,
+)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+ARM_BASE_OFFSET_REFERENCE = 'arm_base_vehicle_axes'
 DEFAULT_FOOTPRINT = ((0.8, -0.4), (0.8, 0.4), (-0.8, 0.4), (-0.8, -0.4))
 MIN_TREE_DISTANCE_M = 0.95
 MAX_TREE_DISTANCE_M = 1.80
+MAX_ARM_BASE_FORWARD_ERROR_M = 0.20
 MAX_HINT_RECONSTRUCTION_ERROR_M = 0.03
 
 # 当前只要求采点流程执行成功，暂时使用执行优先的宽松门限。
@@ -107,14 +113,22 @@ def pose_sample_statistics(samples):
     return x, y, yaw, position_spread, yaw_spread
 
 
-def tree_hint_from_offset(docking_pose, forward_m, left_m, z=0.0):
+def tree_hint_from_offset(
+        docking_pose, forward_m, left_m, z=0.0,
+        arm_base_forward_m=DEFAULT_ARM_BASE_FORWARD_OFFSET,
+        arm_base_left_m=DEFAULT_ARM_BASE_LEFT_OFFSET):
+    """Convert an offset measured from the arm-base origin into map coordinates."""
     x, y, yaw = (_finite(value, 'docking_pose') for value in docking_pose)
     forward = _finite(forward_m, 'tree_forward_m')
     left = _finite(left_m, 'tree_left_m')
+    arm_forward = _finite(arm_base_forward_m, 'arm_base_forward_m')
+    arm_left = _finite(arm_base_left_m, 'arm_base_left_m')
     tree_z = _finite(z, 'tree_hint.z')
     return (
-        x + math.cos(yaw) * forward - math.sin(yaw) * left,
-        y + math.sin(yaw) * forward + math.cos(yaw) * left,
+        x + math.cos(yaw) * (arm_forward + forward) -
+        math.sin(yaw) * (arm_left + left),
+        y + math.sin(yaw) * (arm_forward + forward) +
+        math.cos(yaw) * (arm_left + left),
         tree_z,
     )
 
@@ -265,6 +279,10 @@ def new_site_document(site_id, mission_id, map_yaml):
         'schema_version': SCHEMA_VERSION,
         'site_id': str(site_id).strip(),
         'map': map_hashes(map_yaml),
+        'arm_base_mount': {
+            'forward_m': DEFAULT_ARM_BASE_FORWARD_OFFSET,
+            'left_m': DEFAULT_ARM_BASE_LEFT_OFFSET,
+        },
         'mission': {
             'mission_id': str(mission_id).strip(),
             'return_home_after_finish': False,
@@ -282,6 +300,10 @@ def load_site_document(path):
         document = yaml.safe_load(stream) or {}
     if not isinstance(document, dict):
         raise ValueError('site mission root must be a mapping')
+    if document.get('schema_version') != SCHEMA_VERSION:
+        raise ValueError(
+            f'site schema_version must be {SCHEMA_VERSION}; back up the old '
+            'site file and recapture HOME and targets from the arm-base origin')
     return document
 
 
@@ -312,6 +334,14 @@ def validate_site_document(
         check(int(document.get('schema_version', -1)) == SCHEMA_VERSION,
               f'schema_version must be {SCHEMA_VERSION}')
         check(bool(str(document.get('site_id', '')).strip()), 'site_id is required')
+        mount = document.get('arm_base_mount') or {}
+        arm_forward = _finite(
+            mount.get('forward_m'), 'arm_base_mount.forward_m')
+        arm_left = _finite(mount.get('left_m'), 'arm_base_mount.left_m')
+        check(abs(arm_forward - DEFAULT_ARM_BASE_FORWARD_OFFSET) <= 1e-9,
+              'arm_base_mount.forward_m does not match robot geometry')
+        check(abs(arm_left - DEFAULT_ARM_BASE_LEFT_OFFSET) <= 1e-9,
+              'arm_base_mount.left_m does not match robot geometry')
         expected_hashes = map_hashes(map_yaml)
         map_section = document.get('map') or {}
         check(map_section.get('frame_id') == 'map', 'map.frame_id must be map')
@@ -340,8 +370,14 @@ def validate_site_document(
             docking = _pose(target.get('docking_pose'), f'{label}.docking_pose')
             hint = _point(target.get('tree_hint'), f'{label}.tree_hint')
             offset = target.get('measured_tree_offset') or {}
+            check(offset.get('reference') == ARM_BASE_OFFSET_REFERENCE,
+                  f'{label}.measured_tree_offset.reference must be '
+                  f'{ARM_BASE_OFFSET_REFERENCE}')
             forward = _finite(offset.get('forward_m'), f'{label}.forward_m')
             left = _finite(offset.get('left_m'), f'{label}.left_m')
+            check(abs(forward) <= MAX_ARM_BASE_FORWARD_ERROR_M,
+                  f'{label} arm-base forward error exceeds '
+                  f'{MAX_ARM_BASE_FORWARD_ERROR_M:.2f} m')
             side = str(target.get('spray_side', '')).strip().lower()
             check(side in {'left', 'right'}, f'{label}.spray_side is invalid')
             check((side == 'left' and left > 0.0) or
@@ -351,7 +387,8 @@ def validate_site_document(
             check(MIN_TREE_DISTANCE_M <= distance <= MAX_TREE_DISTANCE_M,
                   f'{label} tree distance must be within '
                   f'{MIN_TREE_DISTANCE_M:.2f}-{MAX_TREE_DISTANCE_M:.2f} m')
-            expected_hint = tree_hint_from_offset(docking, forward, left, hint[2])
+            expected_hint = tree_hint_from_offset(
+                docking, forward, left, hint[2], arm_forward, arm_left)
             check(math.hypot(hint[0] - expected_hint[0],
                              hint[1] - expected_hint[1]) <=
                   MAX_HINT_RECONSTRUCTION_ERROR_M,

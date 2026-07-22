@@ -113,6 +113,14 @@ AMCL 更新，不会因约 1 Hz 发布抖动直接中断采点。
 2. 在 RViz 中确认 `map → base_footprint` TF 正常，AMCL 粒子云已经收敛；
 3. 确认车体停稳后执行：
 
+旧`schema_version: 1`站点以`base_footprint`为测量原点，不能直接复用。
+升级前先执行：
+
+```bash
+mv "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml" \
+  "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site_schema_v1.bak"
+```
+
 ```bash
 ros2 run wvcsc_bringup capture_site_pose \
   --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
@@ -141,20 +149,20 @@ ros2 run wvcsc_bringup capture_site_pose \
    │
    │
    ↑
-   ◎ ← base_footprint (小车底盘投影中心)
+   ◎ ← 机械臂基座物理原点（坐标轴与车体平行）
    │
    └── 卷尺纵向距离 (tree-forward-m)，车头方向
 ```
 
 | 参数 | 测量基准点 | 测量方向 | 工具 | 示例值 |
 |------|-----------|---------|------|--------|
-| `--tree-forward-m` | base_footprint 中心 | **车头朝向**（base_footprint +X） | 卷尺 | `0.0`（树在侧方） |
-| `--tree-left-m` | base_footprint 中心 | **小车左侧**（+Y，右侧填**负数**） | 卷尺 | `1.50`（树在左侧 1.5m） |
+| `--tree-forward-m` | 机械臂基座原点 | **车头朝向**（车体 +X） | 卷尺 | `0.0`（树在正侧方） |
+| `--tree-left-m` | 机械臂基座原点 | **小车左侧**（+Y，右侧填**负数**） | 卷尺 | `1.50`（树在左侧 1.5m） |
 
 **实测方法**：
-1. 从 base_footprint 中心（小车底盘投影到地面的中心点）向车头方向拉卷尺，垂直树根部——读数为 `tree-forward-m`
-2. 从同一中心点向小车左侧拉卷尺——读数为 `tree-left-m`（右侧为负，填 `-1.5` 等）
-3. 如果树就在小车正侧面，`tree-forward-m` 填 `0.0`
+1. 从机械臂基座物理原点沿车头方向测量树根的纵向偏差，作为`tree-forward-m`。
+2. 从同一原点沿车体左侧测量`tree-left-m`；右侧填负数。
+3. 调整小车使树处于机械臂基座正侧方，`tree-forward-m`尽量为`0.0`，且必须在`±0.20 m`内。
 
 ### 2.7 执行采点
 
@@ -257,8 +265,11 @@ cat ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
 预期格式：
 
 ```yaml
-schema_version: 1
+schema_version: 2
 site_id: corn_site
+arm_base_mount:
+  forward_m: -0.40
+  left_m: 0.0
 map:
   frame_id: map
   yaml_sha256: abc123...
@@ -270,8 +281,11 @@ mission:
   targets:
     - target_id: tree_01
       docking_pose: {x: 3.002, y: 0.498, yaw: 0.003}
-      tree_hint: {x: 3.002, y: 1.998, z: 0.0}
-      measured_tree_offset: {forward_m: 0.0, left_m: 1.5}
+      tree_hint: {x: 2.602, y: 1.998, z: 0.0}
+      measured_tree_offset:
+        reference: arm_base_vehicle_axes
+        forward_m: 0.0
+        left_m: 1.5
       spray_side: left
       spray_duration: 5.0
       capture_quality: {samples: 30, position_spread_m: 0.012, ...}

@@ -38,6 +38,8 @@ from wvcsc_interfaces.msg import (
 from wvcsc_interfaces.srv import LoadManualMission
 
 from .core import (
+    DEFAULT_ARM_BASE_FORWARD_OFFSET,
+    DEFAULT_ARM_BASE_LEFT_OFFSET,
     DEFAULT_DOCKING_LATERAL_OFFSET,
     MissionCore,
     MissionState,
@@ -61,6 +63,10 @@ class MissionManager(Node):
         self._road_yaw = float(self.get_parameter('road_yaw').value)
         self._docking_lateral_offset = float(
             self.get_parameter('docking_lateral_offset').value)
+        self._arm_base_forward_offset = float(
+            self.get_parameter('arm_base_forward_offset_m').value)
+        self._arm_base_left_offset = float(
+            self.get_parameter('arm_base_left_offset_m').value)
         self._manual_tree_standoff = float(
             self.get_parameter('manual_tree_standoff').value)
         self._manual_tree_base_z = float(
@@ -98,6 +104,9 @@ class MissionManager(Node):
         )
         if not all(math.isfinite(value) for value in self._home_pose):
             raise ValueError('home pose must contain finite values')
+        if not all(math.isfinite(value) for value in (
+                self._arm_base_forward_offset, self._arm_base_left_offset)):
+            raise ValueError('arm base offsets must be finite')
         if (not math.isfinite(self._nav_startup_retry_timeout) or
                 not math.isfinite(self._nav_startup_retry_interval) or
                 self._nav_startup_retry_timeout <= 0.0 or
@@ -198,6 +207,8 @@ class MissionManager(Node):
             'road_center_y': 0.0,
             'road_yaw': 0.0,
             'docking_lateral_offset': DEFAULT_DOCKING_LATERAL_OFFSET,
+            'arm_base_forward_offset_m': DEFAULT_ARM_BASE_FORWARD_OFFSET,
+            'arm_base_left_offset_m': DEFAULT_ARM_BASE_LEFT_OFFSET,
             'manual_tree_standoff': 1.5,
             'manual_tree_base_z': 0.0,
             'require_docking_quality': False,
@@ -320,7 +331,9 @@ class MissionManager(Node):
                     or 'manual://measured')
             else:
                 tree_hint = manual_tree_hint(
-                    docking, item.spray_side, tree_standoff, tree_base_z)
+                    docking, item.spray_side, tree_standoff, tree_base_z,
+                    self._arm_base_forward_offset,
+                    self._arm_base_left_offset)
                 source = (
                     str(getattr(item, 'evidence_uri', '')).strip()
                     or 'manual://inferred')
@@ -344,6 +357,8 @@ class MissionManager(Node):
                 self._road_center_y,
                 self._road_yaw,
                 self._docking_lateral_offset,
+                self._arm_base_forward_offset,
+                self._arm_base_left_offset,
             )
             seen.add(target_id)
             targets.append(target)
@@ -521,7 +536,9 @@ class MissionManager(Node):
                 self._docking_retry_count = 0
             x, y, yaw = navigation_pose(
                 target, self._road_center_y, self._road_yaw,
-                self._docking_lateral_offset)
+                self._docking_lateral_offset,
+                self._arm_base_forward_offset,
+                self._arm_base_left_offset)
             target_label = target.tree_id
         goal = NavigateToPose.Goal()
         goal.pose.header.stamp = self.get_clock().now().to_msg()
@@ -652,7 +669,9 @@ class MissionManager(Node):
         age = max(0.0, now - received_at)
         desired = navigation_pose(
             target, self._road_center_y, self._road_yaw,
-            self._docking_lateral_offset)
+            self._docking_lateral_offset,
+            self._arm_base_forward_offset,
+            self._arm_base_left_offset)
         position_error = math.hypot(x - desired[0], y - desired[1])
         yaw_error = self._angle_error(yaw, desired[2])
         details = {
@@ -763,7 +782,9 @@ class MissionManager(Node):
             return target.x, target.y, target.z
         return manual_tree_hint(
             target.docking_pose_override, target.spray_side,
-            self._manual_tree_standoff, self._manual_tree_base_z)
+            self._manual_tree_standoff, self._manual_tree_base_z,
+            self._arm_base_forward_offset,
+            self._arm_base_left_offset)
 
     def _spray_goal_response(self, future):
         self._spray_pending = False
@@ -991,7 +1012,9 @@ class MissionManager(Node):
                 item.docking_pose,
                 *navigation_pose(
                     target, self._road_center_y, self._road_yaw,
-                    self._docking_lateral_offset),
+                    self._docking_lateral_offset,
+                    self._arm_base_forward_offset,
+                    self._arm_base_left_offset),
             )
             message.targets.append(item)
         self._plan_pub.publish(message)

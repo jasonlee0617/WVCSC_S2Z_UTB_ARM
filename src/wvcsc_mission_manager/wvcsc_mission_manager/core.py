@@ -19,6 +19,8 @@ import math
 
 
 DEFAULT_DOCKING_LATERAL_OFFSET = 0.2
+DEFAULT_ARM_BASE_FORWARD_OFFSET = -0.40
+DEFAULT_ARM_BASE_LEFT_OFFSET = 0.0
 
 
 class MissionState(IntEnum):
@@ -255,7 +257,9 @@ class MissionCore:
 
 def docking_pose(
         target, road_center_y=0.0, road_yaw=0.0,
-        lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET):
+        lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET,
+        arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
+        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
     """
     核心几何函数：根据树的坐标和方位，计算小车行驶的停靠位姿。
     
@@ -264,7 +268,9 @@ def docking_pose(
     - 如果病树在右侧 (spray_side=right)，小车需停在道路中心的右侧。
     - 确保横向偏移量 `lateral_offset` (0.2m) 使得小车外沿与树基部保持安全距离。
     """
-    values = (target.x, target.y, road_center_y, road_yaw, lateral_offset)
+    values = (
+        target.x, target.y, road_center_y, road_yaw, lateral_offset,
+        arm_base_forward_offset, arm_base_left_offset)
     if not all(math.isfinite(value) for value in values):
         raise ValueError(f'{target.tree_id}: non-finite docking pose')
     if lateral_offset < 0.0:
@@ -279,33 +285,62 @@ def docking_pose(
         goal_y = road_center_y - lateral_offset
     else:
         raise ValueError(f'{target.tree_id}: invalid spray_side')
-    return target.x, goal_y, road_yaw
+    cosine, sine = math.cos(road_yaw), math.sin(road_yaw)
+    arm_x = (
+        target.x + cosine * arm_base_forward_offset -
+        sine * arm_base_left_offset)
+    arm_y = (
+        goal_y + sine * arm_base_forward_offset +
+        cosine * arm_base_left_offset)
+    tangent_error = (
+        (target.x - arm_x) * cosine + (target.y - arm_y) * sine)
+    return (
+        target.x + tangent_error * cosine,
+        goal_y + tangent_error * sine,
+        road_yaw,
+    )
 
 
 def navigation_pose(
         target, road_center_y=0.0, road_yaw=0.0,
-        lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET):
+        lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET,
+        arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
+        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
     if target.docking_pose_override is not None:
         return target.docking_pose_override
-    return docking_pose(target, road_center_y, road_yaw, lateral_offset)
+    return docking_pose(
+        target, road_center_y, road_yaw, lateral_offset,
+        arm_base_forward_offset, arm_base_left_offset)
 
 
-def manual_tree_hint(docking, spray_side, standoff, tree_base_z=0.0):
+def manual_tree_hint(
+        docking, spray_side, standoff, tree_base_z=0.0,
+        arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
+        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
     """从手动选择的停靠点反向推算树根的世界坐标 (用于人工定义任务)。"""
     x, y, yaw = (float(value) for value in docking)
     standoff = float(standoff)
     tree_base_z = float(tree_base_z)
-    if not all(math.isfinite(value) for value in (x, y, yaw, standoff, tree_base_z)):
+    if not all(math.isfinite(value) for value in (
+            x, y, yaw, standoff, tree_base_z,
+            arm_base_forward_offset, arm_base_left_offset)):
         raise ValueError('manual tree hint values must be finite')
     if standoff <= 0.0:
         raise ValueError('manual_tree_standoff must be positive')
     if spray_side not in ('left', 'right'):
         raise ValueError(f'invalid spray_side: {spray_side}')
     sign = 1.0 if spray_side == 'left' else -1.0
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    arm_x = (
+        x + cosine * arm_base_forward_offset -
+        sine * arm_base_left_offset)
+    arm_y = (
+        y + sine * arm_base_forward_offset +
+        cosine * arm_base_left_offset)
     normal_x, normal_y = -math.sin(yaw), math.cos(yaw)
     return (
-        x + sign * standoff * normal_x,
-        y + sign * standoff * normal_y,
+        arm_x + sign * standoff * normal_x,
+        arm_y + sign * standoff * normal_y,
         tree_base_z,
     )
 

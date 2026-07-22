@@ -32,6 +32,7 @@ def _optimizer(**overrides):
         'camera_height_step_m': 0.1,
         'azimuth_offsets_deg': (0.0,),
         'image_margin_ratio': 0.08,
+        'min_visible_fraction': 0.60,
         'max_condition_number': 12.0,
         'min_joint_margin_rad': 0.15,
         'preferred_joint_margin_rad': 0.35,
@@ -48,14 +49,47 @@ def _candidates(optimizer):
         (600.0, 600.0, 640.0, 360.0, 1280, 720))
 
 
-def test_candidates_keep_the_fruit_envelope_inside_camera_margin():
+def test_candidates_keep_the_fruit_center_and_required_coverage():
     candidates = _candidates(_optimizer())
 
     assert candidates
     visible = [candidate for candidate in candidates if candidate.visible]
     assert visible
     assert all(isinstance(candidate.visible, bool) for candidate in candidates)
-    assert all(candidate.visible_margin_px >= 0.0 for candidate in visible)
+    assert all(candidate.visible_fraction >= 0.60 for candidate in visible)
+
+
+def test_off_center_c10_intrinsics_keep_runtime_observation_candidates():
+    optimizer = _optimizer(
+        fruit_zone_height_min_m=0.8,
+        fruit_zone_height_max_m=1.6,
+        distance_min_m=1.1,
+        distance_max_m=1.5,
+        camera_height_min_m=1.5,
+        camera_height_max_m=1.8,
+        azimuth_offsets_deg=(0.0, -12.0, 12.0),
+        image_margin_ratio=0.07,
+    )
+    candidates = optimizer.generate(
+        (-0.21, -1.79, -1.55),
+        ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+        (1079.11172, 1082.95708, 656.42746, 525.74486, 1280, 720),
+    )
+
+    visible = [candidate for candidate in candidates if candidate.visible]
+    assert visible
+    assert max(candidate.visible_fraction for candidate in candidates) >= 0.60
+    assert all(candidate.target_u_px == pytest.approx(640.0) for candidate in visible)
+    assert all(candidate.target_v_px == pytest.approx(360.0) for candidate in visible)
+
+
+def test_coverage_below_configured_threshold_is_rejected():
+    candidates = _candidates(_optimizer(min_visible_fraction=1.0, fruit_zone_radius_m=2.0))
+
+    assert candidates
+    assert not any(candidate.visible for candidate in candidates)
+    assert all(candidate.rejection_reason == 'fruit_zone_coverage_below_threshold'
+               for candidate in candidates)
 
 
 def test_joint_margin_rejects_a_near_limit_ik_solution():

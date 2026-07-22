@@ -157,6 +157,7 @@ wvcsc_spray_task:
     camera_height_step_m: 0.10
     observation_azimuth_offsets_deg: [0.0, -12.0, 12.0] # 观察时的左右扇形偏置角度
     observation_image_margin_ratio: 0.07                # 图像边缘内缩留白防止出界
+    observation_min_visible_fraction: 0.60              # 果实区域最低有效图像覆盖率
 
     # 系统输入的等待与搜索超时限制。
     observation_input_timeout_sec: 2.0

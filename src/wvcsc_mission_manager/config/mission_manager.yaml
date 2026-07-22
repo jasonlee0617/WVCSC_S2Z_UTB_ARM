@@ -35,6 +35,10 @@ mission_manager:
     # 满足 C10 相机观察基线 (observation_distance 1.0~1.5m) 的可达范围。
     docking_lateral_offset: 0.2
 
+    # 机械臂基座原点相对 base_footprint 的平面安装偏移，须与整车 URDF 一致。
+    arm_base_forward_offset_m: -0.40
+    arm_base_left_offset_m: 0.0
+
     # 在手动模式(如 Manual Mission)下，推算树根位置时的前后距离。
     manual_tree_standoff: 1.5
     # 手动模式下树根的 Z 轴高度。

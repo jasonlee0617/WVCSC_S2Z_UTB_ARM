@@ -34,7 +34,11 @@ def _document(map_yaml):
         'target_id': 'corn_01',
         'docking_pose': {'x': 0.0, 'y': 0.0, 'yaw': 0.0},
         'tree_hint': {'x': hint[0], 'y': hint[1], 'z': hint[2]},
-        'measured_tree_offset': {'forward_m': 0.0, 'left_m': 1.2},
+        'measured_tree_offset': {
+            'reference': 'arm_base_vehicle_axes',
+            'forward_m': 0.0,
+            'left_m': 1.2,
+        },
         'spray_side': 'left',
         'spray_duration': 5.0,
         'capture_quality': {
@@ -48,10 +52,10 @@ def _document(map_yaml):
     return document
 
 
-def test_tree_offset_transform_uses_base_forward_and_left_axes():
+def test_tree_offset_transform_uses_arm_base_origin_and_vehicle_axes():
     x, y, z = tree_hint_from_offset((2.0, 3.0, math.pi / 2.0), 1.0, 2.0)
     assert x == pytest.approx(0.0)
-    assert y == pytest.approx(4.0)
+    assert y == pytest.approx(3.6)
     assert z == 0.0
 
 
@@ -89,6 +93,19 @@ def test_side_hint_and_quality_mismatches_are_rejected(tmp_path):
     document['mission']['targets'][0]['capture_quality']['samples'] = 29
     with pytest.raises(ValueError, match='at least 30'):
         validate_site_document(document, map_yaml)
+
+    document = _document(map_yaml)
+    document['mission']['targets'][0]['measured_tree_offset']['forward_m'] = 0.21
+    with pytest.raises(ValueError, match='arm-base forward error'):
+        validate_site_document(document, map_yaml)
+
+
+def test_schema_v1_is_rejected_instead_of_silently_reinterpreted(tmp_path):
+    path = tmp_path / 'site.yaml'
+    path.write_text('schema_version: 1\nsite_id: old\n', encoding='utf-8')
+
+    with pytest.raises(ValueError, match='schema_version must be 2'):
+        load_site_document(path)
 
 
 def test_atomic_site_write_round_trips_and_keeps_backup(tmp_path):

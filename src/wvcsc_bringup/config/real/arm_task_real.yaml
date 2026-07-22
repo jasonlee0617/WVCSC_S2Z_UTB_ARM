@@ -19,6 +19,7 @@ wvcsc_spray_task:
     fruit_zone_height_min_m: 0.80
     fruit_zone_height_max_m: 1.60
     fruit_zone_radius_m: 0.60
+    observation_min_visible_fraction: 0.60
     observation_distance_min_m: 1.00
     observation_distance_max_m: 1.00
     observation_distance_step_m: 0.10

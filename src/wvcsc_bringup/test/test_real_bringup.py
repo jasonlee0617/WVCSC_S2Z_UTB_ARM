@@ -241,3 +241,18 @@ def test_preflight_checks_every_direct_runtime_boundary():
     assert "--handeye-calibration" in source
     assert "--nozzle-calibration" in source
     assert "_calibration_checks(args, failures)" in source
+
+
+def test_arm_base_docking_offset_matches_integrated_urdf():
+    workspace = PACKAGE.parent
+    mission = yaml.safe_load((
+        workspace / 'wvcsc_mission_manager' / 'config' /
+        'mission_manager.yaml').read_text(encoding='utf-8'))
+    parameters = mission['mission_manager']['ros__parameters']
+    xacro = (
+        workspace / 'wvcsc_description' / 'urdf' /
+        'wvcsc_utb_alicia.urdf.xacro').read_text(encoding='utf-8')
+
+    assert parameters['arm_base_forward_offset_m'] == pytest.approx(-0.40)
+    assert parameters['arm_base_left_offset_m'] == pytest.approx(0.0)
+    assert 'name="arm_mount_xyz" default="-0.40 0 0"' in xacro

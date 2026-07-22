@@ -106,6 +106,30 @@ def camera_look_at_pose(
     return camera, quaternion_from_matrix(matrix)
 
 
+def camera_orientation_for_pixel(
+        camera_position, camera_quat_xyzw, target_point, camera_model,
+        desired_u, desired_v):
+    """Rotate the camera so ``target_point`` projects at the requested pixel."""
+    fx, fy, cx, cy, width, height = camera_model
+    values = (
+        *camera_position, *target_point, fx, fy, cx, cy,
+        width, height, desired_u, desired_v)
+    if (not all(math.isfinite(float(value)) for value in values) or
+            fx <= 0.0 or fy <= 0.0 or width <= 0 or height <= 0):
+        raise ValueError('camera targeting inputs are invalid')
+    desired_ray = _unit_vector((
+        (float(desired_u) - float(cx)) / float(fx),
+        (float(desired_v) - float(cy)) / float(fy),
+        1.0,
+    ))
+    target_ray = _unit_vector(tuple(
+        float(target_point[index]) - float(camera_position[index])
+        for index in range(3)))
+    current_world_ray = rotate_vector(desired_ray, camera_quat_xyzw)
+    correction = _quaternion_between_vectors(current_world_ray, target_ray)
+    return quaternion_multiply(correction, camera_quat_xyzw)
+
+
 def tool_pose_from_camera_pose(
         camera_position, camera_quat_xyzw,
         tool_to_camera_translation, tool_to_camera_quat_xyzw):
@@ -308,6 +332,10 @@ class ObservationCandidate:
     tool_quat: tuple
     visible: bool
     visible_margin_px: float
+    visible_fraction: float = 0.0
+    projected_bbox: tuple = ()
+    target_u_px: float = 0.0
+    target_v_px: float = 0.0
     ik_joints: tuple = None
     condition_number: float = math.inf
     min_joint_margin_rad: float = 0.0
@@ -318,7 +346,9 @@ class ObservationCandidate:
 def _build_candidate(
         candidate_id, distance_m, camera_height_m, azimuth_deg,
         camera_position, camera_quat, tool_position, tool_quat,
-        visible, visible_margin_px, rejection_reason=''):
+        visible, visible_margin_px, visible_fraction=0.0,
+        projected_bbox=(), target_u_px=0.0, target_v_px=0.0,
+        rejection_reason=''):
     return ObservationCandidate(
         candidate_id=candidate_id,
         distance_m=distance_m,
@@ -330,6 +360,10 @@ def _build_candidate(
         tool_quat=tool_quat,
         visible=bool(visible),
         visible_margin_px=float(visible_margin_px),
+        visible_fraction=float(visible_fraction),
+        projected_bbox=tuple(float(value) for value in projected_bbox),
+        target_u_px=float(target_u_px),
+        target_v_px=float(target_v_px),
         rejection_reason=rejection_reason,
     )
 
@@ -413,7 +447,7 @@ class ObservationOptimizer:
             raise ValueError('URDF does not provide limits for every arm joint')
 
     def generate(self, tree_in_base, camera_mount, camera):
-        """枚举观察网格，并拒绝不能完整覆盖果实作业包络的相机位姿。"""
+        """枚举观察网格，并保留中心可见且覆盖率足够的相机位姿。"""
         tree_x, tree_y, _tree_z = (float(value) for value in tree_in_base)
         horizontal_distance = math.hypot(tree_x, tree_y)
         aim_height = (
@@ -433,9 +467,16 @@ class ObservationOptimizer:
                 for azimuth in self._config['azimuth_offsets_deg']:
                     camera_position, camera_quat = camera_look_at_pose(
                         tree_in_base, aim_height, height, distance, azimuth)
-                    # 检查果实区域边界能否完整落在相机视野内
-                    visible, margin = self._envelope_visible(
+                    target_point = (
+                        float(tree_in_base[0]), float(tree_in_base[1]),
+                        float(tree_in_base[2]) + aim_height)
+                    camera_quat = camera_orientation_for_pixel(
+                        camera_position, camera_quat, target_point, camera,
+                        float(camera[4]) / 2.0, float(camera[5]) / 2.0)
+                    visible, margin, fraction, bbox, target_pixel, reason = (
+                        self._envelope_visible(
                         tree_in_base, camera_position, camera_quat, camera)
+                    )
                     # 转换相机位姿为 tool0 位姿
                     tool_position, tool_quat = tool_pose_from_camera_pose(
                         camera_position, camera_quat, camera_mount[0], camera_mount[1])
@@ -451,8 +492,11 @@ class ObservationOptimizer:
                         tool_quat=tool_quat,
                         visible=visible,
                         visible_margin_px=margin,
-                        rejection_reason=(
-                            '' if visible else 'fruit_zone_outside_camera'),
+                        visible_fraction=fraction,
+                        projected_bbox=bbox,
+                        target_u_px=target_pixel[0],
+                        target_v_px=target_pixel[1],
+                        rejection_reason=reason,
                     ))
         return candidates
 
@@ -536,34 +580,84 @@ class ObservationOptimizer:
         return np.vstack((np.column_stack(linear), np.column_stack(axes)))
 
     def _envelope_visible(self, tree, camera_position, camera_quat, camera):
-        """投影果实区域上下边界的环形采样点，返回最小图像边缘余量。"""
+        """Project the camera-facing work envelope and return its usable coverage."""
         fx, fy, cx, cy, width, height = camera
         rotation = np.asarray(
             rotation_matrix_from_quaternion(camera_quat), dtype=float)
         camera_position = np.asarray(camera_position, dtype=float)
         border_x = float(width) * float(self._config['image_margin_ratio'])
         border_y = float(height) * float(self._config['image_margin_ratio'])
-        margins = []
-        # 在果实区域的高度上下边界和半径边界上采样 8 个点，并验证它们是否在图像视野内
+        horizontal = np.asarray((
+            float(tree[0]) - camera_position[0],
+            float(tree[1]) - camera_position[1],
+        ), dtype=float)
+        horizontal_norm = float(np.linalg.norm(horizontal))
+        if horizontal_norm <= 1e-9:
+            return False, -math.inf, 0.0, (), (0.0, 0.0), (
+                'target_center_outside_usable_image')
+        lateral = np.asarray((
+            horizontal[1] / horizontal_norm,
+            -horizontal[0] / horizontal_norm,
+            0.0,
+        ))
+        radius = float(self._config['fruit_zone_radius_m'])
+        pixels = []
         for height_m in (
                 float(self._config['fruit_zone_height_min_m']),
                 float(self._config['fruit_zone_height_max_m'])):
-            for angle in np.linspace(0.0, 2.0 * math.pi, 8, endpoint=False):
-                point = np.array((
-                    float(tree[0]) + float(self._config['fruit_zone_radius_m']) * math.cos(angle),
-                    float(tree[1]) + float(self._config['fruit_zone_radius_m']) * math.sin(angle),
-                    float(tree[2]) + height_m,
-                ))
-                # 从世界坐标系转换到相机光学坐标系 (optical frame)
+            for side in (-1.0, 1.0):
+                point = np.asarray((
+                    float(tree[0]), float(tree[1]), float(tree[2]) + height_m,
+                )) + side * radius * lateral
                 optical = rotation.T @ (point - camera_position)
                 if optical[2] <= 1e-6:
-                    return False, -math.inf
+                    return False, -math.inf, 0.0, (), (0.0, 0.0), (
+                        'target_center_outside_usable_image')
                 u = fx * optical[0] / optical[2] + cx
                 v = fy * optical[1] / optical[2] + cy
-                margins.append(min(u - border_x, width - border_x - u,
-                                   v - border_y, height - border_y - v))
-        margin = min(margins)
-        return bool(margin >= 0.0), float(margin)
+                pixels.append((float(u), float(v)))
+
+        center = np.asarray((
+            float(tree[0]), float(tree[1]),
+            float(tree[2]) + 0.5 * (
+                float(self._config['fruit_zone_height_min_m']) +
+                float(self._config['fruit_zone_height_max_m'])),
+        ))
+        center_optical = rotation.T @ (center - camera_position)
+        if center_optical[2] <= 1e-6:
+            return False, -math.inf, 0.0, (), (0.0, 0.0), (
+                'target_center_outside_usable_image')
+        center_u = float(fx * center_optical[0] / center_optical[2] + cx)
+        center_v = float(fy * center_optical[1] / center_optical[2] + cy)
+        min_u = min(pixel[0] for pixel in pixels)
+        max_u = max(pixel[0] for pixel in pixels)
+        min_v = min(pixel[1] for pixel in pixels)
+        max_v = max(pixel[1] for pixel in pixels)
+        bbox = (min_u, min_v, max_u, max_v)
+        bbox_area = max(0.0, max_u - min_u) * max(0.0, max_v - min_v)
+        intersection_width = max(
+            0.0, min(max_u, float(width) - border_x) - max(min_u, border_x))
+        intersection_height = max(
+            0.0, min(max_v, float(height) - border_y) - max(min_v, border_y))
+        visible_fraction = (
+            intersection_width * intersection_height / bbox_area
+            if bbox_area > 1e-9 else 0.0)
+        margin = min(
+            min_u - border_x, float(width) - border_x - max_u,
+            min_v - border_y, float(height) - border_y - max_v)
+        center_visible = (
+            border_x <= center_u <= float(width) - border_x and
+            border_y <= center_v <= float(height) - border_y)
+        required = float(self._config['min_visible_fraction'])
+        if not center_visible:
+            reason = 'target_center_outside_usable_image'
+        elif visible_fraction < required:
+            reason = 'fruit_zone_coverage_below_threshold'
+        else:
+            reason = ''
+        return (
+            not reason, float(margin), float(visible_fraction), bbox,
+            (center_u, center_v), reason)
 
 
 class ObservationFlowMixin:
@@ -923,7 +1017,9 @@ class ObservationFlowMixin:
 
     # --------- 从 hint 走到观察位 ---------
     def _move_to_observation(self, tree_hint):
+        self._observation_failure_reason = ''
         if not self._hint_available(tree_hint):
+            self._observation_failure_reason = 'tree_hint_unavailable'
             self.get_logger().error('[ARM] tree_hint is required for observation')
             return False
         try:
@@ -940,6 +1036,7 @@ class ObservationFlowMixin:
             camera_transform = self._tf_buffer.lookup_transform(
                 'tool0', self._camera_frame, rclpy.time.Time())
         except (TransformException, ValueError) as error:
+            self._observation_failure_reason = f'observation_tf_failed: {error}'
             self.get_logger().error(f'[ARM] cannot build observation pose: {error}')
             return False
         camera_translation = camera_transform.transform.translation
@@ -958,6 +1055,7 @@ class ObservationFlowMixin:
         """生成观察网格，结合碰撞 IK 和 URDF 指标保留少量安全候选。"""
         inputs = self._wait_for_observation_inputs()
         if inputs is None:
+            self._observation_failure_reason = 'camera_or_joint_state_unavailable'
             self._publish_observation_debug(
                 'search_failed', rejection_reason='camera_or_joint_state_unavailable')
             return False
@@ -966,15 +1064,6 @@ class ObservationFlowMixin:
         candidates = self._observation_optimizer.generate(
             self._tree_in_base, self._camera_mount, camera)
         visible_count = sum(candidate.visible for candidate in candidates)
-        best_margin = max(
-            (candidate.visible_margin_px for candidate in candidates),
-            default=-math.inf)
-        self.get_logger().info(
-            f'[ARM][OBSERVE] tree_in_base=({self._tree_in_base[0]:.2f},'
-            f'{self._tree_in_base[1]:.2f},{self._tree_in_base[2]:.2f}) '
-            f'camera={camera[4]}x{camera[5]} fx={camera[0]:.1f} fy={camera[1]:.1f} '
-            f'generated={len(candidates)} fully_visible={visible_count} '
-            f'best_margin_px={best_margin:.1f}')
         for candidate in candidates:
             if not candidate.visible:
                 self._publish_observation_debug('candidate_rejected', candidate)
@@ -1000,10 +1089,30 @@ class ObservationFlowMixin:
                 else 'candidate_rejected', candidate)
         self._observation_candidates = self._observation_optimizer.rank(candidates)[
             :int(self.get_parameter('observation_max_plans').value)]
+        ik_count = sum(candidate.ik_joints is not None for candidate in candidates)
+        servo_safe_count = sum(
+            candidate.visible and not candidate.rejection_reason
+            for candidate in candidates)
+        best_fraction = max(
+            (candidate.visible_fraction for candidate in candidates), default=0.0)
+        self.get_logger().info(
+            f'[ARM][OBSERVE] tree_in_base=({self._tree_in_base[0]:.2f},'
+            f'{self._tree_in_base[1]:.2f},{self._tree_in_base[2]:.2f}) '
+            f'camera={camera[4]}x{camera[5]} fx={camera[0]:.1f} fy={camera[1]:.1f} '
+            f'generated={len(candidates)} view_usable={visible_count} '
+            f'ik_valid={ik_count} servo_safe={servo_safe_count} '
+            f'best_visible_fraction={best_fraction:.3f}')
         self._observation_candidate_index = -1
         if not self._observation_candidates:
+            if not candidates or visible_count == 0:
+                reason = 'no_camera_coverage_candidate'
+            elif ik_count == 0:
+                reason = 'no_collision_free_ik_candidate'
+            else:
+                reason = 'no_servo_safe_candidate'
+            self._observation_failure_reason = reason
             self._publish_observation_debug(
-                'search_failed', rejection_reason='no_servo_safe_candidate')
+                'search_failed', rejection_reason=reason)
             return False
         return True
 
@@ -1038,6 +1147,7 @@ class ObservationFlowMixin:
                     f'[ARM][ALIGN] planning failed for observation candidate '
                     f'index={self._observation_candidate_index} '
                     f'id={candidate.candidate_id}')
+        self._observation_failure_reason = 'all_observation_motion_candidates_failed'
         return False
 
     def _wait_for_state(self, *, require_camera=False, after_sequence=None):
@@ -1104,6 +1214,9 @@ class ObservationFlowMixin:
             visible = ik_valid = selected = False
             condition = math.inf
             margin = motion = 0.0
+            visible_fraction = 0.0
+            projected_bbox = ()
+            target_u = target_v = None
         else:
             candidate_id = candidate.candidate_id
             distance = candidate.distance_m
@@ -1115,6 +1228,10 @@ class ObservationFlowMixin:
             condition = candidate.condition_number
             margin = candidate.min_joint_margin_rad
             motion = candidate.joint_motion_norm
+            visible_fraction = candidate.visible_fraction
+            projected_bbox = candidate.projected_bbox
+            target_u = candidate.target_u_px
+            target_v = candidate.target_v_px
             rejection_reason = rejection_reason or candidate.rejection_reason
         payload = {
             'event': event,
@@ -1125,6 +1242,12 @@ class ObservationFlowMixin:
             'camera_height_m': camera_height,
             'azimuth_deg': azimuth,
             'visible': visible,
+            'visible_fraction': visible_fraction,
+            'required_visible_fraction': self._observation_config[
+                'min_visible_fraction'],
+            'projected_bbox_xyxy': projected_bbox,
+            'target_u_px': target_u,
+            'target_v_px': target_v,
             'ik_valid': ik_valid,
             'condition_number': None if not math.isfinite(condition) else condition,
             'min_joint_margin_rad': margin,
@@ -1143,7 +1266,7 @@ class ObservationFlowMixin:
         if event != 'candidate_rejected' or visible:
             self.get_logger().debug(
                 f'[ARM][OBSERVE] event={event} id={candidate_id or "-"} '
-                f'visible={visible} ik={ik_valid} '
+                f'visible={visible} coverage={visible_fraction:.3f} ik={ik_valid} '
                 f'condition={payload["condition_number"]} '
                 f'joint_margin={margin:.3f} reason={rejection_reason or "-"}')
 

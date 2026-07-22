@@ -167,6 +167,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self._observation_candidates = []
         self._observation_candidate_index = -1
         self._observation_distance = None
+        self._observation_failure_reason = ''
         self._tree_in_base = None
         self._camera_mount = None
         self._camera_model = None
@@ -253,6 +254,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'camera_height_step_m': 0.10,
             'observation_azimuth_offsets_deg': [0.0, -12.0, 12.0],
             'observation_image_margin_ratio': 0.07,
+            'observation_min_visible_fraction': 0.60,
             'observation_max_condition_number': 16.5,   # 雅可比条件数阈值（防止奇异点）
             'observation_min_joint_margin_rad': 0.22,   # 关节限位最小余量（安全距离）
             'observation_preferred_joint_margin_rad': 0.35,
@@ -307,6 +309,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 self.get_parameter('observation_azimuth_offsets_deg').value),
             'image_margin_ratio': float(
                 self.get_parameter('observation_image_margin_ratio').value),
+            'min_visible_fraction': float(
+                self.get_parameter('observation_min_visible_fraction').value),
             'max_condition_number': float(
                 self.get_parameter('observation_max_condition_number').value),
             'min_joint_margin_rad': float(
@@ -338,7 +342,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 values['preferred_joint_margin_rad'] <
                 values['min_joint_margin_rad'] or
                 not values['azimuth_offsets_deg'] or
-                not 0.0 <= values['image_margin_ratio'] < 0.5):
+                not 0.0 <= values['image_margin_ratio'] < 0.5 or
+                not 0.0 < values['min_visible_fraction'] <= 1.0):
             raise ValueError('observation search parameters are invalid')
         return values
 
@@ -509,9 +514,10 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self.get_logger().info(f'[ARM][{tree}] OBSERVE computing look-at pose from tree_hint...')
         feedback(ExecuteSpray.Feedback.MOVING_TO_OBSERVE, 0.05, 'MOVING_TO_OBSERVE')
         if not self._move_to_observation(request.tree_hint):
+            failure = self._observation_failure_reason or 'unknown observation failure'
             return self._recover_failure(
                 ExecuteSpray.Result.OBSERVE_FAILED,
-                'observation motion failed', cancel_requested,
+                f'observation motion failed: {failure}', cancel_requested,
                 'observation and HOME motion failed')
         self.get_logger().info(
             f'[ARM][{tree}] OBSERVE selected distance={self._observation_distance}m '

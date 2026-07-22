@@ -65,8 +65,9 @@ ls -l /dev/yesense_IMU
 
 ## 3. 逐树实测停靠点
 
-AMCL稳定后，人工驾驶并停稳。卷尺必须从车体上标记的
-`base_footprint`原点测量，`+X`为车头前方、`+Y`为车体左侧：
+AMCL稳定后，人工驾驶并停稳。卷尺必须从机械臂基座物理原点测量，坐标轴
+保持与车体平行：`+X`为车头前方、`+Y`为车体左侧。树在机械臂基座正侧方时
+`--tree-forward-m`填`0.0`，允许的纵向误差为`±0.20 m`：
 
 ```bash
 ros2 run wvcsc_bringup capture_site_pose -- \
@@ -78,7 +79,7 @@ ros2 run wvcsc_bringup capture_site_pose -- \
   --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
   --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
   --target-id corn_01 \
-  --tree-forward-m <前向实测值> --tree-left-m <左向实测值> \
+  --tree-forward-m 0.0 --tree-left-m <左向实测值> \
   --spray-duration 5.0
 ```
 
@@ -90,7 +91,9 @@ ros2 run wvcsc_bringup validate_site_mission -- \
   --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
 ```
 
-任务文件与地图YAML及图片SHA256绑定；地图改变后旧任务会被拒绝。
+任务文件使用schema v2，并与地图YAML及图片SHA256绑定；地图改变后旧任务会被拒绝。
+schema v1以`base_footprint`为测量原点，不能自动转换。升级后先备份旧
+`corn_site.yaml`，再依次重新采集HOME和每棵树。
 采点脚本会自行调用 AMCL 的 `/request_nomotion_update`，无需额外终端循环调用该
 服务；当前只要求流程成功，采点质量门限临时放宽为位置/偏航散布 ≤ 1.00 m/rad、
 AMCL 位置/偏航标准差 ≤ 1.00 m/rad。门限集中定义在
