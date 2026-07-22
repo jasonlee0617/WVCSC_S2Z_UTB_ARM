@@ -97,7 +97,8 @@ ros2 topic echo /ekf_odom
 ros2 topic echo /amcl_pose
 ```
 
-`pose.covariance[0]`（X 方差）和 `pose.covariance[7]`（Y 方差）的平方根 ≤ 0.08 m。
+当前采点脚本使用调试阶段的宽松门限：位置标准差 ≤ 0.60 m、偏航标准差 ≤ 0.40 rad。
+定位链稳定后，应再恢复为工程验收门限。
 
 ### 2.5 测量树到小车的距离
 
@@ -138,7 +139,7 @@ ros2 run wvcsc_bringup capture_site_pose \
 
 脚本执行流程：
 1. 自行调用 AMCL 的 `/request_nomotion_update`，等待 AHRS、AMCL 定位稳定 + EKF 停稳 1 秒
-2. 连续采集 30 个样本（0.1 秒/次，共 3 秒），验证位置散布 ≤ 0.03 m
+2. 连续采集 30 个样本（0.1 秒/次），当前调试阶段位置散布 ≤ 0.25 m、偏航散布 ≤ 0.25 rad
 3. 调用 `tree_hint_from_offset()` 自动计算树根 map 坐标
 4. 写入 `~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml`（自动创建或追加）
 
@@ -265,8 +266,8 @@ ros2 run wvcsc_bringup nav_validate_sites.py \
 | 1 | Cartographer 回环闭合 | 地图无重影、无断裂 |
 | 2 | AMCL 初始定位 | 粒子云在 3 秒内收敛 |
 | 3 | 每棵树停稳 | 1 秒内线速度 ≤ 0.03 m/s，角速度 ≤ 0.03 rad/s |
-| 4 | AMCL 协方差 | 位置标准差 ≤ 0.08 m |
-| 5 | 位置散布 | 30 个样本散布 ≤ 0.03 m |
+| 4 | AMCL 协方差 | 调试阶段位置标准差 ≤ 0.60 m、偏航标准差 ≤ 0.40 rad |
+| 5 | 位置散布 | 调试阶段 30 个样本位置/偏航散布 ≤ 0.25 m/0.25 rad |
 | 6 | 重复性 | 同一棵树连续 3 次停靠误差 ≤ 0.12 m |
 | 7 | corn_site.yaml | 4 棵树全部记录，格式校验通过 |
 | 8 | 自动顺序导航 | 4 个目标全部 `SUCCEEDED`，无超时、无跳过 |

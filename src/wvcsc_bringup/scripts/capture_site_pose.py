@@ -17,6 +17,10 @@ from std_srvs.srv import Empty
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from wvcsc_bringup.site_mission import (
+    MAX_CAPTURE_POSITION_SPREAD_M,
+    MAX_CAPTURE_POSITION_STDDEV_M,
+    MAX_CAPTURE_YAW_SPREAD_RAD,
+    MAX_CAPTURE_YAW_STDDEV_RAD,
     atomic_write_site,
     load_site_document,
     map_hashes,
@@ -164,22 +168,24 @@ class SitePoseCapture(Node):
 
     @staticmethod
     def _validate_quality(quality):
-        if quality['position_spread_m'] > 0.03:
+        if quality['position_spread_m'] > MAX_CAPTURE_POSITION_SPREAD_M:
             raise RuntimeError(
                 f"position spread {quality['position_spread_m']:.3f} m "
-                'exceeds 0.03 m')
-        if quality['yaw_spread_rad'] > 0.03:
+                f'exceeds {MAX_CAPTURE_POSITION_SPREAD_M:.2f} m')
+        if quality['yaw_spread_rad'] > MAX_CAPTURE_YAW_SPREAD_RAD:
             raise RuntimeError(
                 f"yaw spread {quality['yaw_spread_rad']:.3f} rad "
-                'exceeds 0.03 rad')
-        if quality['max_position_stddev_m'] > 0.08:
+                f'exceeds {MAX_CAPTURE_YAW_SPREAD_RAD:.2f} rad')
+        if quality['max_position_stddev_m'] > MAX_CAPTURE_POSITION_STDDEV_M:
             raise RuntimeError(
                 'AMCL position standard deviation '
-                f"{quality['max_position_stddev_m']:.3f} m exceeds 0.08 m")
-        if quality['max_yaw_stddev_rad'] > 0.08:
+                f"{quality['max_position_stddev_m']:.3f} m exceeds "
+                f'{MAX_CAPTURE_POSITION_STDDEV_M:.2f} m')
+        if quality['max_yaw_stddev_rad'] > MAX_CAPTURE_YAW_STDDEV_RAD:
             raise RuntimeError(
                 'AMCL yaw standard deviation '
-                f"{quality['max_yaw_stddev_rad']:.3f} rad exceeds 0.08 rad")
+                f"{quality['max_yaw_stddev_rad']:.3f} rad exceeds "
+                f'{MAX_CAPTURE_YAW_STDDEV_RAD:.2f} rad')
 
     def capture(self, timeout_sec=30.0):
         deadline = time.monotonic() + timeout_sec

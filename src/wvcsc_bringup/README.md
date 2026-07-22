@@ -92,7 +92,9 @@ ros2 run wvcsc_bringup validate_site_mission -- \
 
 任务文件与地图YAML及图片SHA256绑定；地图改变后旧任务会被拒绝。
 采点脚本会自行调用 AMCL 的 `/request_nomotion_update`，无需额外终端循环调用该
-服务；若 IMU、EKF、AMCL、静止判定、TF 或协方差门限任一不满足，脚本不会写入文件。
+服务；当前调试阶段仍要求 IMU、EKF、AMCL、静止判定和 TF 有效，
+采点质量门限临时放宽为位置/偏航散布 ≤ 0.25 m/0.25 rad、AMCL 位置/偏航标准差
+≤ 0.60 m/0.40 rad。定位链稳定后应恢复严格门限。
 
 ## 4. 完整定位与作业
 

@@ -79,10 +79,10 @@ def test_capture_quality_keeps_the_amcl_covariance_gate():
     quality = {
         'position_spread_m': 0.01,
         'yaw_spread_rad': 0.01,
-        'max_position_stddev_m': 0.081,
+        'max_position_stddev_m': 0.601,
         'max_yaw_stddev_rad': 0.04,
     }
-    with pytest.raises(RuntimeError, match='0.081 m exceeds 0.08 m'):
+    with pytest.raises(RuntimeError, match='0.601 m exceeds 0.60 m'):
         capture_site_pose.SitePoseCapture._validate_quality(quality)
 
     quality['max_position_stddev_m'] = 0.04

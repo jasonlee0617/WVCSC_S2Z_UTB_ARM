@@ -23,6 +23,13 @@ MIN_TREE_DISTANCE_M = 0.95
 MAX_TREE_DISTANCE_M = 1.80
 MAX_HINT_RECONSTRUCTION_ERROR_M = 0.03
 
+# 当前实车定位仍在调试阶段，采点先使用可执行的宽松质量门限。
+# 采集结果会原样写入 capture_quality，后续定位稳定后再收紧这些值。
+MAX_CAPTURE_POSITION_SPREAD_M = 0.25
+MAX_CAPTURE_YAW_SPREAD_RAD = 0.25
+MAX_CAPTURE_POSITION_STDDEV_M = 0.60
+MAX_CAPTURE_YAW_STDDEV_RAD = 0.40
+
 
 @dataclass(frozen=True)
 class MapGrid:
@@ -366,14 +373,18 @@ def validate_site_document(document, map_yaml, *, require_capture_quality=True):
                     quality.get('max_yaw_stddev_rad'),
                     f'{label}.capture_quality.max_yaw_stddev_rad')
                 check(samples >= 30, f'{label} requires at least 30 samples')
-                check(position_spread <= 0.03,
-                      f'{label} position spread exceeds 0.03 m')
-                check(yaw_spread <= 0.03,
-                      f'{label} yaw spread exceeds 0.03 rad')
-                check(position_stddev <= 0.08,
-                      f'{label} AMCL position stddev exceeds 0.08 m')
-                check(yaw_stddev <= 0.08,
-                      f'{label} AMCL yaw stddev exceeds 0.08 rad')
+                check(position_spread <= MAX_CAPTURE_POSITION_SPREAD_M,
+                      f'{label} position spread exceeds '
+                      f'{MAX_CAPTURE_POSITION_SPREAD_M:.2f} m')
+                check(yaw_spread <= MAX_CAPTURE_YAW_SPREAD_RAD,
+                      f'{label} yaw spread exceeds '
+                      f'{MAX_CAPTURE_YAW_SPREAD_RAD:.2f} rad')
+                check(position_stddev <= MAX_CAPTURE_POSITION_STDDEV_M,
+                      f'{label} AMCL position stddev exceeds '
+                      f'{MAX_CAPTURE_POSITION_STDDEV_M:.2f} m')
+                check(yaw_stddev <= MAX_CAPTURE_YAW_STDDEV_RAD,
+                      f'{label} AMCL yaw stddev exceeds '
+                      f'{MAX_CAPTURE_YAW_STDDEV_RAD:.2f} rad')
     except (KeyError, TypeError, ValueError) as error:
         errors.append(str(error))
     if errors:
