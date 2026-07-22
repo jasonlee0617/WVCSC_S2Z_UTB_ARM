@@ -39,8 +39,12 @@ class NavValidateSites(Node):
         goal.pose.header.frame_id = 'map'
         goal.pose.pose.position.x = x
         goal.pose.pose.position.y = y
-        goal.pose.pose.orientation.z, goal.pose.pose.orientation.w = (
+        orientation_x, orientation_y, orientation_z, orientation_w = (
             _yaw_to_quaternion(yaw))
+        goal.pose.pose.orientation.x = orientation_x
+        goal.pose.pose.orientation.y = orientation_y
+        goal.pose.pose.orientation.z = orientation_z
+        goal.pose.pose.orientation.w = orientation_w
 
         send_future = self._client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, send_future, timeout_sec=10.0)
@@ -58,7 +62,7 @@ class NavValidateSites(Node):
             raise RuntimeError(f'{target_label}: Nav2 failed ({status_text})')
         return True
 
-    def validate(self, targets, pause_sec):
+    def validate(self, targets, pause_sec, timeout_sec):
         count = len(targets)
         self.get_logger().info(f'[VALIDATE] starting {count} targets, pause={pause_sec}s')
         for index, target in enumerate(targets):
@@ -67,7 +71,7 @@ class NavValidateSites(Node):
             x = float(pose['x']); y = float(pose['y']); yaw = float(pose['yaw'])
             self.get_logger().info(
                 f'[{index+1}/{count}] {label}: navigating to ({x:.3f},{y:.3f},{yaw:.3f})')
-            self._navigate(label, x, y, yaw)
+            self._navigate(label, x, y, yaw, timeout=timeout_sec)
             self.get_logger().info(f'[{index+1}/{count}] {label}: arrived')
             if index < count - 1:
                 self.get_logger().info(f'[{index+1}/{count}] {label}: pausing {pause_sec}s...')
@@ -94,7 +98,8 @@ def main():
     try:
         document = load_site_document(args.file)
         node._wait_server()
-        node.validate(document['mission']['targets'], args.pause_sec)
+        node.validate(
+            document['mission']['targets'], args.pause_sec, args.timeout_sec)
         return 0
     except (RuntimeError, ValueError) as error:
         node.get_logger().error(f'[VALIDATE] failed: {error}')
