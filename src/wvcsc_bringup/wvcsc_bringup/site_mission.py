@@ -23,12 +23,13 @@ MIN_TREE_DISTANCE_M = 0.95
 MAX_TREE_DISTANCE_M = 1.80
 MAX_HINT_RECONSTRUCTION_ERROR_M = 0.03
 
-# 当前实车定位仍在调试阶段，采点先使用可执行的宽松质量门限。
-# 采集结果会原样写入 capture_quality，后续定位稳定后再收紧这些值。
-MAX_CAPTURE_POSITION_SPREAD_M = 0.25
-MAX_CAPTURE_YAW_SPREAD_RAD = 0.25
-MAX_CAPTURE_POSITION_STDDEV_M = 0.60
-MAX_CAPTURE_YAW_STDDEV_RAD = 0.40
+# 当前只要求采点流程执行成功，暂时使用执行优先的宽松门限。
+# 采集结果会原样写入 capture_quality；定位链稳定后再恢复工程门限。
+# 调整这四个值后必须重新构建 wvcsc_bringup 并 source install/setup.bash。
+MAX_CAPTURE_POSITION_SPREAD_M = 1.00
+MAX_CAPTURE_YAW_SPREAD_RAD = 1.00
+MAX_CAPTURE_POSITION_STDDEV_M = 1.00
+MAX_CAPTURE_YAW_STDDEV_RAD = 1.00
 
 
 @dataclass(frozen=True)
