@@ -1,6 +1,6 @@
 # WVCSC 空地协同导航、视觉伺服与精准喷洒闭环实施方案
 
-> 更新日期：2026-07-21
+> 更新日期：2026-07-22
 > 当前状态：仿真主闭环已验证；实机 Bringup、逐树实测停靠、喷嘴投影补偿和 Alicia-M 自动手眼标定代码已接入。真实内参、手眼、喷嘴、干喷、湿喷和四树连续作业仍必须在现场验收，不能用代码测试替代。
 
 ## 1. 最终目标与系统边界
@@ -43,16 +43,19 @@
 
 ```bash
 ros2 launch wvcsc_bringup real_system_mission.launch.py \
-  map:=/absolute/path/map_new.yaml \
-  mission_file:=~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
+  map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
+  mission_file:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml"
 ```
 
 建图和纯导航验收已独立为独立 launch 和文档，详见 [实车导航验收指南](WVCSC_S2Z_UTB_ARM_实车导航验收指南.md)：
 
 > - 建图：`ros2 launch wvcsc_bringup real_cartographer.launch.py`
-> - 纯导航验证：`ros2 launch wvcsc_bringup real_navigation.launch.py map:=/path/to/map.yaml`
+> - 纯导航验证：`ros2 launch wvcsc_bringup real_navigation.launch.py`
 
 `real_system_mission.launch.py` 只保留完整任务模式（传感器 + Nav2 + 机械臂 + YOLO + 任务管理器），不含建图或纯导航分支。
+纯导航入口复用已验证的底盘、LiDAR、IMU、EKF 链并启动 Nav2 和一个 RViz，不加载 C10；
+只有 `real_system_mission.launch.py` 加载 `real_sensors.launch.py`。默认地图为
+`${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml`。
 
 每棵树显式保存 `map` 坐标系下的 `docking_pose` 和树根 `tree_hint`。地图 YAML 与图片 SHA256 写入任务文件；地图改变后旧任务必须重新校验或采集。Nav2 返回成功后仍需满足：
 
@@ -261,36 +264,36 @@ ros2 run wvcsc_arm_task motion_control_keyboard
 SPACE  stop并锁定
 h      reset并执行HOME
 r      HOME_LOCKED后解除锁定
-x      立即stop；完整实机系统同时请求/safety/controlled_abort
+x      立即发送机械臂stop
 ```
 
-独立手眼标定不启动底盘安全节点，因此此时 `x` 至少保证机械臂立即 stop；
-完整作业系统中才继续执行底盘零速、停稳和 HOME 的受控中止链。
+`x` 只负责机械臂 stop，不负责底盘停车。底盘紧急停止必须使用物理急停。
 
 任何 stop、reset、HOME_LOCKED 或物理急停都会立即作废当前标定会话并取消机械臂 Goal。完成 `h → HOME_LOCKED → r` 后，必须回到终端二重新按 `s`；不允许从中断样本继续求解。
 
-## 6. 受控中止与恢复
+## 6. 速度下发与现场停机
 
-Nav2 输出固定经过安全门控：
+按当前实机部署要求，Nav2 最终平滑速度直接下发到底盘：
 
 ```text
-Nav2 /cmd_vel_nav → wvcsc_safety → /cmd_vel → wtb_car_driver
+Nav2 controller → velocity_smoother → /cmd_vel → wtb_car_driver
 ```
 
-`/safety/controlled_abort` 顺序固定为：
+`real_navigation.launch.py` 和完整任务均不启动 `wvcsc_safety`，也不等待
+`/safety/set_autonomy_enabled`。正常停止顺序为：
 
 ```text
-取消 mission/Nav2
-→ 立即并持续发布底盘零速度
+取消 mission/Nav2 或终止 launch
+→ 确认 /cmd_vel 归零且底盘停稳
 → 发布机械臂 stop
-→ 等待底盘连续停稳 1 s
-→ 确认物理急停已解除
 → reset并执行HOME
 → HOME_LOCKED
 → 人工resume后才允许重新工作
 ```
 
-物理急停激活期间只允许零速度和 stop，不允许自动 HOME。
+绕过软件安全门后，不再提供 `/safety/controlled_abort`、持续零速发布或软件急停
+兜底。实车运行必须保留可触达的底盘物理急停；紧急情况下先按物理急停，确认
+底盘停稳后再处理机械臂和任务状态。
 
 ## 7. 构建、测试与现场验收
 
@@ -309,7 +312,7 @@ yolov8s_seg_sim.pt  task=segment names={0: diseased_fruit}
 代码侧：
 
 ```bash
-cd /home/robot/WVCSC_S2Z_UTB_ARM
+cd ~/WVCSC_S2Z_UTB_ARM
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
@@ -323,7 +326,7 @@ colcon test-result --all --verbose
 2. 两次独立手眼标定差异不超过 5 mm / 1°；
 3. 1 m 平面干式对准 P95 不超过 10 mm；
 4. 湿喷落点 P95 不超过 15 mm；
-5. 工距超限、目标丢失、TF失效或安全锁定时喷洒 Goal 数必须为 0；
+5. 工距超限、目标丢失、TF失效或运动控制锁定时喷洒 Goal 数必须为 0；
 6. stop 后无残留 MoveIt/Nav2/Spray Goal；
 7. 每棵树三次重新驶离再导航，停靠误差均不超过 0.12 m / 0.12 rad；
 8. 连续三轮四树任务：导航 12/12、错误树关联 0、视觉伺服 100%、喷洒 100%、`skipped_targets=0`。

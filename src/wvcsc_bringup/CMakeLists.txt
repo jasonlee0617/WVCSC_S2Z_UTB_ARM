@@ -6,17 +6,19 @@ find_package(ament_cmake_python REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
 
-install(DIRECTORY launch config maps
-  DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY launch config maps rviz
+  DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE)
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/preflight_check.py
   scripts/save_corn_map.sh
-  scripts/nav_validate_sites.py
   DESTINATION share/${PROJECT_NAME}/scripts)
 install(PROGRAMS
   scripts/capture_site_pose.py
   scripts/load_site_mission.py
+  scripts/nav_validate_sites.py
   scripts/validate_site_mission.py
   DESTINATION lib/${PROJECT_NAME})
 

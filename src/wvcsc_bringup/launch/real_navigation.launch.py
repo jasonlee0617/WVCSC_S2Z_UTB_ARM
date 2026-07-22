@@ -1,74 +1,74 @@
-"""Localization-only real navigation: map server + AMCL + Nav2.
-
-The mapping stack is deliberately absent from this launch file.  Nav2 writes to
-``/cmd_vel_nav``; only ``wvcsc_safety`` may forward commands to the chassis on
-``/cmd_vel``.
-"""
+"""Standalone real navigation aligned with wtb_navigation2_fdimu.launch.py."""
 
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import SetRemap
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
     bringup_share = get_package_share_directory('wvcsc_bringup')
-    nav2_share = get_package_share_directory('nav2_bringup')
     navigation_share = get_package_share_directory('my_navigation2')
+    nav2_share = get_package_share_directory('nav2_bringup')
+    vehicle_share = get_package_share_directory('wtb_car_driver')
 
+    use_sim_time = LaunchConfiguration('use_sim_time')
     map_file = LaunchConfiguration('map')
     params_file = LaunchConfiguration('params_file')
     use_rviz = LaunchConfiguration('use_rviz')
 
-    # The two remaps are scoped to Nav2.  The base driver still subscribes to
-    # /cmd_vel, which is owned exclusively by the safety gate.
-    nav2 = GroupAction(actions=[
-        SetRemap(src='/cmd_vel', dst='/cmd_vel_nav'),
-        SetRemap(src='/odom', dst='/ekf_odom'),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(nav2_share, 'launch', 'bringup_launch.py')),
-            launch_arguments={
-                'namespace': '',
-                'use_namespace': 'False',
-                'slam': 'False',
-                'map': map_file,
-                'use_sim_time': 'False',
-                'params_file': params_file,
-                'autostart': 'True',
-                'use_composition': 'False',
-                'use_respawn': 'False',
-                'log_level': 'info',
-            }.items(),
-        ),
-    ])
-
-    rviz = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(nav2_share, 'launch', 'rviz_launch.py')),
+    # This is the field-validated vehicle, LiDAR, IMU, and EKF chain. It does
+    # not start C10. The full mission provides its own unified sensor stack.
+    vehicle_stack = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            vehicle_share, 'launch', 'start_wtb_car_fdimu.launch.py')),
+        condition=IfCondition(LaunchConfiguration('start_vehicle_stack')),
         launch_arguments={
-            'namespace': '',
-            'use_namespace': 'False',
-            'use_sim_time': 'False',
+            'use_sim_time': use_sim_time,
+            'open_rviz': 'false',
+            'enable_pointcloud_to_laserscan': 'true',
         }.items(),
+    )
+    nav2 = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            nav2_share, 'launch', 'bringup_launch.py')),
+        launch_arguments={
+            'map': map_file,
+            'use_sim_time': use_sim_time,
+            'params_file': params_file,
+            'tf_buffer_size': '300',
+        }.items(),
+    )
+    rviz = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', os.path.join(
+            bringup_share, 'rviz', 'real_navigation.rviz')],
+        parameters=[{'use_sim_time': use_sim_time}],
         condition=IfCondition(use_rviz),
+        output='screen',
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('start_vehicle_stack', default_value='true'),
+        DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument(
             'map',
-            default_value=os.path.join(navigation_share, 'maps', 'map_new.yaml'),
+            default_value=os.path.expanduser(
+                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml'),
             description='Absolute map YAML used by map_server and AMCL.'),
         DeclareLaunchArgument(
             'params_file',
             default_value=os.path.join(
-                bringup_share, 'config', 'real', 'nav2_corn.yaml')),
-        DeclareLaunchArgument('use_rviz', default_value='false'),
+                navigation_share, 'param', 'wtb_nav2_params.yaml')),
+        vehicle_stack,
         nav2,
         rviz,
     ])

@@ -1,4 +1,4 @@
-"""Real chassis, LiDAR, IMU, EKF, C10 and the single unified TF publisher."""
+"""Real chassis, LiDAR, IMU, EKF, C10 and the unified TF publisher."""
 
 import os
 
@@ -16,7 +16,6 @@ def generate_launch_description():
     description_share = get_package_share_directory('wvcsc_description')
     lidar_share = get_package_share_directory('lslidar_driver')
     imu_share = get_package_share_directory('fdilink_ahrs')
-    safety_share = get_package_share_directory('wvcsc_safety')
     vehicle_share = get_package_share_directory('wtb_car_driver')
 
     xacro_file = os.path.join(
@@ -79,11 +78,6 @@ def generate_launch_description():
         DeclareLaunchArgument('nozzle_mount_xyz', default_value='0 0 0'),
         DeclareLaunchArgument('nozzle_mount_rpy', default_value='0 0 0'),
         Node(
-            package='wvcsc_safety', executable='safety_gate',
-            parameters=[os.path.join(
-                safety_share, 'config', 'safety_real.yaml')],
-            output='screen'),
-        Node(
             package='can_bridge', executable='can_bridge_node',
             name='can_bridge_node', output='screen'),
         Node(
@@ -95,10 +89,10 @@ def generate_launch_description():
                 'min_speed': 0.0005,
                 'use_sim_time': False,
             }],
-            # The protected driver also accepts /twist_cmd.  Disable that
-            # secondary ingress in localization mode so /cmd_vel from the
-            # safety gate is the only live chassis command path.
-            remappings=[('/twist_cmd', '/safety/disabled_twist_cmd')],
+            # Nav2 uses /cmd_vel. Disable the driver's secondary ingress so
+            # stale TwistStamped commands cannot compete with navigation.
+            remappings=[
+                ('/twist_cmd', '/wvcsc_bringup/disabled_twist_cmd')],
             output='screen'),
         lidar,
         Node(

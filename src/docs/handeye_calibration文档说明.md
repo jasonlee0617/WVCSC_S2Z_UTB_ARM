@@ -7,7 +7,7 @@
 终端一启动完整标定环境：
 
 ```bash
-cd /home/robot/WVCSC_S2Z_UTB_ARM
+cd ~/WVCSC_S2Z_UTB_ARM
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch wvcsc_simulation calibration_sim.launch.py

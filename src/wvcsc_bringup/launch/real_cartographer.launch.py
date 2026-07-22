@@ -11,6 +11,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    bringup_share = get_package_share_directory('wvcsc_bringup')
     cartographer_share = get_package_share_directory('my_cartographer')
     vehicle_share = get_package_share_directory('wtb_car_driver')
 
@@ -21,7 +22,7 @@ def generate_launch_description():
     publish_period = LaunchConfiguration('publish_period_sec')
 
     # This include already owns CAN, chassis, LiDAR, pointcloud conversion,
-    # IMU, EKF and robot state publishers.  system_real therefore starts no
+    # IMU, EKF and robot state publishers. The parent launch therefore starts no
     # other hardware launch in mapping mode.
     hardware = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
@@ -61,7 +62,7 @@ def generate_launch_description():
         executable='rviz2',
         name='rviz2',
         arguments=['-d', os.path.join(
-            cartographer_share, 'rviz', 'my_cartographer.rviz')],
+            bringup_share, 'rviz', 'real_cartographer.rviz')],
         output='screen',
     )
 

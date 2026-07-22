@@ -2,7 +2,7 @@
 
 The `easy_handeye2` and `ros2_aruco` trees are the generic calibration
 implementations migrated from
-`/home/robot/fairino_robotarm/src/calibration_stack` at source commit
+`~/fairino_robotarm/src/calibration_stack` at source commit
 `3e06d1f8af6992ee97b6a9fc009b0beaa0965a96`.
 
 They are intentionally kept robot-independent. WVCSC-specific frames, marker

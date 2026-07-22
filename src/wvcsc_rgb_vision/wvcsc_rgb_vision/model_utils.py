@@ -93,7 +93,7 @@ def resolve_yolo_model_path(path_value):
         str: 可以在 YOLO 对象中直接加载的绝对路径字符串。
     """
     path = Path(path_value).expanduser()
-    # 如果路径本身已经是绝对路径（如 `/home/robot/weights.pt`），则直接返回
+    # 如果路径本身已经是绝对路径（如 `/absolute/path/weights.pt`），则直接返回
     if path.is_absolute():
         return str(path)
     # 如果是相对路径，将其解析为 ROS 包共享目录下的 `models` 子目录

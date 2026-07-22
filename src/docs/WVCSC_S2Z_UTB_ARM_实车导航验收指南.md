@@ -19,6 +19,8 @@ ros2 launch wvcsc_bringup real_cartographer.launch.py
 ```
 
 启动流程：
+0. 该启动不加载 C10；它复用已验证的底盘、LiDAR、IMU、EKF 硬件链和
+   `wvcsc_bringup/rviz/real_cartographer.rviz`
 1. 确认 RViz 窗口打开，能看到 LiDAR 扫描点（红色点云）和 Cartographer 子地图
 2. **小车在原地静止至少 5 秒**，让 EKF 融合 IMU 和轮式里程计后收敛
 3. 用遥控器**低速**（≤ 0.3 m/s）控制小车在作业区域内行驶一整圈
@@ -28,14 +30,11 @@ ros2 launch wvcsc_bringup real_cartographer.launch.py
 ### 1.2 保存地图
 
 ```bash
-# 先结束当前轨迹
-ros2 service call /write_state cartographer_ros_msgs/srv/FinishTrajectory \
-  "{trajectory_id: 0}"
-
-# 保存为 PGM + YAML
-ros2 run nav2_map_server map_saver_cli \
-  -f /home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/map/orchard
+bash "$(ros2 pkg prefix wvcsc_bringup)/share/wvcsc_bringup/scripts/save_corn_map.sh"
 ```
+
+脚本默认保存到
+`${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard`。
 
 生成文件：
 - `orchard.pgm` — 栅格地图图片
@@ -50,9 +49,13 @@ ros2 run nav2_map_server map_saver_cli \
 ### 2.1 启动导航
 
 ```bash
-ros2 launch wvcsc_bringup real_navigation.launch.py \
-  map:=/home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/map/orchard.yaml
+ros2 launch wvcsc_bringup real_navigation.launch.py
 ```
+
+该命令直接启动底盘、LiDAR、IMU、EKF、AMCL、Nav2 和一个 RViz，不加载 C10，默认读取
+`${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml`。Nav2 最终速度
+直接发布到 `/cmd_vel`，不经过 `wvcsc_safety`。RViz 使用
+`wvcsc_bringup/rviz/real_navigation.rviz`。
 
 启动后确认：
 - RViz 窗口中能看到已加载的地图（灰色占用栅格）
@@ -127,7 +130,7 @@ ros2 topic echo /amcl_pose
 
 ```bash
 ros2 run wvcsc_bringup capture_site_pose \
-  --map /home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/map/orchard.yaml \
+  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
   --target-id tree_01 \
   --tree-forward-m 0.0 \
   --tree-left-m 1.50
@@ -180,7 +183,7 @@ cat ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
 
 ```yaml
 schema_version: 1
-map_file: /home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/map/orchard.yaml
+map_file: <当前用户HOME>/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml
 map_sha256: abc123...
 mission:
   site_id: corn_site
@@ -210,8 +213,7 @@ mission:
 ### 3.2 启动导航
 
 ```bash
-ros2 launch wvcsc_bringup real_navigation.launch.py \
-  map:=/home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/map/orchard.yaml
+ros2 launch wvcsc_bringup real_navigation.launch.py
 ```
 
 在 RViz 中确认 AMCL 粒子云收敛（使用 `2D Pose Estimate` 初始化定位）。
@@ -271,7 +273,7 @@ ros2 run wvcsc_bringup nav_validate_sites.py \
 > 验收通过后，下一步启动完整任务：
 > ```bash
 > ros2 launch wvcsc_bringup real_system_mission.launch.py \
->   map:=/home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/map/orchard.yaml \
->   mission_file:=~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
+>   map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
+>   mission_file:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml"
 > ```
-> 参考 [WVCSC_S2Z_UTB_ARM_Codex任务闭环实施方案](WVCSC_S2Z_UTB_ARM_Codex任务闭环实施方案.md)。
+> 参考 [WVCSC_S2Z_UTB_ARM_Codex任务闭环实施方案](WVCSC_S2Z_UTB_ARM_Codex任务闭环实施方案%20copy.md)。

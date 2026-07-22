@@ -168,7 +168,7 @@ Gazebo / 真实 Alicia-M 电机
 
 ## 7. 仿真 vs 实机差异
 
-| 项目 | 仿真 (`system_sim.launch.py`) | 实机 (待建 `system_real.launch.py`) |
+| 项目 | 仿真 (`system_sim.launch.py`) | 实机 (`real_system_mission.launch.py`) |
 |------|------|------|
 | `use_sim_time` | `true` | `false` |
 | 底盘 | `ackermann_sim.py` (Twist→odom) | CAN bridge + wtb_car |
@@ -187,8 +187,8 @@ Gazebo / 真实 Alicia-M 电机
 |---|------|------|
 | 1 | C10 相机内参标定（棋盘格） | 未开始 |
 | 2 | 手眼标定 (tool0→camera_link) | 未开始 |
-| 3 | 统一实机 launch 文件 | 未开始 |
-| 4 | 实机配置子目录 (`config/real/`) | 未开始 |
+| 3 | 统一实机 launch 文件 | 代码已接入，待现场验收 |
+| 4 | 实机配置子目录 (`config/real/`) | 已接入 |
 | 5 | 底盘 CAN 通信验证 | 未开始 |
 | 6 | 机械臂低速运动验证 | 未开始 |
 | 7 | YOLO 真实图像推理验证 | 未开始 |
@@ -205,7 +205,7 @@ Gazebo / 真实 Alicia-M 电机
 5. **Gazebo 验收**：真实话题、TF、控制频率、误差与任务统计
 
 ```bash
-cd /home/robot/WVCSC_S2Z_UTB_ARM
+cd ~/WVCSC_S2Z_UTB_ARM
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 colcon test --event-handlers console_direct+

@@ -668,7 +668,9 @@ def generate_launch_description():
         DeclareLaunchArgument('planning_pipeline_id', default_value='ompl'),
         DeclareLaunchArgument('planner_id', default_value='RRTConnectFast'),
         DeclareLaunchArgument(
-            'yolo_python_executable', default_value='/home/robot/venvs/wvcsc_yolo_ros/bin/python'),
+            'yolo_python_executable',
+            default_value=os.path.expanduser(
+                '~/venvs/wvcsc_yolo_ros/bin/python')),
         DeclareLaunchArgument('auto_start_mission', default_value='true'),
         DeclareLaunchArgument('return_home_after_finish', default_value='false'),
         DeclareLaunchArgument(

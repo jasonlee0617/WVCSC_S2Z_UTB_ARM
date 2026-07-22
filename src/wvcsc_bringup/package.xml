@@ -2,7 +2,7 @@
 <package format="3">
   <name>wvcsc_bringup</name>
   <version>0.2.0</version>
-  <description>Mutually exclusive WVCSC mapping and real autonomous-work bringup.</description>
+  <description>WVCSC mapping, navigation, and real autonomous-work bringup.</description>
   <maintainer email="robot@example.com">robot</maintainer>
   <license>Apache-2.0</license>
 
@@ -44,7 +44,6 @@
   <exec_depend>wvcsc_description</exec_depend>
   <exec_depend>wvcsc_mission_manager</exec_depend>
   <exec_depend>wvcsc_rgb_vision</exec_depend>
-  <exec_depend>wvcsc_safety</exec_depend>
   <exec_depend>wvcsc_uav_gateway</exec_depend>
   <exec_depend>wvcsc_visual_servo</exec_depend>
   <exec_depend>xacro</exec_depend>

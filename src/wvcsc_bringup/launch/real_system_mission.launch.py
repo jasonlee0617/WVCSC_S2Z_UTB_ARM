@@ -230,6 +230,7 @@ def _resolve_calibrations(context, *, launch_dir):
         }),
         _include(launch_dir, 'real_navigation.launch.py', {
             'map': LaunchConfiguration('map'),
+            'start_vehicle_stack': 'false',
             'use_rviz': LaunchConfiguration('use_nav_rviz'),
         }),
         _include(launch_dir, 'real_arm.launch.py', shared_description_args),
@@ -274,7 +275,6 @@ def _resolve_calibrations(context, *, launch_dir):
 
 def generate_launch_description():
     bringup_share = get_package_share_directory('wvcsc_bringup')
-    navigation_share = get_package_share_directory('my_navigation2')
     launch_dir = os.path.join(bringup_share, 'launch')
 
     return LaunchDescription([
@@ -283,7 +283,8 @@ def generate_launch_description():
                 '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml')),
         DeclareLaunchArgument(
             'map', default_value=os.path.join(
-                navigation_share, 'maps', 'map_new.yaml')),
+                os.path.expanduser('~/WVCSC_S2Z_UTB_ARM/src'),
+                'wvcsc_bringup', 'maps', 'orchard.yaml')),
         DeclareLaunchArgument(
             'preflight_script', default_value=os.path.join(
                 bringup_share, 'scripts', 'preflight_check.py')),
@@ -323,7 +324,8 @@ def generate_launch_description():
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
         DeclareLaunchArgument(
             'yolo_python_executable',
-            default_value='/home/robot/venvs/wvcsc_yolo_ros/bin/python'),
+            default_value=os.path.expanduser(
+                '~/venvs/wvcsc_yolo_ros/bin/python')),
         DeclareLaunchArgument('use_nav_rviz', default_value='false'),
         DeclareLaunchArgument('use_keyboard', default_value='false'),
         OpaqueFunction(function=partial(_resolve_calibrations, launch_dir=launch_dir)),

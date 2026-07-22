@@ -2,8 +2,7 @@
 
 These tests intentionally inspect launch sources instead of starting hardware.
 They catch accidental reintroduction of Cartographer into localization mode,
-duplicate hardware stacks in mapping mode, and bypasses around the velocity
-safety gate.
+duplicate hardware stacks, and drift from the field-validated Nav2 launch.
 """
 
 import importlib.util
@@ -39,13 +38,21 @@ def test_launch_modules_import_on_ros_humble(path):
     spec.loader.exec_module(module)
 
 
-def test_navigation_is_localization_only_and_routes_through_safety_gate():
+def test_navigation_matches_the_validated_single_command_stack():
     source = _source('real_navigation.launch.py')
 
     assert 'cartographer' not in source.lower()
-    assert "'slam': 'False'" in source
-    assert "SetRemap(src='/cmd_vel', dst='/cmd_vel_nav')" in source
-    assert "SetRemap(src='/odom', dst='/ekf_odom')" in source
+    assert 'start_wtb_car_fdimu.launch.py' in source
+    assert 'real_sensors.launch.py' not in source
+    assert 'wtb_nav2_params.yaml' in source
+    assert "'tf_buffer_size': '300'" in source
+    assert "'start_vehicle_stack', default_value='true'" in source
+    assert "'use_rviz', default_value='true'" in source
+    assert "'open_rviz': 'false'" in source
+    assert source.count("package='rviz2'") == 1
+    assert 'real_navigation.rviz' in source
+    assert 'wvcsc_bringup/maps/orchard.yaml' in source
+    assert 'SetRemap' not in source
     assert 'bringup_launch.py' in source
 
 
@@ -59,28 +66,22 @@ def test_cartographer_launch_owns_the_complete_mapping_hardware_chain():
     assert "default_value='cartographer.lua'" in source
     assert "default_value='0.05'" in source
     assert "default_value='0.5'" in source
+    assert 'real_cartographer.rviz' in source
 
 
-def test_system_modes_are_mutually_exclusive_without_timer_startup():
-    source = _source('system_real.launch.py')
+def test_real_system_starts_each_hardware_stack_once_after_preflight():
+    source = _source('real_system_mission.launch.py')
 
-    assert "mode not in {'localization', 'mapping'}" in source
-    assert 'mode must be localization or mapping' in source
-    assert "operation not in {'survey', 'mission'}" in source
-    assert 'operation must be survey or mission' in source
-    assert "mission_source not in {'measured', 'uav'}" in source
     assert 'TimerAction' not in source
-    assert "_include(launch_dir, 'real_cartographer.launch.py')" in source
     assert "_include(launch_dir, 'real_sensors.launch.py'" in source
     assert "_include(launch_dir, 'real_navigation.launch.py'" in source
+    assert "'start_vehicle_stack': 'false'" in source
     assert "'real_arm.launch.py', shared_description_args" in source
     assert "_include(launch_dir, 'real_orchestration.launch.py'" in source
     assert "'nozzle_calibration'" in source
-    assert "'require_nozzle_calibration', default_value='true'" in source
+    assert "'--require-nozzle-calibration', 'true'" in source
     assert "'nozzle_mount_xyz'" in source
     assert "'aim_fixed_range_m'" in source
-    assert 'use_handeye_calibration cannot be disabled in mission mode' in source
-    assert 'require_nozzle_calibration cannot be disabled in mission mode' in source
 
 
 def test_real_orchestration_uses_real_leaf_and_measured_mission_contracts():
@@ -90,6 +91,7 @@ def test_real_orchestration_uses_real_leaf_and_measured_mission_contracts():
 
     assert "executable='load_site_mission.py'" in source
     assert "LaunchConfiguration('mission_source')" in source
+    assert "'require_autonomy_enabled': False" in source
     assert "'require_docking_quality': True" in source
     assert 'vision_real.yaml' in source
     assert 'yolov8s_real.pt' in vision
@@ -106,9 +108,23 @@ def test_real_sensor_stack_has_one_unified_robot_state_publisher():
     assert 'start_wtb_car_fdimu.launch.py' not in source
     assert "package='can_bridge'" in source
     assert "package='wtb_car_driver'" in source
-    assert "package='wvcsc_safety'" in source
-    assert "executable='safety_gate'" in source
-    assert "('/twist_cmd', '/safety/disabled_twist_cmd')" in source
+    assert "package='wvcsc_safety'" not in source
+    assert "executable='safety_gate'" not in source
+    assert "('/twist_cmd', '/wvcsc_bringup/disabled_twist_cmd')" in source
+
+
+def test_packaged_map_directory_exists():
+    assert (PACKAGE / 'maps').is_dir()
+
+
+def test_bringup_rviz_configs_copy_the_field_validated_configs():
+    rviz_dir = PACKAGE / 'rviz'
+    assert (rviz_dir / 'real_navigation.rviz').read_bytes() == (
+        PACKAGE.parent / 'my_navigation2' / 'rviz' /
+        'nav2_default_view2.rviz').read_bytes()
+    assert (rviz_dir / 'real_cartographer.rviz').read_bytes() == (
+        PACKAGE.parent / 'my_cartographer' / 'rviz' /
+        'my_cartographer.rviz').read_bytes()
 
 
 def test_handeye_session_enables_standalone_robot_tf():
@@ -146,7 +162,7 @@ def test_nozzle_frame_and_compensated_aim_are_wired_through_real_stack():
 
 
 def test_nozzle_calibration_contract_is_strict(tmp_path):
-    module = _launch_module('system_real.launch.py')
+    module = _launch_module('real_system_mission.launch.py')
     path = tmp_path / 'nozzle.yaml'
     path.write_text(yaml.safe_dump({
         'schema_version': 1,

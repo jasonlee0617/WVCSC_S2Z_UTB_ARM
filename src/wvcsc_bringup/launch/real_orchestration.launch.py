@@ -127,7 +127,7 @@ def generate_launch_description():
             {
                 'use_sim_time': False,
                 'auto_start': False,
-                'require_autonomy_enabled': True,
+                'require_autonomy_enabled': False,
                 'require_docking_quality': True,
             },
         ],
@@ -162,7 +162,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'yolo_python_executable',
-            default_value='/home/robot/venvs/wvcsc_yolo_ros/bin/python'),
+            default_value=os.path.expanduser(
+                '~/venvs/wvcsc_yolo_ros/bin/python')),
         DeclareLaunchArgument('use_keyboard', default_value='false'),
         DeclareLaunchArgument('mission_source', default_value='measured'),
         DeclareLaunchArgument(

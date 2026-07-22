@@ -20,7 +20,7 @@ COMMON_PACKAGES = (
     'robot_state_publisher', 'xacro',
 )
 LOCALIZATION_PACKAGES = (
-    'nav2_bringup', 'usb_cam', 'wvcsc_safety', 'wvcsc_c10_camera',
+    'nav2_bringup', 'usb_cam', 'wvcsc_c10_camera',
     'wvcsc_description',
 )
 MISSION_PACKAGES = (

@@ -1,6 +1,6 @@
 # WVCSC 实机 Bringup
 
-`wvcsc_bringup` 将建图与定位作业分为两个互斥模式。所有命令均需先执行：
+所有命令均需先执行：
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -10,25 +10,43 @@ source ~/WVCSC_S2Z_UTB_ARM/install/setup.bash
 ## 1. 建图
 
 ```bash
-ros2 launch wvcsc_bringup system_real.launch.py mode:=mapping
+ros2 launch wvcsc_bringup real_cartographer.launch.py
 ```
 
-此模式只启动 `my_cartographer` 已验证的底盘、LiDAR、IMU、EKF、
-Cartographer 和 RViz 链路，不启动 Nav2、AMCL、机械臂或任务节点。
+此命令复用已验证的底盘、LiDAR、IMU、EKF 链，启动 Cartographer 和
+`wvcsc_bringup/rviz/real_cartographer.rviz`，不启动 C10、Nav2、机械臂或任务节点。完成建图后保存为
+`${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.{yaml,pgm}`：
 
 ```bash
 bash $(ros2 pkg prefix wvcsc_bringup)/share/wvcsc_bringup/scripts/save_corn_map.sh
 ```
 
-## 2. 逐树实测停靠点
+脚本默认使用上述路径；也可将其他输出基名作为第一个参数传入。
 
-先只启动传感器、AMCL、Nav2与安全速度门控，不启动机械臂和任务闭环：
+## 2. 实机导航
+
+一个命令启动底盘、LiDAR、IMU、EKF、map_server、AMCL、Nav2 和一个 RViz；不启动 C10：
 
 ```bash
-ros2 launch wvcsc_bringup system_real.launch.py \
-  mode:=localization operation:=survey \
-  map:=/home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml
+ros2 launch wvcsc_bringup real_navigation.launch.py
 ```
+
+默认地图为 `${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml`。
+使用其他地图时显式传入绝对路径：
+
+```bash
+ros2 launch wvcsc_bringup real_navigation.launch.py \
+  map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/other.yaml"
+```
+
+该启动链与已通过实机验证的
+`my_navigation2/launch/wtb_navigation2_fdimu.launch.py` 使用相同的硬件链、
+Nav2 参数和 `tf_buffer_size`；硬件子 RViz 被关闭，只启动复制到
+`wvcsc_bringup/rviz/real_navigation.rviz` 的导航 RViz。完整任务才加载
+`real_sensors.launch.py` 和 C10。Nav2 速度平滑器的最终输出直接发布到
+`/cmd_vel`；不启动 `wvcsc_safety` 速度门控。
+
+## 3. 逐树实测停靠点
 
 AMCL稳定后，人工驾驶并停稳。卷尺必须从车体上标记的
 `base_footprint`原点测量，`+X`为车头前方、`+Y`为车体左侧：
@@ -36,12 +54,12 @@ AMCL稳定后，人工驾驶并停稳。卷尺必须从车体上标记的
 ```bash
 ros2 run wvcsc_bringup capture_site_pose -- \
   --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
-  --map /home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml \
+  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
   --capture-home
 
 ros2 run wvcsc_bringup capture_site_pose -- \
   --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
-  --map /home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml \
+  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
   --target-id corn_01 \
   --tree-forward-m <前向实测值> --tree-left-m <左向实测值> \
   --spray-duration 5.0
@@ -52,18 +70,18 @@ ros2 run wvcsc_bringup capture_site_pose -- \
 ```bash
 ros2 run wvcsc_bringup validate_site_mission -- \
   --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
-  --map /home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml
+  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
 ```
 
 任务文件与地图YAML及图片SHA256绑定；地图改变后旧任务会被拒绝。
 
-## 3. 定位与作业
+## 4. 完整定位与作业
 
 ```bash
-ros2 launch wvcsc_bringup system_real.launch.py \
-  mode:=localization operation:=mission mission_source:=measured \
-  mission_file:=~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
-  map:=/home/robot/WVCSC_S2Z_UTB_ARM/src/my_navigation2/maps/map_new.yaml
+ros2 launch wvcsc_bringup real_system_mission.launch.py \
+  mission_source:=measured \
+  mission_file:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml" \
+  map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
 ```
 
 启动前检查会在任何硬件节点运行之前验证：
@@ -82,43 +100,35 @@ ros2 launch wvcsc_bringup system_real.launch.py \
 `wvcsc_rgb_vision/models/`。权重缺失或类别契约不匹配时，整个实机启动会
 在硬件上电前失败，不会回退到仿真权重。
 
-任务默认不自动开始。相机正常、无安全锁定后：
+任务默认不自动开始。检查相机、定位和 `/mission/plan` 后启动：
 
 ```bash
-ros2 service call /safety/set_autonomy_enabled \
-  std_srvs/srv/SetBool "{data: true}"
 ros2 service call /mission/start std_srvs/srv/Trigger "{}"
 ```
 
 实测任务加载后不会自动执行。先检查`/mission/plan`中的树根坐标和停靠位姿，
-再启用自动模式并调用`/mission/start`。需要兼容原UAV/Mock路径时使用
+再调用 `/mission/start`。需要兼容原 UAV/Mock 路径时使用
 `mission_source:=uav`。
 
-## 4. 受控中止与恢复
+## 5. 停止与恢复
+
+当前实机链路按项目要求绕过 `wvcsc_safety`。停止任务时先取消任务或终止
+launch，确认 `/cmd_vel` 已归零，再使用机械臂控制命令：
 
 ```bash
-ros2 service call /safety/controlled_abort std_srvs/srv/Trigger "{}"
-```
-
-安全节点会立即取消任务、以 20 Hz 连续输出零速、停止机械臂，并在
-底盘连续停稳 1 s 后请求 `reset -> HOME`。到达 HOME 后仍保持锁定：
-
-```bash
-ros2 service call /safety/reset std_srvs/srv/Trigger "{}"
+ros2 service call /mission/cancel std_srvs/srv/Trigger "{}"
+ros2 topic pub --once /motion_control/command \
+  std_msgs/msg/String "{data: stop}"
 ros2 topic pub --once /motion_control/command \
   std_msgs/msg/String "{data: resume}"
-ros2 service call /safety/set_autonomy_enabled \
-  std_srvs/srv/SetBool "{data: true}"
 ros2 service call /mission/reset std_srvs/srv/Trigger "{}"
 ros2 service call /mission/start std_srvs/srv/Trigger "{}"
 ```
 
-物理急停 `/safety/emergency_stop=true` 时，安全节点持续输出零速，机械臂
-立即进入硬停止锁定；`reset`、HOME 和 `resume` 都会在机械臂最终执行边界被
-拒绝。必须先解除物理急停，再调用 `/safety/controlled_abort`，由安全节点在
-确认底盘停稳后执行受控 `reset -> HOME`，最后按上述顺序人工解锁并重启任务。
+绕过软件安全门后，不再有 `/safety/controlled_abort`、自动持续零速或软件急停
+兜底。实车运行必须保留可触达的底盘物理急停，并由操作员确认车辆完全停止。
 
-## 5. 标定
+## 6. 标定
 
 内参（8x6 内角点，25 mm）：
 
@@ -141,9 +151,8 @@ wvcsc_calibration/config/auto_handeye_alicia.yaml
 ros2 run wvcsc_arm_task motion_control_keyboard
 ```
 
-`x` 总是先发送机械臂 `stop`；完整实机系统还会调用
-`/safety/controlled_abort`。独立标定没有启动底盘安全节点时，`x` 仍能可靠
-停臂，但不会触发底盘恢复链。
+`x` 会发送机械臂 `stop`。当前完整实机系统不启动底盘软件安全门，因此它不会
+替代底盘物理急停。
 
 默认手眼输出为 `~/.ros/wvcsc_calibration/c10_handeye.yaml`。自动采集会清空
 上一轮服务端样本，逐候选执行碰撞IK、Jacobian条件数、关节余量和OMPL门控，

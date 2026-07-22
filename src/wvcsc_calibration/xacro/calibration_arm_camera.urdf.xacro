@@ -17,7 +17,7 @@
   <joint name="world_to_base" type="fixed">
     <parent link="world"/>
     <child link="$(arg alicia_base_link)"/>
-    <origin xyz="0 0 0.76" rpy="0 0 0"/>
+    <origin xyz="0 0 0.75" rpy="0 0 0"/>
   </joint>
 
   <!-- Alicia-M arm geometry (joint1–tool0) -->

@@ -138,7 +138,7 @@ def generate_launch_description():
     move_group = Node(
         package='moveit_ros_move_group', executable='move_group',
         parameters=common_moveit, output='screen')
-    # system_real 已由 real_sensors 发布统一机器人 TF，因此默认关闭这里的
+    # real_system_mission 已由 real_sensors 发布统一机器人 TF，因此默认关闭这里的
     # robot_state_publisher。手眼标定等独立机械臂会话显式打开该参数，避免
     # 只有 joint_states 而没有 tool0/camera TF 的隐蔽故障。
     robot_state_publisher = Node(
