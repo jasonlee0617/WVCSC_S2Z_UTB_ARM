@@ -34,6 +34,7 @@ from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 from wvcsc_interfaces.action import AlignTarget
 from wvcsc_interfaces.msg import Target2D
+from wvcsc_interfaces.srv import ComputeSprayAim
 
 from .aim_compensation import plane_error_mm, project_nozzle_axis
 from .servo.alignment_progress import AlignmentProgress
@@ -133,6 +134,9 @@ class VisualServo(Node):
         self._camera = None
         self._aim_solution = None
         self._aim_error = ''
+        self._servo_lifecycle = 'never_started'
+        self._last_lifecycle_transition = ''
+        self._last_service_latency_sec = 0.0
         self._servo_status = 0
         self._joint_positions = []
         self._command_mode = self._config.command_mode
@@ -165,13 +169,18 @@ class VisualServo(Node):
             self._on_joint_state, qos_profile_sensor_data,
             callback_group=self._group)
 
-        # 6. MoveIt Servo 的生命周期服务客户端
+        # 6. MoveIt Servo 只在本节点首个对齐任务前启动一次。后续目标用零
+        # Twist 制动，而不是在 Gazebo 组件容器中反复 pause/unpause；后者会
+        # 阻塞服务响应并把一次普通对齐超时错误升级为全局安全锁定。
         self._start_client = self.create_client(
             Trigger, str(self.get_parameter('start_servo_service').value),
             callback_group=self._group)
-        self._stop_client = self.create_client(
-            Trigger, str(self.get_parameter('stop_servo_service').value),
-            callback_group=self._group)
+
+        # SprayTask asks this service before MoveIt recentering so both stages
+        # use one calibrated nozzle-axis aim pixel and one working distance.
+        self._aim_service = self.create_service(
+            ComputeSprayAim, str(self.get_parameter('aim_service_name').value),
+            self._compute_spray_aim, callback_group=self._group)
 
         # 7. Action Server 接口 (供 `spray_task.py` 调用)
         self._action = ActionServer(
@@ -197,7 +206,7 @@ class VisualServo(Node):
             'debug_rate_hz': 5.0,
             'terminal_status_rate_hz': 1.0,
             'start_servo_service': '/servo_node/start_servo',
-            'stop_servo_service': '/servo_node/stop_servo',
+            'aim_service_name': '/vision/compute_spray_aim',
             'command_frame': 'camera_color_optical_frame',
             'control_rate_hz': 30.0,
             'default_timeout_sec': 8.0,
@@ -242,7 +251,8 @@ class VisualServo(Node):
             'max_angular_speed': 0.45,
             'max_angular_acceleration': 3.00,
             'zero_command_count': 8,
-            'service_timeout_sec': 2.0,
+            'service_timeout_sec': 5.0,
+            'initial_start_timeout_sec': 12.0,
             'servo_status_decel_codes': [1, 3],
             'servo_status_passthrough_codes': [6],
             'servo_singularity_status_code': 2,
@@ -263,6 +273,14 @@ class VisualServo(Node):
             and float(self.get_parameter('min_goal_timeout_sec').value)
             <= timeout
             <= float(self.get_parameter('max_goal_timeout_sec').value)
+            and math.isfinite(float(request.working_range_m))
+            and float(request.working_range_m) > 0.0
+            and math.isfinite(float(request.desired_u_px))
+            and math.isfinite(float(request.desired_v_px))
+            and int(request.image_width) > 0
+            and int(request.image_height) > 0
+            and 0.0 <= float(request.desired_u_px) < int(request.image_width)
+            and 0.0 <= float(request.desired_v_px) < int(request.image_height)
         )
         with self._lock:
             # 如果当前 VisualServo 正在处理上一个目标 (Busy)，则直接拒绝新 Goal
@@ -410,7 +428,68 @@ class VisualServo(Node):
             solution.v_px * float(image_height) / camera_height,
         )
 
-    def _prepare_aim_compensation(self):
+    def _solve_aim_solution(self, working_range_m):
+        """Compute a nozzle-axis image point without inventing a fallback."""
+        working_range_m = float(working_range_m)
+        if not math.isfinite(working_range_m) or working_range_m <= 0.0:
+            return None, 'working range is invalid'
+        if abs(working_range_m - self._config.aim_fixed_range_m) > (
+                self._config.aim_range_tolerance_m):
+            return None, (
+                'working range does not match the calibrated aim profile: '
+                f'requested={working_range_m:.3f}m '
+                f'profile={self._config.aim_fixed_range_m:.3f}±'
+                f'{self._config.aim_range_tolerance_m:.3f}m')
+        with self._lock:
+            camera = self._camera
+        if camera is None:
+            return None, 'CameraInfo unavailable'
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                str(self.get_parameter('command_frame').value),
+                self._config.aim_nozzle_frame,
+                Time(),
+            ).transform
+            solution = project_nozzle_axis(
+                (
+                    transform.translation.x,
+                    transform.translation.y,
+                    transform.translation.z,
+                ),
+                (
+                    transform.rotation.x,
+                    transform.rotation.y,
+                    transform.rotation.z,
+                    transform.rotation.w,
+                ),
+                camera,
+                working_range_m,
+                trim=(
+                    self._config.desired_offset_u_px,
+                    self._config.desired_offset_v_px,
+                ),
+                min_forward_axis_z=self._config.aim_min_forward_axis_z,
+                image_margin_px=self._config.aim_image_margin_px,
+            )
+        except (TransformException, ValueError) as error:
+            return None, str(error)
+        return solution, ''
+
+    def _compute_spray_aim(self, request, response):
+        """Expose the same calibrated aim used by the AlignTarget action."""
+        solution, message = self._solve_aim_solution(request.working_range_m)
+        response.success = solution is not None
+        response.message = message
+        if solution is not None:
+            response.desired_u_px = float(solution.u_px)
+            response.desired_v_px = float(solution.v_px)
+            with self._lock:
+                camera = self._camera
+            response.image_width = int(camera[4])
+            response.image_height = int(camera[5])
+        return response
+
+    def _prepare_aim_compensation(self, working_range_m):
         """Resolve CameraInfo and camera->nozzle TF before starting Servo."""
         if not self._config.aim_compensation_enabled:
             self._aim_solution = None
@@ -420,55 +499,18 @@ class VisualServo(Node):
             self.get_parameter('service_timeout_sec').value)
         last_error = 'CameraInfo unavailable'
         while rclpy.ok() and time.monotonic() < deadline:
-            with self._lock:
-                camera = self._camera
-            if camera is None:
-                time.sleep(0.02)
-                continue
-            try:
-                transform = self._tf_buffer.lookup_transform(
-                    str(self.get_parameter('command_frame').value),
-                    self._config.aim_nozzle_frame,
-                    Time(),
-                ).transform
-                solution = project_nozzle_axis(
-                    (
-                        transform.translation.x,
-                        transform.translation.y,
-                        transform.translation.z,
-                    ),
-                    (
-                        transform.rotation.x,
-                        transform.rotation.y,
-                        transform.rotation.z,
-                        transform.rotation.w,
-                    ),
-                    camera,
-                    self._config.aim_fixed_range_m,
-                    trim=(
-                        self._config.desired_offset_u_px,
-                        self._config.desired_offset_v_px,
-                    ),
-                    min_forward_axis_z=self._config.aim_min_forward_axis_z,
-                    image_margin_px=self._config.aim_image_margin_px,
-                )
-            except (TransformException, ValueError) as error:
-                last_error = str(error)
-                time.sleep(0.02)
-                continue
-            with self._lock:
-                self._aim_solution = solution
-                self._aim_error = ''
-            self.get_logger().info(
-                '[AIM] source=fixed '
-                f'range={solution.range_m:.3f}m '
-                f'nozzle_frame={self._config.aim_nozzle_frame}')
-            self.get_logger().info(
-                f'[AIM] target_pixel=({solution.u_px:.1f},'
-                f'{solution.v_px:.1f}) '
-                f'trim=({self._config.desired_offset_u_px:.1f},'
-                f'{self._config.desired_offset_v_px:.1f})')
-            return True, ''
+            solution, last_error = self._solve_aim_solution(working_range_m)
+            if solution is not None:
+                with self._lock:
+                    self._aim_solution = solution
+                    self._aim_error = ''
+                self.get_logger().info(
+                    '[AIM] source=calibrated '
+                    f'range={solution.range_m:.3f}m '
+                    f'nozzle_frame={self._config.aim_nozzle_frame} '
+                    f'target_pixel=({solution.u_px:.1f},{solution.v_px:.1f})')
+                return True, ''
+            time.sleep(0.02)
         with self._lock:
             self._aim_solution = None
             self._aim_error = last_error
@@ -508,11 +550,12 @@ class VisualServo(Node):
 
     # ---------- 核心动作执行器 (The Main Control Loop) ----------
     def _execute(self, goal_handle):
-        """执行一个完整的 start -> TRACK/WAIT -> stop Action 生命周期。
+        """执行一个完整的 start -> TRACK/WAIT -> zero-brake Action 生命周期。
 
         成功要求双轴像素误差连续保持在阈值内达到配置时长。所有退出分支共享
-        ``stop_servo`` 闭包，其 ``stop_attempted`` 标记保证服务最多调用一次；停止失败
-        会覆盖原结果为安全停止，禁止上层误触发喷洒。
+            ``stop_servo`` 闭包，其 ``stop_attempted`` 标记保证仅发送一次零速制动序列。
+            MoveIt Servo 保持运行以接收下一颗果实的命令；其 ``incoming_command_timeout``
+            仍会在命令中断时执行底层刹车。
         """
         request = goal_handle.request
         timeout = float(request.timeout) or self._config.default_timeout_sec
@@ -530,32 +573,27 @@ class VisualServo(Node):
             self._aim_solution = None
             self._aim_error = ''
         servo_started = False
-        stop_attempted = False
-        stop_result = (True, '')
+        brake_attempted = False
+        brake_result = (True, '')
         result = AlignTarget.Result()
 
         def stop_servo(reason):
-            """闭包：安全停止 MoveIt Servo，保证停止服务最多被调用一次。"""
-            nonlocal servo_started, stop_attempted, stop_result
-            if stop_attempted:
-                return stop_result
-            self._publish_zero_count()
+            """Brake with zero Twist without blocking on Servo lifecycle services."""
+            nonlocal servo_started, brake_attempted, brake_result
+            if brake_attempted:
+                return brake_result
             if not servo_started:
                 return True, ''
-            stop_attempted = True
+            brake_attempted = True
             self.get_logger().info(
-                f'[VISUAL_SERVO] 停止伺服 reason={reason}')
-            stop_started = time.monotonic()
-            stop_result = self._call_trigger(self._stop_client)
-            stopped, stop_message = stop_result
-            stop_elapsed = time.monotonic() - stop_started
+                f'[VISUAL_SERVO] 零速制动 reason={reason}')
+            brake_result = self._brake_servo(reason)
+            stopped, stop_message = brake_result
             log = self.get_logger().info if stopped else self.get_logger().error
-            log(
-                f'[VISUAL_SERVO] 停止伺服结果 success={str(stopped).lower()} '
-                f'elapsed={stop_elapsed:.3f}s message={stop_message}')
-            if stopped:
-                servo_started = False
-            return stop_result
+            log(f'[VISUAL_SERVO] 零速制动结果 success={str(stopped).lower()} '
+                f'message={stop_message}')
+            servo_started = False
+            return brake_result
 
         def abort_with_stop(code, message, latest=None):
             """安全终止 Action 并停止 MoveIt Servo 的辅助函数。"""
@@ -569,25 +607,37 @@ class VisualServo(Node):
             stopped, stop_message = stop_servo(reason)
             if not stopped:
                 code = AlignTarget.Result.SERVO_SAFETY_STOP
-                message = f'MoveIt Servo stop failed: {stop_message}'
+                message = f'MoveIt Servo zero-brake failed: {stop_message}'
             return self._abort(goal_handle, result, code, message, latest)
 
         try:
             self._publish_debug('goal_started', force=True)
-            aim_ready, aim_message = self._prepare_aim_compensation()
+            aim_ready, aim_message = self._prepare_aim_compensation(
+                request.working_range_m)
             if not aim_ready:
                 return self._abort(
                     goal_handle, result,
                     AlignTarget.Result.SERVO_SAFETY_STOP,
                     f'nozzle aim compensation unavailable: {aim_message}')
+            aim = self._aim_solution
+            if (self._config.aim_compensation_enabled and (aim is None or
+                    int(request.image_width) != int(self._camera[4]) or
+                    int(request.image_height) != int(self._camera[5]) or
+                    abs(float(request.desired_u_px) - aim.u_px) > 0.5 or
+                    abs(float(request.desired_v_px) - aim.v_px) > 0.5 or
+                    abs(float(request.working_range_m) - aim.range_m) > 1.0e-3)):
+                return self._abort(
+                    goal_handle, result, AlignTarget.Result.INVALID_GOAL,
+                    'AlignTarget nozzle-aim contract does not match calibrated '
+                    'camera/nozzle geometry')
             self._publish_debug('aim_ready', force=True)
-            ok, message = self._call_trigger(self._start_client)
+            ok, message = self._activate_servo()
             if not ok:
                 return self._abort(
                     goal_handle, result, AlignTarget.Result.SERVO_SAFETY_STOP,
-                    f'MoveIt Servo start failed: {message}')
+                    f'MoveIt Servo activation failed: {message}')
             servo_started = True
-            self._publish_debug('servo_started', force=True)
+            self._publish_debug('servo_activated', force=True)
             period = 1.0 / self._config.control_rate_hz
             self.get_logger().info(
                 f'[VISUAL_SERVO] 进入伺服 target={request.target_id} '
@@ -703,7 +753,7 @@ class VisualServo(Node):
                         fx, fy = self._camera[:2]
                         metric_error = plane_error_mm(
                             latest['error_u'], latest['error_v'], fx, fy,
-                            self._config.aim_fixed_range_m)
+                            aim.range_m)
                         self.get_logger().info(
                             '[AIM] aligned '
                             f'error_px=({latest["error_u"]:.1f},'
@@ -731,8 +781,10 @@ class VisualServo(Node):
                 
                 if stalled:
                     return abort_with_stop(
-                        AlignTarget.Result.TIMEOUT,
-                        'visual alignment stalled',
+                        (AlignTarget.Result.SERVO_SINGULARITY
+                         if status == 6 else AlignTarget.Result.TIMEOUT),
+                        ('visual alignment stalled while leaving singularity'
+                         if status == 6 else 'visual alignment stalled'),
                         self._terminal_target_snapshot(now, latest))
                 
                 # 6. 迟滞带保持 (Schmitt-trigger 防抖动)
@@ -804,7 +856,7 @@ class VisualServo(Node):
                 self._terminal_target_snapshot(self._now()))
         finally:
             self._publish_zero()
-            if servo_started and not stop_attempted:
+            if servo_started and not brake_attempted:
                 stopped, stop_message = stop_servo('execute_cleanup')
                 if not stopped:
                     self.get_logger().error(
@@ -892,22 +944,53 @@ class VisualServo(Node):
                 else max(0.0, float(now) - float(unavailable_since)))
         return snapshot
 
-    def _call_trigger(self, client):
-        """调用 MoveIt Servo 的 Trigger 服务（启动/停止）。"""
-        timeout = float(self.get_parameter('service_timeout_sec').value)
+    def _call_trigger(self, client, timeout):
+        """Call a lifecycle Trigger and retain its measured round-trip time."""
+        timeout = float(timeout)
+        started = time.monotonic()
         if not client.wait_for_service(timeout_sec=timeout):
+            self._last_service_latency_sec = time.monotonic() - started
             return False, 'service unavailable'
         future = client.call_async(Trigger.Request())
-        deadline = time.monotonic() + timeout
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.005)
-        if not future.done():
+        completed = threading.Event()
+        future.add_done_callback(lambda _future: completed.set())
+        remaining = max(0.0, timeout - (time.monotonic() - started))
+        if not completed.wait(timeout=remaining):
+            self._last_service_latency_sec = time.monotonic() - started
             return False, 'service response timed out'
+        self._last_service_latency_sec = time.monotonic() - started
         try:
             response = future.result()
         except Exception as error:
             return False, str(error)
         return bool(response.success), str(response.message)
+
+    def _activate_servo(self):
+        """Start Servo once; later alignment goals reuse the active Servo loop."""
+        state = self._servo_lifecycle
+        if state == 'running':
+            return True, 'already running'
+        if state == 'never_started':
+            transition = 'start'
+            client = self._start_client
+            timeout = float(self.get_parameter('initial_start_timeout_sec').value)
+        else:
+            return False, f'Servo lifecycle is {state}; manual recovery required'
+        self._last_lifecycle_transition = transition
+        ok, message = self._call_trigger(client, timeout)
+        if ok:
+            self._servo_lifecycle = 'running'
+        else:
+            self._servo_lifecycle = 'unknown'
+        return ok, message
+
+    def _brake_servo(self, reason):
+        """Publish a bounded zero-command sequence and keep Servo ready to resume."""
+        self._publish_zero_count()
+        if self._servo_lifecycle != 'running':
+            return False, f'Servo lifecycle is {self._servo_lifecycle}; cannot brake'
+        self._last_lifecycle_transition = f'zero_brake:{reason}'
+        return True, 'zero commands published'
 
     def _command_limits(self):
         """返回当前输出空间的范数和加速度上限。"""
@@ -1069,6 +1152,8 @@ class VisualServo(Node):
             aim_range_m=(0.0 if aim is None else aim.range_m),
             aim_u_px=(0.0 if aim is None else aim.u_px),
             aim_v_px=(0.0 if aim is None else aim.v_px),
+            desired_u_px=(0.0 if aim is None else aim.u_px),
+            desired_v_px=(0.0 if aim is None else aim.v_px),
             estimated_plane_error_mm=estimated_error,
             target_valid=bool(
                 latest is not None and latest.get(
@@ -1102,6 +1187,9 @@ class VisualServo(Node):
             control_dt_sec=float(self._goal_state.last_control_dt),
             servo_status=status,
             servo_status_text=self._policy.status_text(status),
+            servo_lifecycle_state=self._servo_lifecycle,
+            lifecycle_transition=self._last_lifecycle_transition,
+            service_latency_sec=self._last_service_latency_sec,
             joint_positions=list(self._joint_positions),
             result_code=int(result_code),
             message=message,

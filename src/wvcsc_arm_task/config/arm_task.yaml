@@ -98,21 +98,23 @@ wvcsc_spray_task:
     target_recenter_max_angle_deg: 20.0
 
     # 精度与迭代控制。
-    target_recenter_refine_goal_px: 24.0     # 到达该像素内后，停止迭代细化
+    # 首次规划后若仍大于 8px，执行一次小角度安全细化，避免把 10~20px
+    # 的残差交给速度受限的 IBVS。
+    target_recenter_refine_goal_px: 8.0
     target_recenter_max_iterations: 2        # 最大细化迭代次数
 
-    # 残差候选像素列表：尝试将目标一次性拉到 12px/16px/24px 等不同的近距离范围，
+    # 残差候选像素列表：在碰撞 IK 可行的前提下，优先使用小残差，
     # 再由伺服系统接管，降低单次大幅旋转的运动学压力。
-    target_recenter_residual_candidates_px: [12.0, 16.0, 24.0, 8.0, 32.0, 40.0, 3.0, 1.0, 0.0]
+    # 优先将目标带到 3px 残差；任何候选若未通过碰撞 IK、条件数或关节余量
+    # 检查，则自动回退到更保守残差，绝不绕过安全筛选。
+    target_recenter_residual_candidates_px: [3.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0, 1.0, 0.0]
 
     # 轨迹规划的容差。
     target_recenter_position_tolerance_m: 0.002      # 2mm 的位置公差
     target_recenter_orientation_tolerance_rad: 0.002 # 2mrad 的姿态公差
 
-    # 像素偏差基准点。
-    # 28px 的垂直偏移，是为了让病果略微偏向图像上方，避免喷头直接覆盖导致图像过曝。
-    target_recenter_desired_offset_u_px: 0.0
-    target_recenter_desired_offset_v_px: 0.0
+    # 重心与 Servo 共用 `/vision/compute_spray_aim` 返回的喷嘴轴线像素；
+    # 禁止在这里配置图像中心偏移，避免两个阶段瞄准不同位置。
 
     # ----------------------------------------------------------------------
     # 8. 目标后处理稳定性校验 (Post-Recenter Check)
@@ -152,10 +154,11 @@ wvcsc_spray_task:
     observation_distance_min_m: 1.10
     observation_distance_max_m: 1.50
     observation_distance_step_m: 0.10
-    camera_height_min_m: 1.50
-    camera_height_max_m: 1.80
+    # 相机光心相对 alicia_base_link 的 Z 高度；0.20 m 为确认的最小车顶净空。
+    camera_height_min_m: 0.20
+    camera_height_max_m: 0.40
     camera_height_step_m: 0.10
-    observation_azimuth_offsets_deg: [0.0, -12.0, 12.0] # 观察时的左右扇形偏置角度
+    observation_azimuth_offsets_deg: [0.0, -5.0, 5.0] # 观察时的左右扇形偏置角度
     observation_image_margin_ratio: 0.07                # 图像边缘内缩留白防止出界
     observation_min_visible_fraction: 0.60              # 果实区域最低有效图像覆盖率
 
@@ -167,8 +170,8 @@ wvcsc_spray_task:
     # ----------------------------------------------------------------------
     # 12. 碰撞 IK、奇异点与关节限位安全保护
     # ----------------------------------------------------------------------
-    # 雅可比矩阵条件数阈值。大于 16.5 意味着机械臂接近奇异点，该候选会被过滤。
-    observation_max_condition_number: 20.0
+    # 条件数必须低于 Servo 进入警戒区，避免重心后立即陷入奇异位形。
+    observation_max_condition_number: 16.0
     # 关节距离上限/下限的最小安全余量 (弧度)。小于 0.18 rad 表示关节快卡死。
     observation_min_joint_margin_rad: 0.18
     # 优选关节余量。大于 0.35 rad 说明该姿态非常舒展，排序优先级最高。

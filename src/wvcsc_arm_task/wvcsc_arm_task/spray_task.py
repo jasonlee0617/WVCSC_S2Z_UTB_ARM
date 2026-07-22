@@ -14,6 +14,7 @@ MOVING_TO_OBSERVE (观察位姿) -> SCANNING_TREE (树检测) -> DETECTING_FRUIT
 
 import math
 import threading
+import time
 
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.node import Node
@@ -25,6 +26,7 @@ from tf2_ros import Buffer, TransformListener
 from vision_msgs.msg import Detection2DArray
 from wvcsc_interfaces.action import AlignTarget, ExecuteSpray, Spray
 from wvcsc_interfaces.msg import Target2D
+from wvcsc_interfaces.srv import ComputeSprayAim
 
 from .action_flow import DownstreamActionMixin
 from .motion_state import MotionControlState
@@ -93,6 +95,10 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         # 核心组件 4：下游动作客户端 (视觉对齐和喷洒)
         self._vision_client = ActionClient(
             self, AlignTarget, str(self.get_parameter('vision_action_name').value),
+            callback_group=self._callback_group)
+        self._aim_client = self.create_client(
+            ComputeSprayAim,
+            str(self.get_parameter('aim_service_name').value),
             callback_group=self._callback_group)
         self._spray_client = ActionClient(
             self, Spray, str(self.get_parameter('spray_action_name').value),
@@ -175,6 +181,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self._joint_state_sequence = 0
         self._active_mission = ''
         self._active_tree = ''
+        self._active_aim = None
 
     @property
     def arm_joint_names(self):
@@ -191,6 +198,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'min_spray_duration': 0.2,
             'max_spray_duration': 10.0,
             'vision_action_name': '/vision/align_target',
+            'aim_service_name': '/vision/compute_spray_aim',
+            'aim_service_timeout_sec': 2.0,
             'vision_timeout_sec': 8.0,               # 视觉伺服最长等待时间
             'spray_action_name': '/spray/execute',
             'downstream_server_timeout_sec': 2.0,
@@ -217,14 +226,12 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'target_recenter_trigger_px': 48.0,
             'target_recenter_workspace_px': 48.0,
             'target_recenter_max_angle_deg': 20.0,
-            'target_recenter_refine_goal_px': 24.0,
+            'target_recenter_refine_goal_px': 8.0,
             'target_recenter_max_iterations': 2,
             'target_recenter_residual_candidates_px': [
-                12.0, 16.0, 24.0, 8.0, 32.0, 40.0, 3.0, 1.0, 0.0],
+                3.0, 8.0, 12.0, 16.0, 24.0, 32.0, 40.0, 1.0, 0.0],
             'target_recenter_position_tolerance_m': 0.002,
             'target_recenter_orientation_tolerance_rad': 0.002,
-            'target_recenter_desired_offset_u_px': 0.0,
-            'target_recenter_desired_offset_v_px': 28.0,
             'target_post_recenter_stable_sec': 0.20,
             'target_post_recenter_max_drift_px': 4.0,
             'target_post_recenter_max_gap_sec': 0.20,
@@ -249,8 +256,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'observation_distance_min_m': 0.90,
             'observation_distance_max_m': 1.50,
             'observation_distance_step_m': 0.10,
-            'camera_height_min_m': 1.45,
-            'camera_height_max_m': 1.75,
+            'camera_height_min_m': 0.20,
+            'camera_height_max_m': 0.40,
             'camera_height_step_m': 0.10,
             'observation_azimuth_offsets_deg': [0.0, -12.0, 12.0],
             'observation_image_margin_ratio': 0.07,
@@ -365,10 +372,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 'target_recenter_position_tolerance_m').value),
             'orientation_tolerance_rad': float(self.get_parameter(
                 'target_recenter_orientation_tolerance_rad').value),
-            'desired_offset_u_px': float(
-                self.get_parameter('target_recenter_desired_offset_u_px').value),
-            'desired_offset_v_px': float(
-                self.get_parameter('target_recenter_desired_offset_v_px').value),
             'post_stable_sec': float(
                 self.get_parameter('target_post_recenter_stable_sec').value),
             'post_max_drift_px': float(self.get_parameter(
@@ -655,9 +658,15 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                     attempts.append(attempt)
 
             feedback(ExecuteSpray.Feedback.ALIGNING, 0.40, 'LOCKING_TARGET')
-            locked_target = self._lock_target(target.target_id, cancel_requested)
             recenter_attempts += 1
-            if locked_target is None:
+            aim_ready, aim_message = self._request_spray_aim(cancel_requested)
+            locked_target = (
+                self._lock_target(target.target_id, cancel_requested)
+                if aim_ready else None)
+            if not aim_ready:
+                recentered = False
+                recenter_message = aim_message
+            elif locked_target is None:
                 recentered = False
                 recenter_message = 'target was not locked before recenter'
             else:
@@ -715,7 +724,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 f'timeout={self._vision_timeout:.1f}s '
                 f'observation_distance={self._observation_distance}')
             ok, canceled, align_code, message = self._align_target(
-                request.mission_id, request.tree_id, target.target_id, cancel_requested)
+                request.mission_id, request.tree_id, target.target_id,
+                self._active_aim, cancel_requested)
 
             self.get_logger().debug(
                 f'[ARM][ALIGN] result target={target.target_id} '
@@ -725,6 +735,12 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 alignment_failures += 1
                 if canceled:
                     return ExecuteSpray.Result.CANCELED, message
+                if align_code == AlignTarget.Result.SERVO_SAFETY_STOP:
+                    self._set_inference_mode('idle')
+                    self._request_motion_stop()
+                    return (
+                        ExecuteSpray.Result.VISION_FAILED,
+                        f'visual alignment hard safety stop: {message}')
                 recoverable = self._is_recoverable_alignment_code(align_code)
                 if not recoverable:
                     return self._alignment_recovery_failure(
@@ -857,7 +873,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             AlignTarget.Result.TIMEOUT,
             AlignTarget.Result.TARGET_STALE,
             AlignTarget.Result.SERVO_SINGULARITY,
-            AlignTarget.Result.SERVO_SAFETY_STOP,
         }
 
     def _rewind_for_untried_observation(self, attempt):
@@ -964,6 +979,66 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         message = String()
         message.data = 'stop'
         self._motion_command_pub.publish(message)
+
+    def _request_spray_aim(self, cancel_requested):
+        """Fetch the calibrated nozzle-axis pixel before any MoveIt recenter.
+
+        No image-centre fallback is allowed: a missing CameraInfo/TF/service is
+        a recoverable observation failure, not permission to aim geometrically
+        at the wrong point.
+        """
+        deadline = time.monotonic() + float(
+            self.get_parameter('aim_service_timeout_sec').value)
+        while not self._aim_client.service_is_ready():
+            if self._aborted(cancel_requested):
+                return False, 'spray goal canceled'
+            if time.monotonic() >= deadline:
+                return False, 'nozzle aim service is unavailable'
+            time.sleep(0.02)
+        request = ComputeSprayAim.Request()
+        request.working_range_m = float(self._spray_working_distance)
+        future = self._aim_client.call_async(request)
+        while not future.done():
+            if self._aborted(cancel_requested):
+                return False, 'spray goal canceled'
+            if time.monotonic() >= deadline:
+                return False, 'nozzle aim service timed out'
+            time.sleep(0.02)
+        try:
+            response = future.result()
+        except Exception as error:
+            return False, f'nozzle aim service failed: {error}'
+        if not response.success:
+            return False, f'nozzle aim unavailable: {response.message}'
+        values = (
+            float(response.desired_u_px), float(response.desired_v_px),
+            int(response.image_width), int(response.image_height),
+            float(self._spray_working_distance),
+        )
+        if (not all(math.isfinite(value) for value in values[:2]) or
+                values[2] <= 0 or values[3] <= 0 or
+                not 0.0 <= values[0] < values[2] or
+                not 0.0 <= values[1] < values[3]):
+            return False, 'nozzle aim service returned an invalid image point'
+        self._active_aim = values
+        self.get_logger().info(
+            '[ARM][AIM] calibrated nozzle target='
+            f'({values[0]:.1f},{values[1]:.1f})px '
+            f'range={values[4]:.2f}m image={values[2]}x{values[3]}')
+        return True, ''
+
+    def _active_aim_pixel(self, image_width, image_height):
+        """Scale the authoritative aim point to a Target2D image if needed."""
+        aim = self._active_aim
+        if aim is None:
+            return None
+        desired_u, desired_v, aim_width, aim_height, _range_m = aim
+        if image_width <= 0 or image_height <= 0:
+            return None
+        return (
+            desired_u * float(image_width) / float(aim_width),
+            desired_v * float(image_height) / float(aim_height),
+        )
 
     def _aborted(self, cancel_requested):
         return self._abort.is_set() or cancel_requested()

@@ -48,9 +48,9 @@ def camera_look_at_pose(
         azimuth_offset_degrees=0.0):
     """生成 optical ``+Z`` 指向树冠中心的相机位姿。
 
-    ``tree_root`` 是病树根部在机械臂 base 下的位置。相机位于树与机械臂之间，
-    ``observation_distance`` 为水平离树距离；树过近时直接拒绝，防止生成穿过树干
-    或机械臂自身不可达的候选位姿。
+    ``tree_root`` 是病树根部在机械臂 base 下的位置。``camera_height`` 是相机
+    光心相对机械臂 base 的 Z 高度；相机位于树与机械臂之间，``observation_distance``
+    为水平离树距离。树过近时直接拒绝，防止生成穿过树干或机械臂自身不可达的候选位姿。
     
     **工程意义**：机械臂末端相机不是末端工具点（tool0），而是挂载的深度相机。此函数
     计算的是相机坐标系在机械臂基座下的绝对坐标和旋转，随后需要经过工具外参逆变换，
@@ -80,7 +80,7 @@ def camera_look_at_pose(
     camera = (
         tx - observation_distance * forward_x,
         ty - observation_distance * forward_y,
-        tz + camera_height,
+        camera_height,
     )
     target_delta = (
         tx - camera[0],
@@ -159,7 +159,7 @@ def tool_pose_from_camera_pose(
 
 def recenter_camera_pose(
         camera_position, camera_quat_xyzw, camera_model, center_u, center_v,
-        desired_offset_u_px, desired_offset_v_px, max_angle_degrees,
+        desired_u, desired_v, max_angle_degrees,
         residual_error_px=0.0):
     """保持相机位置不变，将姿态转向喷洒像素，并可给 IBVS 留出残差。
 
@@ -170,16 +170,17 @@ def recenter_camera_pose(
     camera_position = tuple(float(value) for value in camera_position)
     fx, fy, cx, cy, width, height = camera_model
     values = (*camera_position, fx, fy, cx, cy, center_u, center_v,
-              desired_offset_u_px, desired_offset_v_px, max_angle_degrees,
+              desired_u, desired_v, max_angle_degrees,
               residual_error_px)
     if (not all(math.isfinite(float(value)) for value in values) or
             fx <= 0.0 or fy <= 0.0 or width <= 0 or height <= 0 or
             max_angle_degrees <= 0.0 or residual_error_px < 0.0):
         raise ValueError('target recenter inputs are invalid')
     
-    # 计算期望的目标像素点（图像正中心 + 人工设定的偏置）
-    desired_u = float(width) / 2.0 + float(desired_offset_u_px)
-    desired_v = float(height) / 2.0 + float(desired_offset_v_px)
+    # The desired point is the calibrated nozzle-axis projection, supplied by
+    # VisualServo.  Do not recreate it from an image-centre offset here.
+    desired_u = float(desired_u)
+    desired_v = float(desired_v)
     error_u = float(center_u) - desired_u
     error_v = float(center_v) - desired_v
     maximum_error = max(abs(error_u), abs(error_v))
@@ -341,6 +342,7 @@ class ObservationCandidate:
     min_joint_margin_rad: float = 0.0
     joint_motion_norm: float = math.inf
     rejection_reason: str = ''
+    selection_phase: str = 'unranked'
 
 
 def _build_candidate(
@@ -536,6 +538,52 @@ class ObservationOptimizer:
                 candidate.candidate_id,
             ))
 
+    def order_for_tree_scan(self, candidates):
+        """中心视角优先；tree 未确认后才进入左右扇形扫描。"""
+        ranked = self.rank(candidates)
+        centers = [candidate for candidate in ranked
+                   if math.isclose(candidate.azimuth_deg, 0.0, abs_tol=1e-6)]
+        center_ids = {id(candidate) for candidate in centers}
+        sides = [candidate for candidate in ranked if id(candidate) not in center_ids]
+        if not centers:
+            return self._order_lateral_scan(sides, initial_phase='center_unavailable_fallback')
+
+        center = centers[0]
+        center.selection_phase = 'center_initial'
+        same_view_sides = [
+            candidate for candidate in sides
+            if math.isclose(candidate.distance_m, center.distance_m, abs_tol=1e-6)
+            and math.isclose(candidate.camera_height_m, center.camera_height_m,
+                             abs_tol=1e-6)
+        ]
+        fan = self._order_lateral_scan(same_view_sides)
+        selected = {id(candidate) for candidate in fan}
+        recovery = [candidate for candidate in sides if id(candidate) not in selected]
+        for candidate in recovery:
+            candidate.selection_phase = 'recovery'
+        return [center, *fan, *recovery]
+
+    @staticmethod
+    def _order_lateral_scan(candidates, initial_phase=None):
+        """每个方向只先尝试一个同组候选，剩余侧向候选留作恢复。"""
+        selected = []
+        used = set()
+        for direction, phase in ((-1.0, 'fan_left'), (1.0, 'fan_right')):
+            candidate = next(
+                (item for item in candidates
+                 if id(item) not in used and item.azimuth_deg * direction > 0.0),
+                None)
+            if candidate is None:
+                continue
+            candidate.selection_phase = initial_phase if not selected and initial_phase else phase
+            selected.append(candidate)
+            used.add(id(candidate))
+        for candidate in candidates:
+            if id(candidate) not in used:
+                candidate.selection_phase = 'recovery'
+                selected.append(candidate)
+        return selected
+
     def condition_number(self, joints):
         jacobian = self._jacobian(self._joint_vector(joints))
         singular_values = np.linalg.svd(jacobian, compute_uv=False)
@@ -664,16 +712,24 @@ class ObservationFlowMixin:
     # --------- 扫描与确认树 ---------
     def _scan_for_tree(self, cancel_requested):
         while not self._aborted(cancel_requested):
+            candidate = self._active_observation_candidate()
             self._reset_tree_tracking()
             self._set_inference_mode('tree')
             if self._wait_for_tree(cancel_requested):
-                self._publish_observation_debug('tree_confirmed')
+                self._publish_observation_debug('tree_confirmed', candidate)
                 return True
             self._publish_observation_debug(
-                'candidate_rejected', rejection_reason='tree_not_confirmed')
+                'tree_not_confirmed', candidate,
+                rejection_reason='tree_not_confirmed')
             if not self._move_to_next_observation():
                 return False
         return False
+
+    def _active_observation_candidate(self):
+        index = self._observation_candidate_index
+        if 0 <= index < len(self._observation_candidates):
+            return self._observation_candidates[index]
+        return None
 
     def _wait_for_tree(self, cancel_requested):
         deadline = time.monotonic() + float(
@@ -700,16 +756,16 @@ class ObservationFlowMixin:
         if inputs is None:
             return False, 'camera or joint state unavailable for target recenter'
         camera, current_joints = inputs
+        desired_aim = self._active_aim_pixel(camera[4], camera[5])
+        if desired_aim is None:
+            return False, 'calibrated nozzle aim is unavailable for target recenter'
+        desired_u, desired_v = desired_aim
         pre_error_u, pre_error_v = target_pixel_error(
-            target.center_u, target.center_v, camera[4], camera[5],
-            self._recenter_config['desired_offset_u_px'],
-            self._recenter_config['desired_offset_v_px'])
+            target.center_u, target.center_v, desired_u, desired_v)
         
         # 如果目标已经在视觉伺服的 48px 工作窗口内，则跳过重心动作
         if not target_requires_recenter(
-                target.center_u, target.center_v, camera[4], camera[5],
-                self._recenter_config['desired_offset_u_px'],
-                self._recenter_config['desired_offset_v_px'],
+                target.center_u, target.center_v, desired_u, desired_v,
                 self._recenter_config['trigger_px']):
             if not self._wait_for_target_confirmation(
                     target.target_id, cancel_requested, require_workspace=True):
@@ -717,9 +773,7 @@ class ObservationFlowMixin:
                     'target did not remain reliable inside fine-servo workspace')
             confirmed = self._latest_target()
             post_error_u, post_error_v = target_pixel_error(
-                confirmed.center_u, confirmed.center_v, camera[4], camera[5],
-                self._recenter_config['desired_offset_u_px'],
-                self._recenter_config['desired_offset_v_px'])
+                confirmed.center_u, confirmed.center_v, desired_u, desired_v)
             post_error_norm = math.hypot(post_error_u, post_error_v)
             if post_error_norm > self._recenter_config['trigger_px']:
                 self._publish_observation_debug(
@@ -778,9 +832,7 @@ class ObservationFlowMixin:
         
         confirmed = self._latest_target()
         post_error_u, post_error_v = target_pixel_error(
-            confirmed.center_u, confirmed.center_v, camera[4], camera[5],
-            self._recenter_config['desired_offset_u_px'],
-            self._recenter_config['desired_offset_v_px'])
+            confirmed.center_u, confirmed.center_v, desired_u, desired_v)
         total_angle_deg = angle_deg
         iterations = 1
         
@@ -793,6 +845,10 @@ class ObservationFlowMixin:
             if inputs is None:
                 break
             camera, current_joints = inputs
+            desired_aim = self._active_aim_pixel(camera[4], camera[5])
+            if desired_aim is None:
+                break
+            desired_u, desired_v = desired_aim
             camera_pose = self._current_camera_pose()
             if camera_pose is None:
                 self._publish_observation_debug(
@@ -836,9 +892,7 @@ class ObservationFlowMixin:
                 return False, 'target was not reconfirmed after recenter refinement'
             confirmed = self._latest_target()
             post_error_u, post_error_v = target_pixel_error(
-                confirmed.center_u, confirmed.center_v, camera[4], camera[5],
-                self._recenter_config['desired_offset_u_px'],
-                self._recenter_config['desired_offset_v_px'])
+                confirmed.center_u, confirmed.center_v, desired_u, desired_v)
         post_error_norm = math.hypot(post_error_u, post_error_v)
         if post_error_norm > self._recenter_config['trigger_px']:
             self._publish_observation_debug(
@@ -887,14 +941,16 @@ class ObservationFlowMixin:
         else:
             start_camera_position, start_camera_quat = camera_pose
         rejection_reason = 'no partial recenter candidate was feasible'
+        desired_aim = self._active_aim_pixel(camera[4], camera[5])
+        if desired_aim is None:
+            return None, 0.0, 'calibrated nozzle aim is unavailable'
         # 尝试不同的残差，以逐步逼近目标而不是一次超大幅运动
         for residual_px in self._recenter_config['residual_candidates_px']:
             try:
                 camera_position, camera_quat, angle_deg = recenter_camera_pose(
                     start_camera_position, start_camera_quat,
                     camera, target.center_u, target.center_v,
-                    self._recenter_config['desired_offset_u_px'],
-                    self._recenter_config['desired_offset_v_px'],
+                    *desired_aim,
                     self._recenter_config['max_angle_deg'],
                     residual_error_px=residual_px)
                 tool_position, tool_quat = tool_pose_from_camera_pose(
@@ -1087,8 +1143,8 @@ class ObservationFlowMixin:
             self._publish_observation_debug(
                 'candidate_ranked' if not candidate.rejection_reason
                 else 'candidate_rejected', candidate)
-        self._observation_candidates = self._observation_optimizer.rank(candidates)[
-            :int(self.get_parameter('observation_max_plans').value)]
+        self._observation_candidates = self._observation_optimizer.order_for_tree_scan(
+            candidates)[:int(self.get_parameter('observation_max_plans').value)]
         ik_count = sum(candidate.ik_joints is not None for candidate in candidates)
         servo_safe_count = sum(
             candidate.visible and not candidate.rejection_reason
@@ -1114,6 +1170,15 @@ class ObservationFlowMixin:
             self._publish_observation_debug(
                 'search_failed', rejection_reason=reason)
             return False
+        if self._observation_candidates[0].selection_phase == \
+                'center_unavailable_fallback':
+            candidate = self._observation_candidates[0]
+            self.get_logger().warn(
+                '[ARM][OBSERVE] no safe center observation candidate; '
+                f'falling back to azimuth={candidate.azimuth_deg:+.0f} deg')
+            self._publish_observation_debug(
+                'center_view_unavailable', candidate,
+                rejection_reason='no_center_servo_safe_candidate')
         return True
 
     def _move_to_next_observation(self, excluded_indices=None):
@@ -1138,6 +1203,9 @@ class ObservationFlowMixin:
                     f'[ARM][ALIGN] selected observation candidate '
                     f'index={self._observation_candidate_index} '
                     f'id={candidate.candidate_id} distance={candidate.distance_m} m '
+                    f'phase={getattr(candidate, "selection_phase", "recovery")} '
+                    f'camera_height_in_base={candidate.camera_height_m:.2f} m '
+                    f'camera_z_in_base={candidate.camera_position[2]:.2f} m '
                     f'condition={candidate.condition_number:.2f} '
                     f'joint_margin={candidate.min_joint_margin_rad:.2f}')
                 self._publish_observation_debug('candidate_selected', candidate)
@@ -1211,6 +1279,8 @@ class ObservationFlowMixin:
         if candidate is None:
             candidate_id = ''
             distance = camera_height = azimuth = 0.0
+            camera_z_in_base = 0.0
+            selection_phase = 'none'
             visible = ik_valid = selected = False
             condition = math.inf
             margin = motion = 0.0
@@ -1222,6 +1292,8 @@ class ObservationFlowMixin:
             distance = candidate.distance_m
             camera_height = candidate.camera_height_m
             azimuth = candidate.azimuth_deg
+            camera_z_in_base = float(candidate.camera_position[2])
+            selection_phase = getattr(candidate, 'selection_phase', 'recovery')
             visible = bool(candidate.visible)
             ik_valid = candidate.ik_joints is not None
             selected = event == 'candidate_selected'
@@ -1240,7 +1312,11 @@ class ObservationFlowMixin:
             'candidate_id': candidate_id,
             'distance_m': distance,
             'camera_height_m': camera_height,
+            'camera_height_in_base_m': camera_height,
+            'camera_z_in_base_m': camera_z_in_base,
             'azimuth_deg': azimuth,
+            'observation_phase': selection_phase,
+            'selection_policy': 'center_then_fan',
             'visible': visible,
             'visible_fraction': visible_fraction,
             'required_visible_fraction': self._observation_config[
@@ -1266,7 +1342,8 @@ class ObservationFlowMixin:
         if event != 'candidate_rejected' or visible:
             self.get_logger().debug(
                 f'[ARM][OBSERVE] event={event} id={candidate_id or "-"} '
-                f'visible={visible} coverage={visible_fraction:.3f} ik={ik_valid} '
+                f'visible={visible} coverage={visible_fraction:.3f} '
+                f'camera_z_in_base={camera_z_in_base:.3f} ik={ik_valid} '
                 f'condition={payload["condition_number"]} '
                 f'joint_margin={margin:.3f} reason={rejection_reason or "-"}')
 

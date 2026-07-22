@@ -27,8 +27,8 @@ def _optimizer(**overrides):
         'distance_min_m': 1.3,
         'distance_max_m': 1.5,
         'distance_step_m': 0.1,
-        'camera_height_min_m': 1.45,
-        'camera_height_max_m': 1.75,
+        'camera_height_min_m': 0.2,
+        'camera_height_max_m': 0.4,
         'camera_height_step_m': 0.1,
         'azimuth_offsets_deg': (0.0,),
         'image_margin_ratio': 0.08,
@@ -65,8 +65,8 @@ def test_off_center_c10_intrinsics_keep_runtime_observation_candidates():
         fruit_zone_height_max_m=1.6,
         distance_min_m=1.1,
         distance_max_m=1.5,
-        camera_height_min_m=1.5,
-        camera_height_max_m=1.8,
+        camera_height_min_m=0.2,
+        camera_height_max_m=0.4,
         azimuth_offsets_deg=(0.0, -12.0, 12.0),
         image_margin_ratio=0.07,
     )
@@ -79,8 +79,66 @@ def test_off_center_c10_intrinsics_keep_runtime_observation_candidates():
     visible = [candidate for candidate in candidates if candidate.visible]
     assert visible
     assert max(candidate.visible_fraction for candidate in candidates) >= 0.60
+    assert all(0.20 <= candidate.camera_position[2] <= 0.40
+               for candidate in visible)
     assert all(candidate.target_u_px == pytest.approx(640.0) for candidate in visible)
     assert all(candidate.target_v_px == pytest.approx(360.0) for candidate in visible)
+
+
+def test_camera_height_is_measured_from_the_arm_base():
+    optimizer = _optimizer(
+        camera_height_min_m=0.2,
+        camera_height_max_m=0.4,
+    )
+    candidates = optimizer.generate(
+        (2.0, 0.0, -1.55),
+        ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+        (600.0, 600.0, 640.0, 360.0, 1280, 720),
+    )
+
+    assert candidates
+    assert sorted({candidate.camera_position[2] for candidate in candidates}) == \
+        pytest.approx([0.2, 0.3, 0.4])
+
+
+def test_tree_scan_orders_center_then_same_view_left_and_right_fan():
+    optimizer = _optimizer(
+        distance_min_m=1.3,
+        distance_max_m=1.3,
+        camera_height_min_m=0.2,
+        camera_height_max_m=0.3,
+        azimuth_offsets_deg=(0.0, -12.0, 12.0),
+    )
+    candidates = _candidates(optimizer)
+    for candidate in candidates:
+        candidate.visible = True
+        candidate.rejection_reason = ''
+        candidate.condition_number = 5.0
+        candidate.min_joint_margin_rad = 0.5
+        candidate.joint_motion_norm = 0.1
+
+    ordered = optimizer.order_for_tree_scan(candidates)
+
+    assert [candidate.azimuth_deg for candidate in ordered[:3]] == [0.0, -12.0, 12.0]
+    assert [candidate.selection_phase for candidate in ordered[:3]] == [
+        'center_initial', 'fan_left', 'fan_right']
+    assert all(candidate.selection_phase == 'recovery' for candidate in ordered[3:])
+
+
+def test_tree_scan_marks_lateral_fallback_when_no_center_is_safe():
+    optimizer = _optimizer(azimuth_offsets_deg=(0.0, -12.0, 12.0))
+    candidates = _candidates(optimizer)
+    for candidate in candidates:
+        candidate.visible = candidate.azimuth_deg != 0.0
+        candidate.rejection_reason = ''
+        candidate.condition_number = 5.0
+        candidate.min_joint_margin_rad = 0.5
+        candidate.joint_motion_norm = 0.1
+
+    ordered = optimizer.order_for_tree_scan(candidates)
+
+    assert ordered[0].selection_phase == 'center_unavailable_fallback'
+    assert ordered[0].azimuth_deg == -12.0
 
 
 def test_coverage_below_configured_threshold_is_rejected():

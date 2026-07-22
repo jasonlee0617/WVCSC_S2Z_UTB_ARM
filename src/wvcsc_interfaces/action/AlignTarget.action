@@ -3,6 +3,13 @@ string mission_id
 string tree_id
 string target_id
 float32 timeout
+# Contract shared with the MoveIt recenter stage.  The target must be aligned
+# to the calibrated nozzle-axis projection, never to an implicit image centre.
+float32 working_range_m
+float32 desired_u_px
+float32 desired_v_px
+uint32 image_width
+uint32 image_height
 ---
 # Result
 uint16 OK=0

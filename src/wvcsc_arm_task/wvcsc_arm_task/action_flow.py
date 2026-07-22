@@ -22,7 +22,9 @@ class DownstreamActionMixin:
     包含通用的 Action 客户端交互逻辑，供喷洒任务基类继承。
     """
 
-    def _align_target(self, mission_id, tree_id, target_id, cancel_requested):
+    def _align_target(
+            self, mission_id, tree_id, target_id, nozzle_aim,
+            cancel_requested):
         """
         调用下游的视觉伺服 Action (`AlignTarget`) 进行 IBVS 对准。
         
@@ -46,6 +48,12 @@ class DownstreamActionMixin:
         goal.tree_id = tree_id
         goal.target_id = target_id
         goal.timeout = self._vision_timeout  # 从节点参数获取的视觉伺服超时时间
+        desired_u, desired_v, image_width, image_height, working_range = nozzle_aim
+        goal.working_range_m = float(working_range)
+        goal.desired_u_px = float(desired_u)
+        goal.desired_v_px = float(desired_v)
+        goal.image_width = int(image_width)
+        goal.image_height = int(image_height)
 
         # 发送 Action 目标，设置的结果超时时间 = 伺服超时 + 下游缓冲余量
         # 这种设计确保即便视觉伺服节点处于高负载，通信层也不会过早判定超时

@@ -106,18 +106,11 @@ status_topic: /servo_node/status
 command_out_topic: /arm_controller/joint_trajectory
 
 # ----------------------------------------------------------------------
-# Gazebo 专用配置 (仅为保证仿真吞吐量而临时关闭的碰撞检查)
+# Gazebo 碰撞保护
 # ----------------------------------------------------------------------
 # 是否启用底层碰撞检查 (非常重要)。
-# 在 Gazebo 仿真中，因为 Humble 版本的 `moveit_servo` 碰撞检查同步回调
-# 耗时约 0.5 秒，会严重阻塞视觉伺服环路 (视觉降频到 2 Hz)，
-# 因此当前设为 `false` 以保证仿真流畅度。
-#
-# 🚨 【重要安全警告】🚨
-# `check_collisions: false` 仅供 Gazebo 仿真验证算法！
-# 在【真实 Alicia-M 机械臂硬件】上联调时，**必须**将此项设为 `true`！
-# 否则如果机械臂视觉伺服发生未预料的大幅度偏移，会直接导致机械臂自碰撞或撞击环境！
-check_collisions: false
+# 仿真与实机都必须启用，防止视觉伺服旋转腕部后碰撞车顶。
+check_collisions: true
 
 # 碰撞检查频率 (Hz)，仅在 `check_collisions: true` 时生效。
 collision_check_rate: 10.0

@@ -7,8 +7,6 @@ wvcsc_spray_task:
     target_post_recenter_min_confidence: 0.30
     spray_working_distance_m: 1.00
     spray_working_distance_tolerance_m: 0.05
-    target_recenter_desired_offset_u_px: 0.0
-    target_recenter_desired_offset_v_px: 0.0
 
     max_alignment_attempts: 2
     vision_timeout_sec: 8.0
@@ -23,8 +21,11 @@ wvcsc_spray_task:
     observation_distance_min_m: 1.00
     observation_distance_max_m: 1.00
     observation_distance_step_m: 0.10
-    camera_height_min_m: 1.40
-    camera_height_max_m: 1.80
+    # 相机光心相对 alicia_base_link 的 Z 高度；0.20 m 为确认的最小车顶净空。
+    camera_height_min_m: 0.20
+    camera_height_max_m: 0.40
+    camera_height_step_m: 0.10
+    observation_max_condition_number: 16.0
 
     # Keep automatic execution conservative until measured calibration exists.
     observation_position_tolerance_m: 0.01

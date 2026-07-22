@@ -87,11 +87,11 @@ def test_stop_burst_publishes_zero_for_a_quarter_second(monkeypatch):
 def test_trigger_wait_does_not_nested_spin_an_executor_owned_node(monkeypatch):
     """Service responses must be handled by the node's existing MT executor."""
     class Future:
-        def __init__(self):
-            self.ready = False
-
         def done(self):
-            return self.ready
+            return True
+
+        def add_done_callback(self, callback):
+            callback(self)
 
         @staticmethod
         def result():
@@ -111,13 +111,8 @@ def test_trigger_wait_does_not_nested_spin_an_executor_owned_node(monkeypatch):
     node = object.__new__(VisualServo)
     node.get_parameter = lambda _name: SimpleNamespace(value=0.1)
 
-    def complete_response(_seconds):
-        future.ready = True
-
-    monkeypatch.setattr(
-        'wvcsc_visual_servo.visual_servo_node.time.sleep', complete_response)
-
-    assert node._call_trigger(Client()) == (True, 'servo stopped')
+    node._last_service_latency_sec = 0.0
+    assert node._call_trigger(Client(), 0.1) == (True, 'servo stopped')
 
 
 def test_control_dt_uses_actual_30hz_period_with_bounded_overrun():
@@ -443,6 +438,28 @@ def test_visual_servo_debug_json_has_stable_complete_schema():
     assert list(payload) == list(DEBUG_DEFAULTS)
     assert payload['event'] == 'control'
     assert payload['error_u_px'] == 12.5
+    assert payload['desired_u_px'] == 0.0
+    assert payload['servo_lifecycle_state'] == 'never_started'
+
+
+def test_servo_lifecycle_starts_once_then_reuses_zero_braked_loop():
+    node = object.__new__(VisualServo)
+    node._servo_lifecycle = 'never_started'
+    node._last_lifecycle_transition = ''
+    node._last_service_latency_sec = 0.0
+    node._start_client = 'start'
+    node._publish_zero_count = lambda: None
+    node.get_parameter = lambda _name: SimpleNamespace(value=12.0)
+    calls = []
+    node._call_trigger = lambda client, timeout: (calls.append((client, timeout)) or
+                                                   (True, 'ok'))
+
+    assert node._activate_servo() == (True, 'ok')
+    assert node._servo_lifecycle == 'running'
+    assert node._brake_servo('first_target_done') == (True, 'zero commands published')
+    assert node._servo_lifecycle == 'running'
+    assert node._activate_servo() == (True, 'already running')
+    assert calls == [('start', 12.0)]
 
 
 def test_visual_servo_debug_rate_is_limited_unless_forced():
@@ -580,7 +597,9 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
     class Goal:
         request = SimpleNamespace(
             timeout=8.0, mission_id='mission-1',
-            tree_id='tree-1', target_id='fruit-1')
+            tree_id='tree-1', target_id='fruit-1', working_range_m=1.0,
+            desired_u_px=640.0, desired_v_px=360.0,
+            image_width=1280, image_height=720)
         is_cancel_requested = outcome == 'canceled'
 
         def __init__(self):
@@ -612,8 +631,9 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
     node._progress = Progress()
     node._goal_state = _GoalState()
     node._policy = ServoStatusPolicy({1, 3}, {2}, {4, 5}, {6})
-    node._start_client = 'start'
-    node._stop_client = 'stop'
+    node._servo_lifecycle = 'never_started'
+    node._last_lifecycle_transition = ''
+    node._last_service_latency_sec = 0.0
     node._publish_debug = lambda *_args, **_kwargs: None
     node._publish_zero = lambda: None
     node._publish_zero_count = lambda: None
@@ -628,9 +648,9 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
         if outcome in {'timeout', 'stale'} else (lambda: 0.0))
     calls = []
 
-    def trigger(client):
-        calls.append(client)
-        if client == 'start':
+    def trigger(transition):
+        calls.append(transition)
+        if transition == 'start':
             valid_target = {
                 'valid': True, 'hold': False, 'received': node._now(),
                 'error_u': 1.0, 'error_v': -1.0,
@@ -644,12 +664,13 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
                 if outcome == 'stale' else valid_target)
         return True, ''
 
-    node._call_trigger = trigger
+    node._activate_servo = lambda: trigger('start')
+    node._brake_servo = lambda _reason: trigger('brake')
     goal = Goal()
 
     result = node._execute(goal)
 
-    assert calls == ['start', 'stop']
+    assert calls == ['start', 'brake']
     assert goal.terminal == {
         'aligned': 'succeeded',
         'timeout': 'aborted',
@@ -668,7 +689,7 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
     }[outcome]
     assert any('[VISUAL_SERVO] 进入伺服 target=fruit-1' in line
                for line in logger.lines)
-    assert any(f'[VISUAL_SERVO] 停止伺服 reason={reason}' in line
+    assert any(f'[VISUAL_SERVO] 零速制动 reason={reason}' in line
                for line in logger.lines)
-    assert any('[VISUAL_SERVO] 停止伺服结果 success=true' in line
+    assert any('[VISUAL_SERVO] 零速制动结果 success=true' in line
                for line in logger.lines)

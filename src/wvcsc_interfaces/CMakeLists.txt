@@ -13,6 +13,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MissionStatus.msg"
   "msg/ManualMissionTarget.msg"
   "msg/Target2D.msg"
+  "srv/ComputeSprayAim.srv"
   "srv/LoadManualMission.srv"
   "action/AlignTarget.action"
   "action/ExecuteSpray.action"

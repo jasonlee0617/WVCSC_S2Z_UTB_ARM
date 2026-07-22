@@ -28,9 +28,9 @@ def _forward_from_quaternion(quat):
 def test_camera_look_at_pose_keeps_distance_and_aims_optical_z_at_tree(
         tree_y, camera_y, forward_y):
     position, quat = camera_look_at_pose(
-        (0.0, tree_y, -1.32), 1.20, 1.90, 1.10)
-    assert position == pytest.approx((0.0, camera_y, 0.58))
-    direction = (0.0, forward_y * 1.10, -0.70)
+        (0.0, tree_y, -1.32), 1.20, 0.30, 1.10)
+    assert position == pytest.approx((0.0, camera_y, 0.30))
+    direction = (0.0, forward_y * 1.10, -0.42)
     norm = math.sqrt(sum(value * value for value in direction))
     assert _forward_from_quaternion(quat) == pytest.approx(
         tuple(value / norm for value in direction))
@@ -38,7 +38,7 @@ def test_camera_look_at_pose_keeps_distance_and_aims_optical_z_at_tree(
 
 def test_camera_look_at_pose_rejects_tree_inside_observation_clearance():
     with pytest.raises(ValueError, match='too close'):
-        camera_look_at_pose((0.0, 1.10, 0.0), 1.20, 1.90, 1.10)
+        camera_look_at_pose((0.0, 1.10, 0.0), 1.20, 0.30, 1.10)
 
 
 def test_transform_point_applies_translation_and_rotation():
@@ -70,7 +70,7 @@ def test_recenter_keeps_camera_position_and_maps_target_to_desired_spray_ray():
     camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
     position, quat, angle = recenter_camera_pose(
         (1.0, 2.0, 3.0), (0.0, 0.0, 0.0, 1.0), camera,
-        740.0, 360.0, 0.0, 28.0, 18.0)
+        740.0, 360.0, 640.0, 388.0, 18.0)
     source_ray = (0.2, 0.0, 1.0)
     desired_ray = (0.0, 28.0 / 500.0, 1.0)
     source_norm = math.sqrt(sum(value * value for value in source_ray))
@@ -86,7 +86,7 @@ def test_partial_recenter_leaves_a_configured_pixel_residual_for_ibvs():
     camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
     position, quat, angle = recenter_camera_pose(
         (1.0, 2.0, 3.0), (0.0, 0.0, 0.0, 1.0), camera,
-        740.0, 360.0, 0.0, 28.0, 18.0, residual_error_px=40.0)
+        740.0, 360.0, 640.0, 388.0, 18.0, residual_error_px=40.0)
     source_ray = (0.2, 0.0, 1.0)
     # Original error is (+100, -28) px. Scaling its largest axis to 40 px
     # leaves the intermediate aim at (680, 376.8).
@@ -107,11 +107,11 @@ def test_partial_recenter_can_fit_when_exact_recentering_exceeds_angle_limit():
     with pytest.raises(ValueError, match='angle exceeds limit'):
         recenter_camera_pose(
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), camera,
-            820.0, 388.0, 0.0, 28.0, 18.0)
+            820.0, 388.0, 640.0, 388.0, 18.0)
 
     _position, _quat, angle = recenter_camera_pose(
         (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), camera,
-        820.0, 388.0, 0.0, 28.0, 18.0, residual_error_px=40.0)
+        820.0, 388.0, 640.0, 388.0, 18.0, residual_error_px=40.0)
 
     assert angle < 18.0
 
@@ -121,4 +121,4 @@ def test_recenter_rejects_a_rotation_larger_than_the_safety_limit():
         recenter_camera_pose(
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0),
             (500.0, 500.0, 640.0, 360.0, 1280, 720),
-            900.0, 360.0, 0.0, 28.0, 18.0)
+            900.0, 360.0, 640.0, 388.0, 18.0)

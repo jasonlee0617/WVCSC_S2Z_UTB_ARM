@@ -1,0 +1,9 @@
+# Resolve the calibrated spray-nozzle aim point for one fixed working plane.
+float32 working_range_m
+---
+bool success
+float32 desired_u_px
+float32 desired_v_px
+uint32 image_width
+uint32 image_height
+string message

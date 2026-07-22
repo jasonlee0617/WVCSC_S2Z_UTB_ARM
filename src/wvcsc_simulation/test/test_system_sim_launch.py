@@ -164,7 +164,20 @@ def test_simulation_control_stack_uses_layered_100_30_hz_rates():
     assert servo_config['publish_period'] == pytest.approx(0.05)
     assert servo_config['low_latency_mode'] is True
     assert servo_config['incoming_command_timeout'] == pytest.approx(0.30)
+    assert servo_config['check_collisions'] is True
     assert visual_config['control_rate_hz'] == pytest.approx(30.0)
     assert visual_config['zero_command_count'] == 8
     assert visual_config['zero_command_count'] / visual_config[
         'control_rate_hz'] == pytest.approx(8.0 / 30.0)
+
+
+def test_simulation_observation_keeps_camera_above_the_vehicle_roof():
+    parameters = yaml.safe_load((
+        Path(__file__).parents[2] / 'wvcsc_arm_task' / 'config' /
+        'arm_task.yaml'
+    ).read_text(encoding='utf-8'))['wvcsc_spray_task']['ros__parameters']
+
+    assert parameters['camera_height_min_m'] == pytest.approx(0.20)
+    assert parameters['camera_height_max_m'] == pytest.approx(0.40)
+    assert parameters['camera_height_step_m'] == pytest.approx(0.10)
+    assert 'observation_min_camera_z_in_base_m' not in parameters

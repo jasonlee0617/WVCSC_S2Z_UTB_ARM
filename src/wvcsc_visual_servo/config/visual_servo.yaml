@@ -35,9 +35,11 @@ wvcsc_visual_servo:
     # 终端控制台的人类可读日志更新频率。
     terminal_status_rate_hz: 1.0
 
-    # MoveIt Servo 的生命周期管理服务。
+    # MoveIt Servo 只在首个对齐任务启动一次。每颗果实结束时发送零 Twist
+    # 制动，避免 Gazebo 组件容器内 pause/unpause 服务的响应阻塞。
     start_servo_service: /servo_node/start_servo
-    stop_servo_service: /servo_node/stop_servo
+    # The same calibrated nozzle aim is requested by SprayTask before recenter.
+    aim_service_name: /vision/compute_spray_aim
 
     # 速度指令参考的坐标系 (必须是 C10 相机的光学坐标系)。
     command_frame: camera_color_optical_frame
@@ -74,12 +76,12 @@ wvcsc_visual_servo:
     # ----------------------------------------------------------------------
     # 粗调阈值：当像素误差小于 20px 时，伺服进入减速区（配合近目标速度缩放）。
     coarse_tolerance_px: 20.0
-    # 【严格目标】最终对准精度：误差必须小于 1.5 像素，才能判定为对准成功。
-    # 在测量中，双轴均需小于该值。
-    fine_tolerance_px: 1.5
-    # 控制恢复阈值（迟滞带）：当误差超过 2.0px 时，PID 才会重新介入控制。
-    # 这防止了在 1.5px 附近因像素抖动而反复“启动-停止”伺服。
-    control_resume_tolerance_px: 2.0
+    # 仿真 YOLO 分割中心在静止时约有 2~3px 抖动。以 4px 圆形误差作为成功
+    # 半径，在 1.30m / fx=1079px 时约为 4.8mm，仍明显严于 ±8px 的喷洒
+    # 验收线；1.5px 会使已稳定的真实目标永远无法完成稳定计时。
+    fine_tolerance_px: 4.0
+    # 6px 迟滞带防止 4px 附近的分割抖动反复启动/停止控制。
+    control_resume_tolerance_px: 6.0
 
     # 稳定时间：误差连续保持在 `fine_tolerance_px` 内的秒数，达到此值才上报对齐成功。
     stable_duration_sec: 0.50
@@ -94,12 +96,12 @@ wvcsc_visual_servo:
     desired_offset_u_px: 0.0
     desired_offset_v_px: 0.0
 
-    # 固定1m工距的喷嘴轴线投影补偿。任何CameraInfo/TF/几何异常均拒绝伺服，
+    # 仿真固定 1.30m 工距的喷嘴轴线投影补偿。任何CameraInfo/TF/几何异常均拒绝伺服，
     # 禁止退化到图像中心后误喷。
     aim_compensation_enabled: true
     aim_range_source: fixed
-    aim_fixed_range_m: 1.0
-    aim_range_tolerance_m: 0.05
+    aim_fixed_range_m: 1.30
+    aim_range_tolerance_m: 0.20
     aim_nozzle_frame: spray_nozzle_link
     aim_min_forward_axis_z: 0.2
     aim_image_margin_px: 20.0
@@ -117,9 +119,12 @@ wvcsc_visual_servo:
     # ----------------------------------------------------------------------
     # 6. PID 控制器参数（图像平面 XY 轴独立控制）
     # ----------------------------------------------------------------------
-    # 比例增益 (KP=4.0) 较高，以确保响应速度，让目标快速进入对准区域。
-    pid_kp_xy: 4.00
-    # 积分增益 (KI=0.0) 关闭。在视觉伺服中，静差通常在 1.5px 以内，无需积分消除。
+    # 像素误差会先除以焦距变为弧度。Gazebo 实测 8~15px 残差在 KP=4.0 时
+    # 只有约 0.03~0.05rad/s，4 秒内无法收敛；KP=12.0 仍受 0.45rad/s 上限、
+    # MoveIt Servo 碰撞检查、奇异性与关节限位保护共同约束。
+    pid_kp_xy: 12.00
+    # 积分增益 (KI=0.0) 关闭。喷嘴几何补偿与 MoveIt 重心已消除稳态大误差，
+    # 仅由比例和微分项完成 4px 内的稳定对准。
     pid_ki_xy: 0.0
     # 微分增益 (KD=0.005) 很小，用于补偿视觉运动产生的微小阻尼。
     pid_kd_xy: 0.005
@@ -172,12 +177,12 @@ wvcsc_visual_servo:
     # 9. 停止与状态码管理
     # ----------------------------------------------------------------------
     # 停止前发送零速度指令的数量。
-    # 8 条零指令 / 30 Hz ≈ 0.267 秒。在执行 `stop_servo` 前，先发布足够的刹车指令，
-    # 确保底层控制器完全停车。
+    # 8 条零指令 / 30 Hz ≈ 0.267 秒。每个对齐 Action 结束时发布，确保
+    # 底层控制器完全停车；下一颗果实直接复用已经启动的 Servo 循环。
     zero_command_count: 8
 
-    # 服务通讯超时。
-    service_timeout_sec: 2.0
+    # 首次 start 单独允许等待 Servo 完整状态。
+    initial_start_timeout_sec: 12.0
 
     # MoveIt Servo 状态码分类策略（需与 `servo_status_policy.py` 保持一致）。
     # 减速码 (1, 3)：接近奇异点/碰撞，视觉节点降速但继续运行。

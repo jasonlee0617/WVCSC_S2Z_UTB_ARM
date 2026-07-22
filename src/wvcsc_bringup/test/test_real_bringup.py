@@ -256,3 +256,18 @@ def test_arm_base_docking_offset_matches_integrated_urdf():
     assert parameters['arm_base_forward_offset_m'] == pytest.approx(-0.40)
     assert parameters['arm_base_left_offset_m'] == pytest.approx(0.0)
     assert 'name="arm_mount_xyz" default="-0.40 0 0"' in xacro
+
+
+def test_real_arm_keeps_camera_clearance_and_servo_collision_checks():
+    arm_parameters = yaml.safe_load((
+        PACKAGE / 'config' / 'real' / 'arm_task_real.yaml'
+    ).read_text(encoding='utf-8'))['wvcsc_spray_task']['ros__parameters']
+    servo_parameters = yaml.safe_load((
+        PACKAGE / 'config' / 'real' / 'moveit_servo_real.yaml'
+    ).read_text(encoding='utf-8'))
+
+    assert arm_parameters['camera_height_min_m'] == pytest.approx(0.20)
+    assert arm_parameters['camera_height_max_m'] == pytest.approx(0.40)
+    assert arm_parameters['camera_height_step_m'] == pytest.approx(0.10)
+    assert 'observation_min_camera_z_in_base_m' not in arm_parameters
+    assert servo_parameters['check_collisions'] is True

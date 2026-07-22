@@ -143,18 +143,13 @@ def completion_feedback_allowed(result_code):
     }
 
 
-def target_pixel_error(
-        center_u, center_v, image_width, image_height, desired_offset_u_px,
-        desired_offset_v_px):
-    """计算目标相对于图像中心+偏置的像素误差。"""
-    desired_u = float(image_width) / 2.0 + float(desired_offset_u_px)
-    desired_v = float(image_height) / 2.0 + float(desired_offset_v_px)
+def target_pixel_error(center_u, center_v, desired_u, desired_v):
+    """Compute error against the calibrated nozzle-axis aim pixel."""
     return float(center_u) - desired_u, float(center_v) - desired_v
 
 
 def target_requires_recenter(
-        center_u, center_v, image_width, image_height, desired_offset_u_px,
-        desired_offset_v_px, maximum_error_px):
+        center_u, center_v, desired_u, desired_v, maximum_error_px):
     """
     判断二维目标误差是否超出了允许的半径（圆范数）。
 
@@ -162,8 +157,7 @@ def target_requires_recenter(
     欧氏范数可避免 ``(1.9, 1.4)`` px 被误当作满足 ``< 2 px`` 的情况。
     """
     error_u, error_v = target_pixel_error(
-        center_u, center_v, image_width, image_height, desired_offset_u_px,
-        desired_offset_v_px)
+        center_u, center_v, desired_u, desired_v)
     return math.hypot(error_u, error_v) > float(maximum_error_px)
 
 
@@ -246,15 +240,16 @@ class TargetFlowMixin:
             self._target_valid_frames += 1
 
             # 检查目标是否处于可进行 IBVS 的工作空间内（像素误差小于 workspce_px）
+            desired_aim = self._active_aim_pixel(
+                message.image_width, message.image_height)
             reliable_in_workspace = (
+                desired_aim is not None
+                and
                 math.isfinite(message.confidence)
                 and float(message.confidence) >=
                 self._recenter_config['post_min_confidence']
                 and not target_requires_recenter(
-                    message.center_u, message.center_v, message.image_width,
-                    message.image_height,
-                    self._recenter_config['desired_offset_u_px'],
-                    self._recenter_config['desired_offset_v_px'],
+                    message.center_u, message.center_v, *desired_aim,
                     self._recenter_config['workspace_px']))
 
             if reliable_in_workspace:
