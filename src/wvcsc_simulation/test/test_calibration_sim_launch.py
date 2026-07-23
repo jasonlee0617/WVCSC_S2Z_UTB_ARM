@@ -137,20 +137,80 @@ def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
     assert config['auto_start'] is True
     assert config['velocity_scaling'] == pytest.approx(0.20)
     assert config['acceleration_scaling'] == pytest.approx(0.20)
+    assert config['joint_stationary_max_position_delta_rad'] == pytest.approx(0.0001)
+    assert config['joint_stationary_window_sec'] == pytest.approx(0.30)
+    assert config['joint_stationary_timeout_sec'] == pytest.approx(5.0)
     assert config['marker_position_base_m'] == pytest.approx([0.0, 0.25, 0.002])
+    assert config['seed_height_candidates_m'] == pytest.approx(
+        [0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20])
+    assert config['seed_radial_backoff_candidates_m'] == pytest.approx(
+        [0.0, 0.05, 0.10, 0.15, 0.20])
+    assert config['marker_distance_min_m'] == pytest.approx(0.20)
     assert 'minimum_corner_margin_px' not in config
+    assert 'use_marker_position_prior_for_candidate_generation' not in config
+    assert 'maximum_center_error_px' not in config
     assert config['output_file'].startswith('$HOME/WVCSC_S2Z_UTB_ARM/src/')
     assert config['marker_size_m'] == pytest.approx(0.070)
-    assert config['ground_truth_max_translation_error_m'] == pytest.approx(0.004)
+    assert config['minimum_samples'] == 18
+    assert config['minimum_solution_samples'] == 18
+    assert config['minimum_safe_candidates'] == 30
+    assert config['ground_truth_max_translation_error_m'] == pytest.approx(0.003)
     assert config['ground_truth_max_xy_error_m'] == pytest.approx(0.002)
     assert config['ground_truth_max_rotation_error_deg'] == pytest.approx(1.0)
     assert config['maximum_marker_position_rms_m'] == pytest.approx(0.002)
     assert config['maximum_marker_rotation_rms_deg'] == pytest.approx(0.50)
-    assert config['maximum_algorithm_translation_delta_m'] == pytest.approx(0.005)
+    assert config['maximum_algorithm_translation_delta_m'] == pytest.approx(0.003)
     assert config['maximum_algorithm_rotation_delta_deg'] == pytest.approx(1.0)
+    assert config['fixed_marker_refinement_enabled'] is True
+    assert config['fixed_marker_refinement_translation_sigma_m'] == pytest.approx(0.00050)
+    assert config['fixed_marker_refinement_rotation_sigma_deg'] == pytest.approx(0.30)
+
+
+def test_calibration_controller_requires_zero_velocity_before_goal_completion():
+    controller_config = (Path(__file__).parents[2] / 'wvcsc_description' / 'config' /
+                         'ros2_controllers.yaml').read_text(encoding='utf-8')
+    assert 'allow_nonzero_velocity_at_trajectory_end: false' in controller_config
 
 
 def test_vehicle_calibration_world_is_minimal_and_zero_gravity():
     world = ElementTree.parse(ROOT / 'worlds' / 'calibration_vehicle.world').getroot()
     assert world.find("./world/model[@name='calibration_desk']") is None
     assert world.findtext('./world/physics/gravity').split() == ['0', '0', '0']
+
+
+def test_aruco_marker_cells_match_the_declared_70mm_square():
+    marker = ElementTree.parse(
+        ROOT / 'models' / 'aruco_marker' / 'model.sdf').getroot()
+    cells = [visual for visual in marker.findall('.//visual')
+             if 'black' in visual.attrib['name']]
+    assert cells
+    bounds = []
+    for cell in cells:
+        x, _y, z, *_rpy = (float(value) for value in cell.findtext('pose').split())
+        sx, _sy, sz = (float(value) for value in
+                       cell.findtext('./geometry/box/size').split())
+        assert sx == pytest.approx(0.010)
+        assert sz == pytest.approx(0.010)
+        bounds.append((x - sx / 2.0, x + sx / 2.0,
+                       z - sz / 2.0, z + sz / 2.0))
+    assert max(item[1] for item in bounds) - min(item[0] for item in bounds) == \
+        pytest.approx(0.070)
+    assert max(item[3] for item in bounds) - min(item[2] for item in bounds) == \
+        pytest.approx(0.070)
+
+
+def test_aruco_marker_cells_are_flush_with_the_board_render_surface():
+    marker = ElementTree.parse(
+        ROOT / 'models' / 'aruco_marker' / 'model.sdf').getroot()
+    backing_depth = float(marker.findtext(
+        ".//visual[@name='white_backing']/geometry/box/size").split()[1])
+    cells = [visual for visual in marker.findall('.//visual')
+             if 'black' in visual.attrib['name']]
+    assert cells
+    for cell in cells:
+        _x, y, _z, *_rpy = (float(value) for value in cell.findtext('pose').split())
+        _sx, depth, _sz = (float(value) for value in
+                           cell.findtext('./geometry/box/size').split())
+        protrusion = abs(y) + depth / 2.0 - backing_depth / 2.0
+        assert depth == pytest.approx(0.00002)
+        assert protrusion == pytest.approx(0.00002)

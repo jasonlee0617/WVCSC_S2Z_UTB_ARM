@@ -60,7 +60,11 @@ def stable_marker_window(
         return False, 'marker is too small in the image'
     distances = [_norm(obs.translation) for obs in window]
     if min(distances) < float(min_distance_m) or max(distances) > float(max_distance_m):
-        return False, 'marker distance is outside the calibration range'
+        return False, (
+            'marker distance is outside the calibration range: '
+            f'observed=[{min(distances):.3f}, {max(distances):.3f}]m '
+            f'required=[{float(min_distance_m):.3f}, '
+            f'{float(max_distance_m):.3f}]m')
     center_u = [obs.center_px[0] for obs in window]
     center_v = [obs.center_px[1] for obs in window]
     center_std = max(statistics.pstdev(center_u), statistics.pstdev(center_v))

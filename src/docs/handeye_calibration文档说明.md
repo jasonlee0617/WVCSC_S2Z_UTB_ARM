@@ -51,7 +51,7 @@ ros2 launch wvcsc_simulation calibration_sim.launch.py
 -> MoveIt / ArUco / easy_handeye2 -> 自动采集
 ```
 
-采集器先根据 marker 先验生成一组更高、更远、更偏移的初始 anchor 候选，再依次执行碰撞 IK、Jacobian 条件数、关节余量和 OMPL 门控。它不再使用固定关节角作为初始观察位。
+采集器先根据 marker 先验生成已验证可达的初始 anchor 候选，再依次执行碰撞 IK、Jacobian 条件数、关节余量和 OMPL 门控。它不使用固定关节角作为初始观察位，也不会降低安全阈值来换取可见性。
 
 仿真默认输出：
 
@@ -71,7 +71,29 @@ compressedDepth 只适用于深度图。若终端出现
 `compressed_depth_image_transport` 提示 RGB 图像不能压缩为深度图，这是
 rqt 传输方式选择噪声，不是 ArUco 检测或手眼标定算法失败。
 
-22 个样本、三算法共识、真值平移范数 `<= 4 mm`、X/Y 单轴误差 `<= 2 mm`、旋转误差 `<= 1 deg` 均通过后才允许进入实机标定。
+至少 18 个有效样本、目标 22 个样本、三算法共识、真值平移范数 `<= 3 mm`、X/Y 单轴误差 `<= 2 mm`、旋转误差 `<= 1 deg` 均通过后才允许写出仿真标定结果。候选可达性只要求满足 18 个样本下限，不会因为未预先找到完整 22 个安全候选而拒绝启动采样；每个视角族仍会预规划当前配置的前 3 个安全候选。若需安全恢复换位，已通过安全门控的候选会合并为同一采样池，为图像质量拒绝保留冗余；每次执行前仍重新核验/规划，不复用失效轨迹。采样阶段会尽可能收集到 22 个。真值只用于仿真验收，不参与样本选择或求解。
+
+OpenCV 的 Park/Horaud/Tsai-Lenz 闭式解首先提供确定性初值；随后默认启用固定标定码一致性细化。它将每条样本的 `base -> tool0 -> camera -> marker` 反投影到同一个未知的 `base -> marker`，最小化这些测得位姿之间的平移和旋转残差。这一步只使用样本本身、不会读取仿真外参真值，也不替代三算法共识、异常样本剔除或最终 `3 mm / XY 2 mm / 1 deg` 门控。仿真使用 `0.25 mm / 1 deg` 的测量权重；实机默认权重更保守，若需调整必须保留现场复测记录。
+
+每一条样本还必须满足**末端真实静止**：`arm_controller` 以
+`allow_nonzero_velocity_at_trajectory_end: false` 结束轨迹；采集器在既有
+`settle_time_sec` 后，继续要求连续 `joint_stationary_window_sec`（仿真为
+`0.30 s`）内六关节位置最大跨度不超过
+`joint_stationary_max_position_delta_rad`（仿真为 `0.0001 rad`）。这一步直接验证
+`tool0` TF 已收敛，防止“相机已经取到 PnP 图像、机械臂位置仍在变化”造成错时配对；
+超时只会拒绝当前候选，绝不会降低 3 mm / 2 mm / 1 deg 验收门槛。Gazebo 当前的
+`/joint_states.velocity` 与相邻位置差分不一致，因此它只记录为诊断，不作为通过
+判据；实机仍应根据位置测量噪声做有记录的调整，而不能为通过一次采样而盲目放宽。
+
+仿真配置允许用 `acquisition_corner_margin_px: 12` 先获取仍完整可见、但靠近画面边缘的标定码，再使用原有碰撞检查和最多 `3 × 6 mm` 的图像平面重心校正将其移回主视野。`maximum_center_error_px: 130` 只决定何时值得执行这一步校正；它不是样本质量或精度门槛。注意：若码的角点距画面边缘仍小于 `minimum_corner_margin_px: 60`，即使中心偏差小于 130 px，也必须继续校正，不能绕过严格边缘门控。车载安全锚点的实测 PnP 距离稳定在约 `0.250 m`；原 `0.25 m` 下限会因亚像素 PnP 的浮点扰动误拒绝同一物理姿态，因此仅仿真配置使用 `marker_distance_min_m: 0.24`。这不是对样本精度的放弃：每次写入样本前仍重新执行 `minimum_corner_margin_px: 60`、`minimum_marker_side_px: 90`、距离、角点尺度、平面稳定度和姿态稳定度的严格检查；仿真真值 `3 mm / XY 2 mm / 1 deg` 门控不变。实机仍保持 `marker_distance_min_m: 0.25`，除非现场数据复现相同边界问题并经精度验收后再调整。
+
+仿真还设置 `minimum_safe_candidates: 30`：这是安全轨迹的储备数量，不是可写入样本数。这样当少数候选在最终图像门控、重心校正或多样性检查中被拒绝时，采集器会换到另一安全锚点继续生成候选，并继续尝试剩余的预筛安全轨迹；`maximum_samples` 限制的是已写入样本数，而不是尝试次数。流程仍坚持 `minimum_samples: 18` 和上述全部严格质量、真值门控。实机保持默认候选储备，需根据现场成功率单独评估后再修改。
+
+固定标定码一致性细化使用 `fixed_marker_refinement_translation_sigma_m` 与 `fixed_marker_refinement_rotation_sigma_deg` 表示观测残差的尺度，而不是精度门槛。Gazebo 当前实测样本的固定码 RMS 约为 `0.38 mm / 0.31 deg`，因此仿真采用 `0.50 mm / 0.30 deg`；它避免把平移残差过度加权、同时保留可靠的姿态约束。该细化只使用每个样本都应满足的 `base→tool→camera→marker = 固定 base→marker` 关系，绝不读取 `ground_truth_*` 参数参与解算；真值仅在结果后用于 `3 mm / XY 2 mm / 1 deg` 的验收。
+
+仿真还启用 `use_marker_position_prior_for_candidate_generation: true`。该位置与 `calibration_sim.launch.py` 的 Gazebo 标定码生成位置来自同一 `marker_position_base_m`，只用来在机械臂运动过程中稳定地生成候选视角，避免由延迟 PnP TF 重新规划到画面边缘。它不写入 easy_handeye2 样本、不参与 OpenCV 求解，也不替代最终图像 PnP 质量检查；实机保持 `false`，始终使用测得的 `base -> calibration_aruco` TF。仿真候选只允许 `camera_centering_scale_candidates >= 0.25`：不能为增加 IK 数量退回 `0.0`，否则 C10 的偏置主点会让标定码系统性偏离图像几何中心约 165 px。
+
+图像重心校正的目标统一为图像几何中心 `(width/2, height/2)`，而不是相机内参主点 `(cx, cy)`。这是因为候选视角生成已使用 C10 的 `cx/cy` 偏移补偿，使标定码落在几何中心；两个阶段若混用目标点，会把正确画面再向下移动约 165 px，导致严格边缘门控错误拒绝。
 
 ## 3. 实机自动标定
 
@@ -142,6 +164,8 @@ package://wvcsc_c10_camera/config/c10_intrinsics.yaml
 ```
 
 Gazebo 渲染使用其中的 `fx`、`fy`、`cx`、`cy` 与畸变参数。Gazebo Classic 的 `gazebo_ros_camera` 发布的 `CameraInfo.K` 只能使用单一焦距，因此 K 中 `fy` 近似为 `fx`；`P_fy` 仍使用真实 fy。该限制已在仿真真值门控中保留，不额外引入 CameraInfo 中继节点。
+
+仿真 ArUco 模型的黑白单元以 `20 um` 的最小渲染偏移贴合白色底板，避免 z-fighting；不得恢复为毫米级凸起方块。后者会在斜视角形成侧壁和阴影，使角点位置出现系统性偏差，并直接损害手眼标定的旋转精度。
 
 ## 6. 运行前检查
 

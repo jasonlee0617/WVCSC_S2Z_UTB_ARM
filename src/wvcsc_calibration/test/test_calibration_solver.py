@@ -9,6 +9,7 @@ from wvcsc_calibration.calibration_solver import (
     invert_transform,
     matrix_quaternion,
     quaternion_matrix,
+    refine_handeye_fixed_marker,
     solve_handeye,
 )
 
@@ -64,6 +65,34 @@ def test_solver_preserves_ros_forward_sample_convention():
         translation, rotation = transform_error(transform, expected)
         assert translation < 1.0e-6
         assert rotation < 1.0e-4
+
+
+def test_fixed_marker_refinement_preserves_an_exact_handeye_solution():
+    expected = ((-0.055, 0.0, -0.10), (0.0, 0.0, -math.sqrt(0.5), math.sqrt(0.5)))
+    base_marker = ((0.0, 0.25, 0.003), (0.0, 0.0, 1.0, 0.0))
+    samples = []
+    for index in range(8):
+        base_tool = (
+            (0.08 + 0.014 * index, -0.06 + 0.012 * (index % 4),
+             0.78 + 0.018 * (index % 3)),
+            matrix_quaternion(_rpy(
+                math.radians(-20 + 6 * index),
+                math.radians(-15 + 5 * (index % 5)),
+                math.radians(-25 + 9 * (index % 6)))),
+        )
+        camera_marker = _compose(
+            _compose(invert_transform(expected), invert_transform(base_tool)),
+            base_marker)
+        samples.append(SimpleNamespace(
+            robot=_transform(base_tool), tracking=_transform(camera_marker)))
+
+    refined, details = refine_handeye_fixed_marker(
+        samples, expected, translation_sigma_m=0.00025,
+        rotation_sigma_deg=1.0, max_iterations=25)
+    translation, rotation = transform_error(refined, expected)
+    assert translation < 1.0e-8
+    assert rotation < 1.0e-5
+    assert details['final_cost'] <= details['initial_cost']
 
 
 def test_invert_transform_round_trip_preserves_rigid_pose():

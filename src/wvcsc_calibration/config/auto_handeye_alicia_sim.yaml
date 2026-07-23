@@ -7,26 +7,51 @@ auto_calibration_collector:
     output_file: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye_sim.yaml
     velocity_scaling: 0.20
     acceleration_scaling: 0.20
+    # Gazebo 的 joint_states.velocity 与位置差分不一致，静止性以更可靠的
+    # 关节位置收敛窗口判定，避免非零末速度造成图像 PnP 与 TF 的时序错配。
+    joint_stationary_max_position_delta_rad: 0.0001
+    joint_stationary_window_sec: 0.30
+    joint_stationary_timeout_sec: 5.0
     marker_position_base_m: [0.0, 0.25, 0.002]
+    # These are tool0 heights, not camera heights.  They are selected from the
+    # Alicia-M reachable tool workspace and are filtered by IK/OMPL before any
+    # image is used.  The marker distance and image gates remain authoritative;
+    # no tool0->camera value is used to construct these targets.
+    seed_height_candidates_m: [0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20]
+    seed_radial_backoff_candidates_m: [0.0, 0.05, 0.10, 0.15, 0.20]
+    seed_tangential_offset_candidates_m: [0.0, -0.05, 0.05, -0.10, 0.10]
+    # 工具空间倾斜可见性探针会把相机光心移近标记；仿真允许 0.20 m
+    # 的有效 PnP 距离。距离仍受最大值、标记像素尺寸、边缘、稳定性、
+    # 共识及最终真值精度门控约束，不参与候选姿态的生成。
+    marker_distance_min_m: 0.20
     marker_size_m: 0.070
     stable_marker_pose_topic: /calibration/stable_marker_pose
     stable_tf_settle_sec: 0.15
-
     # The simulation benchmark gathers additional well-separated samples so
     # that all three OpenCV solvers receive enough rotational excitation.
+    minimum_samples: 18
+    minimum_solution_samples: 18
     target_samples: 22
     maximum_samples: 30
-    # Keep the marker near the optical centre while retaining deliberate
-    # off-axis calibration views for rotational excitation.
-    maximum_center_error_px: 80.0
-
+    # 碰撞 IK/奇异/关节余量通过，只说明轨迹可执行；最终仍可能因严格图像
+    # 边缘、碰撞检查重心校正或位姿多样性被拒绝。为确保保留至少 18 个
+    # 有效样本，仿真先储备 30 条安全候选，而不是放低任何最终质量门槛。
+    minimum_safe_candidates: 30
     # 仿真基准有已知的 tool0->C10 外参，因此采样质量门槛比实机更严：
     # 仅允许内部一致的 marker 位姿集合进入 OpenCV 手眼求解。该门槛
     # 只依据标记位姿残差和算法共识，不使用真值挑选样本。
     maximum_marker_position_rms_m: 0.002
     maximum_marker_rotation_rms_deg: 0.50
-    maximum_algorithm_translation_delta_m: 0.005
+    maximum_algorithm_translation_delta_m: 0.003
     maximum_algorithm_rotation_delta_deg: 1.0
+    # 当前 19 样本回归中，固定码残差 RMS 约为 0.38 mm / 0.31 deg。以前
+    # 误把位置 sigma 设为 0.25 mm、旋转 sigma 设为 1 deg，会过度相信
+    # 平移残差而低估 PnP 姿态约束，导致 X/Y 出现系统性偏置。以下数值与
+    # 实测散布同量级，仍只最小化固定码一致性，不把仿真真值送入求解器。
+    fixed_marker_refinement_enabled: true
+    fixed_marker_refinement_translation_sigma_m: 0.00050
+    fixed_marker_refinement_rotation_sigma_deg: 0.30
+    fixed_marker_refinement_max_iterations: 25
 
     # 默认仿真使用完整车体碰撞模型，车顶已是规划场景中的真实碰撞边界。
     calibration_surface_enabled: false
@@ -34,6 +59,6 @@ auto_calibration_collector:
     ground_truth_check_enabled: true
     ground_truth_translation_m: [-0.055, 0.0, -0.10]
     ground_truth_rotation_xyzw: [0.0, 0.0, -0.7071067811865476, 0.7071067811865476]
-    ground_truth_max_translation_error_m: 0.004
+    ground_truth_max_translation_error_m: 0.003
     ground_truth_max_xy_error_m: 0.002
     ground_truth_max_rotation_error_deg: 1.0

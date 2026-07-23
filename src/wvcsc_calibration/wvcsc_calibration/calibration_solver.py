@@ -100,6 +100,128 @@ def invert_transform(transform):
     )
 
 
+def _components_matrix(transform):
+    """Return a homogeneous matrix from a ROS-transform component tuple."""
+    translation, quaternion = transform
+    matrix = np.eye(4, dtype=float)
+    matrix[:3, :3] = quaternion_matrix(quaternion)
+    matrix[:3, 3] = np.asarray(translation, dtype=float).reshape(3)
+    return matrix
+
+
+def _matrix_components(matrix):
+    matrix = np.asarray(matrix, dtype=float)
+    return (
+        tuple(float(value) for value in matrix[:3, 3]),
+        matrix_quaternion(matrix[:3, :3]),
+    )
+
+
+def _se3_increment(values):
+    """Return the local six-vector increment used by the refinement loop."""
+    values = np.asarray(values, dtype=float).reshape(6)
+    matrix = np.eye(4, dtype=float)
+    rotation, _jacobian = cv2.Rodrigues(values[3:].reshape(3, 1))
+    matrix[:3, :3] = rotation
+    matrix[:3, 3] = values[:3]
+    return matrix
+
+
+def _rotation_vector(matrix):
+    vector, _jacobian = cv2.Rodrigues(np.asarray(matrix, dtype=float))
+    return np.asarray(vector, dtype=float).reshape(3)
+
+
+def refine_handeye_fixed_marker(
+        samples, initial_transform, *, translation_sigma_m=0.001,
+        rotation_sigma_deg=1.0, max_iterations=25):
+    """Refine an OpenCV hand-eye seed using the fixed-marker constraint.
+
+    For each sample, ``base -> tool -> camera -> marker`` must be the same
+    unknown ``base -> marker`` transform.  OpenCV's closed-form hand-eye
+    methods are useful deterministic seeds, but with correlated wrist motion
+    their translation solution can be weakly observable even when every
+    individual PnP pose is accurate.  This small Gauss-Newton loop minimizes
+    that physical fixed-marker residual directly.  It never receives the
+    simulation mount truth and is applicable to the real setup as well.
+    """
+    if len(samples) < 3:
+        raise ValueError('at least three samples are required for refinement')
+    translation_sigma = float(translation_sigma_m)
+    rotation_sigma = math.radians(float(rotation_sigma_deg))
+    iterations = int(max_iterations)
+    if (not math.isfinite(translation_sigma) or translation_sigma <= 0.0
+            or not math.isfinite(rotation_sigma) or rotation_sigma <= 0.0
+            or iterations < 1):
+        raise ValueError('fixed-marker refinement parameters are invalid')
+
+    robots = [_components_matrix(transform_components(sample.robot))
+              for sample in samples]
+    trackings = [_components_matrix(transform_components(sample.tracking))
+                 for sample in samples]
+    camera_mount = _components_matrix(initial_transform)
+    implied_markers = [
+        robot @ camera_mount @ tracking
+        for robot, tracking in zip(robots, trackings)]
+    marker = np.eye(4, dtype=float)
+    marker[:3, 3] = np.mean(
+        [implied[:3, 3] for implied in implied_markers], axis=0)
+    # The OpenCV seed is already close.  The first implied orientation avoids
+    # adding another quaternion-average convention to the numerical solver.
+    marker[:3, :3] = implied_markers[0][:3, :3]
+
+    def residual(parameters):
+        current_mount = camera_mount @ _se3_increment(parameters[:6])
+        current_marker = marker @ _se3_increment(parameters[6:])
+        values = []
+        for robot, tracking in zip(robots, trackings):
+            implied = robot @ current_mount @ tracking
+            values.extend(
+                (implied[:3, 3] - current_marker[:3, 3]) /
+                translation_sigma)
+            values.extend(_rotation_vector(
+                current_marker[:3, :3].T @ implied[:3, :3]) /
+                rotation_sigma)
+        return np.asarray(values, dtype=float)
+
+    parameters = np.zeros(12, dtype=float)
+    initial_cost = float(residual(parameters) @ residual(parameters))
+    final_cost = initial_cost
+    completed_iterations = 0
+    for iteration in range(iterations):
+        current = residual(parameters)
+        current_cost = float(current @ current)
+        jacobian = np.empty((len(current), len(parameters)), dtype=float)
+        for index in range(len(parameters)):
+            epsilon = 1.0e-6 if index % 6 < 3 else 1.0e-5
+            plus, minus = parameters.copy(), parameters.copy()
+            plus[index] += epsilon
+            minus[index] -= epsilon
+            jacobian[:, index] = (
+                residual(plus) - residual(minus)) / (2.0 * epsilon)
+        step, _residuals, _rank, _singular = np.linalg.lstsq(
+            jacobian, -current, rcond=None)
+        accepted = False
+        for scale in (1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125):
+            trial = parameters + scale * step
+            trial_values = residual(trial)
+            trial_cost = float(trial_values @ trial_values)
+            if trial_cost < current_cost:
+                parameters, final_cost = trial, trial_cost
+                completed_iterations = iteration + 1
+                accepted = True
+                break
+        if not accepted or float(np.linalg.norm(scale * step)) < 1.0e-8:
+            break
+
+    refined = camera_mount @ _se3_increment(parameters[:6])
+    return _matrix_components(refined), {
+        'initial_cost': initial_cost,
+        'final_cost': final_cost,
+        'iterations': completed_iterations,
+    }
+
+
 def solve_handeye(samples, algorithm_names):
     """Return ``{algorithm: tool0_to_camera}`` from ROS forward-pose samples."""
     if len(samples) < 3:

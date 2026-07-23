@@ -18,22 +18,20 @@ from wvcsc_arm_task.observation import (
 @dataclass(frozen=True)
 class CalibrationCandidate:
     candidate_id: str
-    camera_position: tuple
-    camera_quaternion: tuple
     tool_position: tuple
     tool_quaternion: tuple
 
 
 def generate_initial_anchor_candidates(
-        marker_position, tool_to_camera_translation, tool_to_camera_quaternion,
-        height_candidates, radial_backoff_candidates,
-        tangential_offset_candidates, aim_yaw_deg=0.0, aim_pitch_deg=0.0):
-    """Generate marker-prior views before the marker is visible in C10.
+        marker_position, height_candidates, radial_backoff_candidates,
+        tangential_offset_candidates):
+    """Generate tool targets before the marker is visible in C10.
 
-    The marker is fixed on the vehicle relative to ``alicia_base_link``.  The
-    first view therefore needs no camera-to-marker TF, but it must still point
-    C10 at the configured marker centre and pass the normal MoveIt safety gate
-    in the caller.
+    The initial candidates are deliberately expressed in tool coordinates.  No
+    tool-to-camera transform is needed: the primary candidates place tool0
+    directly above the known marker position with tool +Z pointing down.  The
+    radial/tangential variants are reachability fallbacks and point tool +Z at
+    the marker.
     """
     marker = tuple(float(value) for value in marker_position)
     if len(marker) != 3 or not all(math.isfinite(value) for value in marker):
@@ -58,27 +56,41 @@ def generate_initial_anchor_candidates(
                 offset = float(offset)
                 if not math.isfinite(offset):
                     raise ValueError('anchor tangential offsets must be finite')
-                camera = (
+                tool = (
                     marker[0] - radial[0] * backoff + tangential[0] * offset,
                     marker[1] - radial[1] * backoff + tangential[1] * offset,
                     marker[2] + height,
                 )
-                camera_quaternion = _camera_look_at(
-                    marker, camera, 0.0, (1.0, 0.0, 0.0))
-                camera = _camera_position_for_aim(
-                    marker, camera, camera_quaternion,
-                    aim_yaw_deg, aim_pitch_deg)
-                tool_position, tool_quaternion = tool_pose_from_camera_pose(
-                    camera, camera_quaternion,
-                    tool_to_camera_translation, tool_to_camera_quaternion)
+                if abs(backoff) <= 1.0e-12 and abs(offset) <= 1.0e-12:
+                    # Primary anchor: tool +Z is exactly world-down.  A fixed
+                    # yaw is sufficient; IK/condition/margin ranking chooses
+                    # the safe height.
+                    tool_quaternion = _tool_z_down()
+                else:
+                    tool_quaternion = _camera_look_at(
+                        marker, tool, 0.0, (1.0, 0.0, 0.0))
                 candidates.append(CalibrationCandidate(
                     candidate_id=(
                         f'initial_h{height:.3f}_r{backoff:.3f}_t{offset:+.3f}'),
-                    camera_position=camera,
-                    camera_quaternion=camera_quaternion,
-                    tool_position=tool_position,
+                    tool_position=tool,
                     tool_quaternion=tool_quaternion,
                 ))
+                if abs(backoff) <= 1.0e-12 and abs(offset) <= 1.0e-12:
+                    # The direct pose is always tried first and remains the
+                    # requested nominal Z-down pose.  These two tool-space
+                    # tilt fallbacks are only visibility probes: the exact
+                    # tool-to-camera transform is intentionally not used to
+                    # choose either pose.  The strict image gate decides
+                    # whether a fallback is retained.
+                    for tilt in (-24.0, 24.0):
+                        candidates.append(CalibrationCandidate(
+                            candidate_id=(
+                                f'initial_h{height:.3f}_r{backoff:.3f}'
+                                f'_t{offset:+.3f}_yaw{tilt:+.0f}'),
+                            tool_position=tool,
+                            tool_quaternion=_local_tilt(
+                                _tool_z_down(), tilt, 0.0),
+                        ))
     return tuple(candidates)
 
 
@@ -122,6 +134,11 @@ def _camera_look_at(marker, camera, roll_deg, preferred_x):
     return quaternion_from_matrix(matrix)
 
 
+def _tool_z_down():
+    """Return a tool pose orientation whose local +Z points world-down."""
+    return (1.0, 0.0, 0.0, 0.0)
+
+
 def _quaternion_multiply(left, right):
     """Compose parent-to-local rotations stored as ``(x, y, z, w)``."""
     lx, ly, lz, lw = (float(value) for value in left)
@@ -144,31 +161,9 @@ def _local_tilt(quaternion, yaw_deg, pitch_deg):
         quaternion, _quaternion_multiply(yaw_quaternion, pitch_quaternion))
 
 
-def _camera_position_for_aim(
-        marker, camera, camera_quaternion, yaw_deg, pitch_deg):
-    """Centre the target by translation while preserving wrist orientation."""
-    yaw = math.radians(float(yaw_deg))
-    pitch = math.radians(float(pitch_deg))
-    if abs(math.cos(pitch)) <= 1.0e-6:
-        raise ValueError('camera aim pitch is invalid')
-    target_ray = _unit((
-        -math.tan(yaw) / math.cos(pitch),
-        math.tan(pitch),
-        1.0,
-    ))
-    world_ray = rotate_vector(target_ray, camera_quaternion)
-    distance = math.sqrt(sum(
-        (float(marker[index]) - float(camera[index])) ** 2
-        for index in range(3)))
-    return tuple(
-        float(marker[index]) - distance * world_ray[index]
-        for index in range(3))
-
-
 def generate_alicia_candidates(
-        marker_position, current_camera_position, current_camera_quaternion,
-        tool_to_camera_translation, tool_to_camera_quaternion,
-        include_fine=False, aim_yaw_deg=0.0, aim_pitch_deg=0.0):
+        marker_position, current_tool_position, current_tool_quaternion,
+        include_fine=False):
     """Generate baseline 21, or 49 excitation-expanded, marker-relative views.
 
     ``include_fine`` is intentionally opt-in.  The default set mirrors the
@@ -179,15 +174,18 @@ def generate_alicia_candidates(
     twelve small perturbations are then only a reachability fallback.
     """
     marker = tuple(float(value) for value in marker_position)
-    current = tuple(float(value) for value in current_camera_position)
+    current = tuple(float(value) for value in current_tool_position)
     relative = tuple(current[index] - marker[index] for index in range(3))
     radius = math.sqrt(sum(value * value for value in relative))
-    if not 0.20 <= radius <= 1.20:
+    # This is a tool-space reachability sanity bound, not the camera PnP
+    # distance gate.  The latter is checked from the measured image/PnP
+    # observation, so a short tool-to-marker radius must remain valid here.
+    if not 0.08 <= radius <= 1.20:
         raise ValueError(
-            f'initial camera-marker distance is unsafe: {radius:.3f} m')
+            f'initial tool-marker distance is unsafe: {radius:.3f} m')
     azimuth = math.atan2(relative[1], relative[0])
     elevation = math.asin(max(-1.0, min(1.0, relative[2] / radius)))
-    preferred_x = rotate_vector((1.0, 0.0, 0.0), current_camera_quaternion)
+    preferred_x = rotate_vector((1.0, 0.0, 0.0), current_tool_quaternion)
 
     specifications = [('seed', 0.0, 0.0, 0.0, 0.0)]
     specifications.extend(
@@ -222,8 +220,12 @@ def generate_alicia_candidates(
             ('wide_orbit_right_outer', 0.0, 24.0, 0.0, 16.0),
             ('wide_orbit_left_high', 0.0, -14.0, 4.0, -10.0),
             ('wide_orbit_right_high', 0.0, 14.0, 4.0, 10.0),
-            ('wide_tilt_left', 0.0, 0.0, 0.0, 0.0, 12.0, 0.0),
-            ('wide_tilt_right', 0.0, 0.0, 0.0, 0.0, -12.0, 0.0),
+            # The unknown camera translation can move a directly-down view
+            # toward the image edge.  These nominal tool-axis tilts deliberately
+            # span +/-18 deg so the strict image gate can retain a visible view
+            # without reconstructing tool0->camera from Gazebo truth.
+            ('wide_tilt_left', 0.0, 0.0, 0.0, 0.0, 18.0, 0.0),
+            ('wide_tilt_right', 0.0, 0.0, 0.0, 0.0, -18.0, 0.0),
             ('wide_tilt_up', 0.0, 0.0, 0.0, 0.0, 0.0, 10.0),
             ('wide_tilt_down', 0.0, 0.0, 0.0, 0.0, 0.0, -10.0),
             ('wide_tilt_left_up', 0.0, 0.0, 0.0, -8.0, 10.0, 8.0),
@@ -262,37 +264,163 @@ def generate_alicia_candidates(
             # 第一项必须是真实起始姿态，而不是重新构造的“近似 look-at”
             # 姿态。这样 q/Ctrl+C 回退基准和采样覆盖统计都与操作员确认的
             # 初始安全姿态一致。
-            camera = current
-            camera_quaternion = tuple(
-                float(value) for value in current_camera_quaternion)
+            tool = current
+            tool_quaternion = tuple(
+                float(value) for value in current_tool_quaternion)
         else:
             candidate_radius = radius + radial
             candidate_azimuth = azimuth + math.radians(horizontal_deg)
             candidate_elevation = elevation + math.radians(vertical_deg)
-            if (candidate_radius <= 0.20
-                    or abs(candidate_elevation) >= math.radians(80.0)):
+            if candidate_radius <= 0.08:
                 continue
+            # A tool pose directly above the marker has elevation +/-90 deg.
+            # Keep that primary pose intact, but clamp perturbed views to a
+            # usable orbit instead of dropping every horizontal/roll family.
+            if abs(candidate_elevation) >= math.radians(89.0):
+                candidate_elevation = math.copysign(
+                    math.radians(79.0), candidate_elevation)
             horizontal_radius = candidate_radius * math.cos(candidate_elevation)
-            camera = (
+            tool = (
                 marker[0] + horizontal_radius * math.cos(candidate_azimuth),
                 marker[1] + horizontal_radius * math.sin(candidate_azimuth),
                 marker[2] + candidate_radius * math.sin(candidate_elevation),
             )
-            camera_quaternion = _camera_look_at(
-                marker, camera, roll_deg, preferred_x)
-            camera = _camera_position_for_aim(
-                marker, camera, camera_quaternion,
-                aim_yaw_deg, aim_pitch_deg)
-            camera_quaternion = _local_tilt(
-                camera_quaternion, yaw_deg, pitch_deg)
-        tool_position, tool_quaternion = tool_pose_from_camera_pose(
-            camera, camera_quaternion,
-            tool_to_camera_translation, tool_to_camera_quaternion)
+            tool_quaternion = _camera_look_at(
+                marker, tool, roll_deg, preferred_x)
+            tool_quaternion = _local_tilt(
+                tool_quaternion, yaw_deg, pitch_deg)
         candidates.append(CalibrationCandidate(
             candidate_id=name,
-            camera_position=camera,
-            camera_quaternion=camera_quaternion,
+            tool_position=tool,
+            tool_quaternion=tool_quaternion,
+        ))
+    return candidates
+
+
+def generate_camera_centered_candidates(
+        marker_position, current_tool_position, current_tool_quaternion,
+        provisional_tool_to_camera, include_fine=False):
+    """Generate tool targets from a measured provisional camera mount.
+
+    ``provisional_tool_to_camera`` comes from bootstrap hand-eye samples, not
+    from the simulator mount.  The provisional transform only converts each
+    camera-centred view back into a MoveIt ``tool0`` target.
+    """
+    marker = tuple(float(value) for value in marker_position)
+    current_tool = tuple(float(value) for value in current_tool_position)
+    current_quaternion = tuple(float(value) for value in current_tool_quaternion)
+    mount_translation = tuple(float(value) for value in provisional_tool_to_camera[0])
+    mount_quaternion = tuple(float(value) for value in provisional_tool_to_camera[1])
+    values = (
+        *marker, *current_tool, *current_quaternion,
+        *mount_translation, *mount_quaternion)
+    if (len(marker) != 3 or len(current_tool) != 3
+            or len(current_quaternion) != 4
+            or len(mount_translation) != 3 or len(mount_quaternion) != 4
+            or not all(math.isfinite(value) for value in values)):
+        raise ValueError('camera-centred candidate inputs are invalid')
+
+    current_camera = _compose_pose(
+        (current_tool, current_quaternion),
+        (mount_translation, mount_quaternion))
+    relative = tuple(current_camera[0][index] - marker[index]
+                     for index in range(3))
+    radius = math.sqrt(sum(value * value for value in relative))
+    if not 0.15 <= radius <= 0.80:
+        raise ValueError(
+            f'initial camera-marker distance is unsafe: {radius:.3f} m')
+    azimuth = math.atan2(relative[1], relative[0])
+    elevation = math.asin(max(-1.0, min(1.0, relative[2] / radius)))
+    preferred_x = rotate_vector((1.0, 0.0, 0.0), current_camera[1])
+
+    # Range, orbit and roll all change while the marker remains on the
+    # optical axis.  This preserves visibility without losing the geometric
+    # excitation needed to identify translation in AX=XB.
+    specifications = [('seed', 0.0, 0.0, 0.0, 0.0)]
+    specifications.extend(
+        (f'roll_{value:+g}', 0.0, 0.0, 0.0, value)
+        for value in (-14.0, -8.0, 8.0, 14.0))
+    specifications.extend(
+        (f'range_{value:+.3f}', value, 0.0, 0.0, 0.0)
+        for value in (0.015, 0.030, 0.045, 0.060))
+    specifications.extend(
+        (f'horizontal_{value:+g}', 0.0, value, 0.0, 0.0)
+        for value in (-12.0, -6.0, 6.0, 12.0))
+    specifications.extend(
+        (f'vertical_{value:+g}', 0.0, 0.0, value, 0.0)
+        for value in (-12.0, -6.0, 6.0, 12.0))
+    specifications.extend((
+        ('combo_left_low', 0.030, -8.0, -8.0, -8.0),
+        ('combo_left_high', 0.030, -8.0, 8.0, 8.0),
+        ('combo_right_low', 0.030, 8.0, -8.0, 8.0),
+        ('combo_right_high', 0.030, 8.0, 8.0, -8.0),
+    ))
+    if include_fine:
+        specifications.extend((
+            ('wide_roll_-24', 0.030, 0.0, 0.0, -24.0),
+            ('wide_roll_+24', 0.030, 0.0, 0.0, 24.0),
+            ('wide_left', 0.045, -18.0, 0.0, -12.0),
+            ('wide_right', 0.045, 18.0, 0.0, 12.0),
+            ('wide_left_outer', 0.060, -24.0, 0.0, -16.0),
+            ('wide_right_outer', 0.060, 24.0, 0.0, 16.0),
+            ('wide_low', 0.045, 0.0, -18.0, -12.0),
+            ('wide_high', 0.045, 0.0, 18.0, 12.0),
+            ('wide_left_low', 0.060, -18.0, -12.0, -12.0),
+            ('wide_left_high', 0.060, -18.0, 12.0, 12.0),
+            ('wide_right_low', 0.060, 18.0, -12.0, 12.0),
+            ('wide_right_high', 0.060, 18.0, 12.0, -12.0),
+            ('wide_left_near', 0.015, -18.0, 0.0, -8.0),
+            ('wide_right_near', 0.015, 18.0, 0.0, 8.0),
+            ('wide_low_near', 0.015, 0.0, -18.0, -8.0),
+            ('wide_high_near', 0.015, 0.0, 18.0, 8.0),
+            ('fine_roll_-4', 0.015, 0.0, 0.0, -4.0),
+            ('fine_roll_+4', 0.015, 0.0, 0.0, 4.0),
+            ('fine_left', 0.015, -3.0, 0.0, -3.0),
+            ('fine_right', 0.015, 3.0, 0.0, 3.0),
+            ('fine_low', 0.015, 0.0, -3.0, -3.0),
+            ('fine_high', 0.015, 0.0, 3.0, 3.0),
+            ('fine_left_low', 0.030, -3.0, -3.0, -3.0),
+            ('fine_right_high', 0.030, 3.0, 3.0, 3.0),
+            ('fine_left_high', 0.030, -3.0, 3.0, 3.0),
+            ('fine_right_low', 0.030, 3.0, -3.0, -3.0),
+            ('fine_range', 0.075, 0.0, 0.0, 0.0),
+            ('fine_range_roll', 0.075, 0.0, 0.0, 8.0),
+        ))
+
+    candidates = []
+    for name, range_offset, horizontal_deg, vertical_deg, roll_deg in specifications:
+        candidate_radius = radius + range_offset
+        candidate_elevation = elevation + math.radians(vertical_deg)
+        if candidate_radius <= 0.15:
+            continue
+        if name != 'seed' and abs(candidate_elevation) >= math.radians(89.0):
+            candidate_elevation = math.copysign(math.radians(79.0), candidate_elevation)
+        candidate_azimuth = azimuth + math.radians(horizontal_deg)
+        horizontal_radius = candidate_radius * math.cos(candidate_elevation)
+        camera_position = (
+            marker[0] + horizontal_radius * math.cos(candidate_azimuth),
+            marker[1] + horizontal_radius * math.sin(candidate_azimuth),
+            marker[2] + candidate_radius * math.sin(candidate_elevation),
+        )
+        camera_quaternion = _camera_look_at(
+            marker, camera_position, roll_deg, preferred_x)
+        tool_position, tool_quaternion = tool_pose_from_camera_pose(
+            camera_position, camera_quaternion,
+            mount_translation, mount_quaternion)
+        candidates.append(CalibrationCandidate(
+            candidate_id=f'camera_center_{name}',
             tool_position=tool_position,
             tool_quaternion=tool_quaternion,
         ))
     return candidates
+
+
+def _compose_pose(left, right):
+    """Compose component tuples with the same parent/child convention."""
+    left_position, left_quaternion = left
+    right_position, right_quaternion = right
+    rotated = rotate_vector(right_position, left_quaternion)
+    return (
+        tuple(left_position[index] + rotated[index] for index in range(3)),
+        _quaternion_multiply(left_quaternion, right_quaternion),
+    )

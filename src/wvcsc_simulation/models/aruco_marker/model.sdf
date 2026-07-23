@@ -5,6 +5,9 @@
     <link name="board">
       <!-- DICT_5X5_250 marker id=1, borderBits=1. Rendered as geometry so Gazebo does not depend on texture/material loading. -->
       <!-- Back-side cells are mirrored in X so cameras viewing the rear face still see the canonical marker, not a mirror image. -->
+      <!-- Keep every black cell effectively coplanar with the white board: a
+           20 um render offset prevents z-fighting but avoids millimetre-scale
+           side walls, shadows and false ArUco corner rotations. -->
       <collision name="collision">
         <geometry>
           <box>
@@ -27,10 +30,10 @@
       </visual>
 
       <visual name="front_black_r0_c0">
-        <pose>-0.0300 -0.0016 0.0300 0 0 0</pose>
+        <pose>-0.0300 -0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -40,10 +43,10 @@
         </material>
       </visual>
       <visual name="back_black_r0_c0_mirrored">
-        <pose>0.0300 0.0016 0.0300 0 0 0</pose>
+        <pose>0.0300 0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -53,10 +56,10 @@
         </material>
       </visual>
       <visual name="front_black_r0_c1">
-        <pose>-0.0200 -0.0016 0.0300 0 0 0</pose>
+        <pose>-0.0200 -0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -66,10 +69,10 @@
         </material>
       </visual>
       <visual name="back_black_r0_c1_mirrored">
-        <pose>0.0200 0.0016 0.0300 0 0 0</pose>
+        <pose>0.0200 0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -79,10 +82,10 @@
         </material>
       </visual>
       <visual name="front_black_r0_c2">
-        <pose>-0.0100 -0.0016 0.0300 0 0 0</pose>
+        <pose>-0.0100 -0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -92,10 +95,10 @@
         </material>
       </visual>
       <visual name="back_black_r0_c2_mirrored">
-        <pose>0.0100 0.0016 0.0300 0 0 0</pose>
+        <pose>0.0100 0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -105,10 +108,10 @@
         </material>
       </visual>
       <visual name="front_black_r0_c3">
-        <pose>0.0000 -0.0016 0.0300 0 0 0</pose>
+        <pose>0.0000 -0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -118,10 +121,10 @@
         </material>
       </visual>
       <visual name="back_black_r0_c3_mirrored">
-        <pose>0.0000 0.0016 0.0300 0 0 0</pose>
+        <pose>0.0000 0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -131,10 +134,10 @@
         </material>
       </visual>
       <visual name="front_black_r0_c4">
-        <pose>0.0100 -0.0016 0.0300 0 0 0</pose>
+        <pose>0.0100 -0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -144,10 +147,10 @@
         </material>
       </visual>
       <visual name="back_black_r0_c4_mirrored">
-        <pose>-0.0100 0.0016 0.0300 0 0 0</pose>
+        <pose>-0.0100 0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -157,10 +160,10 @@
         </material>
       </visual>
       <visual name="front_black_r0_c5">
-        <pose>0.0200 -0.0016 0.0300 0 0 0</pose>
+        <pose>0.0200 -0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -170,10 +173,10 @@
         </material>
       </visual>
       <visual name="back_black_r0_c5_mirrored">
-        <pose>-0.0200 0.0016 0.0300 0 0 0</pose>
+        <pose>-0.0200 0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -183,10 +186,10 @@
         </material>
       </visual>
       <visual name="front_black_r0_c6">
-        <pose>0.0300 -0.0016 0.0300 0 0 0</pose>
+        <pose>0.0300 -0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -196,10 +199,10 @@
         </material>
       </visual>
       <visual name="back_black_r0_c6_mirrored">
-        <pose>-0.0300 0.0016 0.0300 0 0 0</pose>
+        <pose>-0.0300 0.00101 0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -209,10 +212,10 @@
         </material>
       </visual>
       <visual name="front_black_r1_c0">
-        <pose>-0.0300 -0.0016 0.0200 0 0 0</pose>
+        <pose>-0.0300 -0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -222,10 +225,10 @@
         </material>
       </visual>
       <visual name="back_black_r1_c0_mirrored">
-        <pose>0.0300 0.0016 0.0200 0 0 0</pose>
+        <pose>0.0300 0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -235,10 +238,10 @@
         </material>
       </visual>
       <visual name="front_black_r1_c1">
-        <pose>-0.0200 -0.0016 0.0200 0 0 0</pose>
+        <pose>-0.0200 -0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -248,10 +251,10 @@
         </material>
       </visual>
       <visual name="back_black_r1_c1_mirrored">
-        <pose>0.0200 0.0016 0.0200 0 0 0</pose>
+        <pose>0.0200 0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -261,10 +264,10 @@
         </material>
       </visual>
       <visual name="front_black_r1_c2">
-        <pose>-0.0100 -0.0016 0.0200 0 0 0</pose>
+        <pose>-0.0100 -0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -274,10 +277,10 @@
         </material>
       </visual>
       <visual name="back_black_r1_c2_mirrored">
-        <pose>0.0100 0.0016 0.0200 0 0 0</pose>
+        <pose>0.0100 0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -287,10 +290,10 @@
         </material>
       </visual>
       <visual name="front_black_r1_c3">
-        <pose>0.0000 -0.0016 0.0200 0 0 0</pose>
+        <pose>0.0000 -0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -300,10 +303,10 @@
         </material>
       </visual>
       <visual name="back_black_r1_c3_mirrored">
-        <pose>0.0000 0.0016 0.0200 0 0 0</pose>
+        <pose>0.0000 0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -313,10 +316,10 @@
         </material>
       </visual>
       <visual name="front_black_r1_c4">
-        <pose>0.0100 -0.0016 0.0200 0 0 0</pose>
+        <pose>0.0100 -0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -326,10 +329,10 @@
         </material>
       </visual>
       <visual name="back_black_r1_c4_mirrored">
-        <pose>-0.0100 0.0016 0.0200 0 0 0</pose>
+        <pose>-0.0100 0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -339,10 +342,10 @@
         </material>
       </visual>
       <visual name="front_black_r1_c6">
-        <pose>0.0300 -0.0016 0.0200 0 0 0</pose>
+        <pose>0.0300 -0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -352,10 +355,10 @@
         </material>
       </visual>
       <visual name="back_black_r1_c6_mirrored">
-        <pose>-0.0300 0.0016 0.0200 0 0 0</pose>
+        <pose>-0.0300 0.00101 0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -365,10 +368,10 @@
         </material>
       </visual>
       <visual name="front_black_r2_c0">
-        <pose>-0.0300 -0.0016 0.0100 0 0 0</pose>
+        <pose>-0.0300 -0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -378,10 +381,10 @@
         </material>
       </visual>
       <visual name="back_black_r2_c0_mirrored">
-        <pose>0.0300 0.0016 0.0100 0 0 0</pose>
+        <pose>0.0300 0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -391,10 +394,10 @@
         </material>
       </visual>
       <visual name="front_black_r2_c3">
-        <pose>0.0000 -0.0016 0.0100 0 0 0</pose>
+        <pose>0.0000 -0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -404,10 +407,10 @@
         </material>
       </visual>
       <visual name="back_black_r2_c3_mirrored">
-        <pose>0.0000 0.0016 0.0100 0 0 0</pose>
+        <pose>0.0000 0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -417,10 +420,10 @@
         </material>
       </visual>
       <visual name="front_black_r2_c4">
-        <pose>0.0100 -0.0016 0.0100 0 0 0</pose>
+        <pose>0.0100 -0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -430,10 +433,10 @@
         </material>
       </visual>
       <visual name="back_black_r2_c4_mirrored">
-        <pose>-0.0100 0.0016 0.0100 0 0 0</pose>
+        <pose>-0.0100 0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -443,10 +446,10 @@
         </material>
       </visual>
       <visual name="front_black_r2_c5">
-        <pose>0.0200 -0.0016 0.0100 0 0 0</pose>
+        <pose>0.0200 -0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -456,10 +459,10 @@
         </material>
       </visual>
       <visual name="back_black_r2_c5_mirrored">
-        <pose>-0.0200 0.0016 0.0100 0 0 0</pose>
+        <pose>-0.0200 0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -469,10 +472,10 @@
         </material>
       </visual>
       <visual name="front_black_r2_c6">
-        <pose>0.0300 -0.0016 0.0100 0 0 0</pose>
+        <pose>0.0300 -0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -482,10 +485,10 @@
         </material>
       </visual>
       <visual name="back_black_r2_c6_mirrored">
-        <pose>-0.0300 0.0016 0.0100 0 0 0</pose>
+        <pose>-0.0300 0.00101 0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -495,10 +498,10 @@
         </material>
       </visual>
       <visual name="front_black_r3_c0">
-        <pose>-0.0300 -0.0016 0.0000 0 0 0</pose>
+        <pose>-0.0300 -0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -508,10 +511,10 @@
         </material>
       </visual>
       <visual name="back_black_r3_c0_mirrored">
-        <pose>0.0300 0.0016 0.0000 0 0 0</pose>
+        <pose>0.0300 0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -521,10 +524,10 @@
         </material>
       </visual>
       <visual name="front_black_r3_c1">
-        <pose>-0.0200 -0.0016 0.0000 0 0 0</pose>
+        <pose>-0.0200 -0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -534,10 +537,10 @@
         </material>
       </visual>
       <visual name="back_black_r3_c1_mirrored">
-        <pose>0.0200 0.0016 0.0000 0 0 0</pose>
+        <pose>0.0200 0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -547,10 +550,10 @@
         </material>
       </visual>
       <visual name="front_black_r3_c2">
-        <pose>-0.0100 -0.0016 0.0000 0 0 0</pose>
+        <pose>-0.0100 -0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -560,10 +563,10 @@
         </material>
       </visual>
       <visual name="back_black_r3_c2_mirrored">
-        <pose>0.0100 0.0016 0.0000 0 0 0</pose>
+        <pose>0.0100 0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -573,10 +576,10 @@
         </material>
       </visual>
       <visual name="front_black_r3_c3">
-        <pose>0.0000 -0.0016 0.0000 0 0 0</pose>
+        <pose>0.0000 -0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -586,10 +589,10 @@
         </material>
       </visual>
       <visual name="back_black_r3_c3_mirrored">
-        <pose>0.0000 0.0016 0.0000 0 0 0</pose>
+        <pose>0.0000 0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -599,10 +602,10 @@
         </material>
       </visual>
       <visual name="front_black_r3_c4">
-        <pose>0.0100 -0.0016 0.0000 0 0 0</pose>
+        <pose>0.0100 -0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -612,10 +615,10 @@
         </material>
       </visual>
       <visual name="back_black_r3_c4_mirrored">
-        <pose>-0.0100 0.0016 0.0000 0 0 0</pose>
+        <pose>-0.0100 0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -625,10 +628,10 @@
         </material>
       </visual>
       <visual name="front_black_r3_c6">
-        <pose>0.0300 -0.0016 0.0000 0 0 0</pose>
+        <pose>0.0300 -0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -638,10 +641,10 @@
         </material>
       </visual>
       <visual name="back_black_r3_c6_mirrored">
-        <pose>-0.0300 0.0016 0.0000 0 0 0</pose>
+        <pose>-0.0300 0.00101 0.0000 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -651,10 +654,10 @@
         </material>
       </visual>
       <visual name="front_black_r4_c0">
-        <pose>-0.0300 -0.0016 -0.0100 0 0 0</pose>
+        <pose>-0.0300 -0.00101 -0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -664,10 +667,10 @@
         </material>
       </visual>
       <visual name="back_black_r4_c0_mirrored">
-        <pose>0.0300 0.0016 -0.0100 0 0 0</pose>
+        <pose>0.0300 0.00101 -0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -677,10 +680,10 @@
         </material>
       </visual>
       <visual name="front_black_r4_c2">
-        <pose>-0.0100 -0.0016 -0.0100 0 0 0</pose>
+        <pose>-0.0100 -0.00101 -0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -690,10 +693,10 @@
         </material>
       </visual>
       <visual name="back_black_r4_c2_mirrored">
-        <pose>0.0100 0.0016 -0.0100 0 0 0</pose>
+        <pose>0.0100 0.00101 -0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -703,10 +706,10 @@
         </material>
       </visual>
       <visual name="front_black_r4_c6">
-        <pose>0.0300 -0.0016 -0.0100 0 0 0</pose>
+        <pose>0.0300 -0.00101 -0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -716,10 +719,10 @@
         </material>
       </visual>
       <visual name="back_black_r4_c6_mirrored">
-        <pose>-0.0300 0.0016 -0.0100 0 0 0</pose>
+        <pose>-0.0300 0.00101 -0.0100 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -729,10 +732,10 @@
         </material>
       </visual>
       <visual name="front_black_r5_c0">
-        <pose>-0.0300 -0.0016 -0.0200 0 0 0</pose>
+        <pose>-0.0300 -0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -742,10 +745,10 @@
         </material>
       </visual>
       <visual name="back_black_r5_c0_mirrored">
-        <pose>0.0300 0.0016 -0.0200 0 0 0</pose>
+        <pose>0.0300 0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -755,10 +758,10 @@
         </material>
       </visual>
       <visual name="front_black_r5_c1">
-        <pose>-0.0200 -0.0016 -0.0200 0 0 0</pose>
+        <pose>-0.0200 -0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -768,10 +771,10 @@
         </material>
       </visual>
       <visual name="back_black_r5_c1_mirrored">
-        <pose>0.0200 0.0016 -0.0200 0 0 0</pose>
+        <pose>0.0200 0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -781,10 +784,10 @@
         </material>
       </visual>
       <visual name="front_black_r5_c2">
-        <pose>-0.0100 -0.0016 -0.0200 0 0 0</pose>
+        <pose>-0.0100 -0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -794,10 +797,10 @@
         </material>
       </visual>
       <visual name="back_black_r5_c2_mirrored">
-        <pose>0.0100 0.0016 -0.0200 0 0 0</pose>
+        <pose>0.0100 0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -807,10 +810,10 @@
         </material>
       </visual>
       <visual name="front_black_r5_c5">
-        <pose>0.0200 -0.0016 -0.0200 0 0 0</pose>
+        <pose>0.0200 -0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -820,10 +823,10 @@
         </material>
       </visual>
       <visual name="back_black_r5_c5_mirrored">
-        <pose>-0.0200 0.0016 -0.0200 0 0 0</pose>
+        <pose>-0.0200 0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -833,10 +836,10 @@
         </material>
       </visual>
       <visual name="front_black_r5_c6">
-        <pose>0.0300 -0.0016 -0.0200 0 0 0</pose>
+        <pose>0.0300 -0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -846,10 +849,10 @@
         </material>
       </visual>
       <visual name="back_black_r5_c6_mirrored">
-        <pose>-0.0300 0.0016 -0.0200 0 0 0</pose>
+        <pose>-0.0300 0.00101 -0.0200 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -859,10 +862,10 @@
         </material>
       </visual>
       <visual name="front_black_r6_c0">
-        <pose>-0.0300 -0.0016 -0.0300 0 0 0</pose>
+        <pose>-0.0300 -0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -872,10 +875,10 @@
         </material>
       </visual>
       <visual name="back_black_r6_c0_mirrored">
-        <pose>0.0300 0.0016 -0.0300 0 0 0</pose>
+        <pose>0.0300 0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -885,10 +888,10 @@
         </material>
       </visual>
       <visual name="front_black_r6_c1">
-        <pose>-0.0200 -0.0016 -0.0300 0 0 0</pose>
+        <pose>-0.0200 -0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -898,10 +901,10 @@
         </material>
       </visual>
       <visual name="back_black_r6_c1_mirrored">
-        <pose>0.0200 0.0016 -0.0300 0 0 0</pose>
+        <pose>0.0200 0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -911,10 +914,10 @@
         </material>
       </visual>
       <visual name="front_black_r6_c2">
-        <pose>-0.0100 -0.0016 -0.0300 0 0 0</pose>
+        <pose>-0.0100 -0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -924,10 +927,10 @@
         </material>
       </visual>
       <visual name="back_black_r6_c2_mirrored">
-        <pose>0.0100 0.0016 -0.0300 0 0 0</pose>
+        <pose>0.0100 0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -937,10 +940,10 @@
         </material>
       </visual>
       <visual name="front_black_r6_c3">
-        <pose>0.0000 -0.0016 -0.0300 0 0 0</pose>
+        <pose>0.0000 -0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -950,10 +953,10 @@
         </material>
       </visual>
       <visual name="back_black_r6_c3_mirrored">
-        <pose>0.0000 0.0016 -0.0300 0 0 0</pose>
+        <pose>0.0000 0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -963,10 +966,10 @@
         </material>
       </visual>
       <visual name="front_black_r6_c4">
-        <pose>0.0100 -0.0016 -0.0300 0 0 0</pose>
+        <pose>0.0100 -0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -976,10 +979,10 @@
         </material>
       </visual>
       <visual name="back_black_r6_c4_mirrored">
-        <pose>-0.0100 0.0016 -0.0300 0 0 0</pose>
+        <pose>-0.0100 0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -989,10 +992,10 @@
         </material>
       </visual>
       <visual name="front_black_r6_c5">
-        <pose>0.0200 -0.0016 -0.0300 0 0 0</pose>
+        <pose>0.0200 -0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -1002,10 +1005,10 @@
         </material>
       </visual>
       <visual name="back_black_r6_c5_mirrored">
-        <pose>-0.0200 0.0016 -0.0300 0 0 0</pose>
+        <pose>-0.0200 0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -1015,10 +1018,10 @@
         </material>
       </visual>
       <visual name="front_black_r6_c6">
-        <pose>0.0300 -0.0016 -0.0300 0 0 0</pose>
+        <pose>0.0300 -0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
@@ -1028,10 +1031,10 @@
         </material>
       </visual>
       <visual name="back_black_r6_c6_mirrored">
-        <pose>-0.0300 0.0016 -0.0300 0 0 0</pose>
+        <pose>-0.0300 0.00101 -0.0300 0 0 0</pose>
         <geometry>
           <box>
-            <size>0.0102 0.0008 0.0102</size>
+            <size>0.0100 0.00002 0.0100</size>
           </box>
         </geometry>
         <material>
