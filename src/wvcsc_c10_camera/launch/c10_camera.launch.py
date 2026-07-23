@@ -26,8 +26,8 @@ def generate_launch_description():
     config = os.path.join(share, 'config', 'c10_usb_cam.yaml')
 
     # 2. 声明 `video_device` 启动参数，允许在运行命令时动态指定。
-    # 例如：`ros2 launch wvcsc_c10_camera c10_camera.launch.py video_device:=/dev/video2`
-    # 但强烈建议保持默认的 `/dev/v4l/by-id/...` 持久化路径。
+    # 例如：`ros2 launch wvcsc_c10_camera c10_camera.launch.py video_device:=/dev/video0`
+    # 本机 usb_cam 对 /dev/v4l/by-id 符号链接解析异常，默认使用 JR0037 index0。
     device = LaunchConfiguration('video_device')
 
     # 3. 配置相机驱动节点 (`usb_cam`)
@@ -65,8 +65,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'video_device',
-            default_value='/dev/v4l/by-id/usb-Synria_C10-video-index0',
-            description='Use the real persistent /dev/v4l/by-id path.'),
+            default_value='/dev/video0',
+            description='JR0037 C10 V4L2 index0 device.'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(

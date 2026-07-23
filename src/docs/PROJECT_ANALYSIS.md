@@ -44,7 +44,7 @@
 | 层 | 包 | 语言 | 说明 |
 |----|-----|------|------|
 | 硬件驱动 | `serial`, `can_bridge`, `yesense_interface`, `yesense_std_ros2`, `wtb_car_driver`, `lslidar_driver`, `lslidar_msgs` | C++ | 串口/CAN/IMU/LiDAR/底盘 |
-| 机械臂 | `alicia_m_descriptions`, `alicia_m_driver`, `alicia_m_moveit_config`, `alicia_m_bringup`, `alicia_m_calibration` | C++ | URDF/ros2_control/MoveIt/手眼标定 |
+| 机械臂 | `alicia_m_descriptions`, `alicia_m_driver`, `alicia_m_moveit_config`, `alicia_m_bringup` | C++ | URDF/ros2_control/MoveIt |
 | SLAM/导航 | `my_cartographer`, `my_navigation2` | C++ | Cartographer + Nav2 |
 | 运动控制 | `pymoveit2`, `trajectory_retime_server` | C++ | Python MoveIt2 封装 + 轨迹重定时 |
 | 复合模型 | `wvcsc_description` | C++ | 统一 XACRO（底盘+Alicia+C10+喷嘴）|
@@ -52,6 +52,7 @@
 | 接口 | `wvcsc_interfaces` | C++ | 自定义 action/srv/msg |
 | 任务编排 | `wvcsc_mission_manager` | Python | YAML/RViz任务加载与使命管理 |
 | 感知 | `wvcsc_rgb_vision`, `wvcsc_c10_camera` | Python | YOLOv8n 两级推理 + C10 驱动 |
+| 手眼标定 | `wvcsc_calibration` | Python | C10 + ArUco + easy_handeye2 安全采集与部署外参导出 |
 | 执行 | `wvcsc_arm_task`, `wvcsc_visual_servo` | Python | 喷洒状态机 + IBVS 伺服 |
 
 **收敛记录**：

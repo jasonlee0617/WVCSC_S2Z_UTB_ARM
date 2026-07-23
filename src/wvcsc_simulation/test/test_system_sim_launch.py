@@ -13,6 +13,11 @@ LAUNCH_SOURCE = (
 ).read_text(encoding='utf-8')
 
 
+def test_simulation_relay_remains_timer_only():
+    assert "'config', 'spray_actuator.yaml'" in LAUNCH_SOURCE
+    assert 'controller_pkg' not in LAUNCH_SOURCE
+
+
 def _launch_module():
     path = Path(__file__).parents[1] / 'launch' / 'system_sim.launch.py'
     spec = importlib.util.spec_from_file_location('wvcsc_system_sim_launch', path)
@@ -179,12 +184,13 @@ def test_simulation_observation_keeps_camera_above_the_vehicle_roof():
         'arm_task.yaml'
     ).read_text(encoding='utf-8'))['wvcsc_spray_task']['ros__parameters']
 
-    assert parameters['camera_height_min_m'] == pytest.approx(0.20)
+    assert parameters['camera_height_min_m'] == pytest.approx(0.15)
     assert parameters['camera_height_max_m'] == pytest.approx(0.40)
     assert parameters['camera_height_step_m'] == pytest.approx(0.10)
     assert 'observation_min_camera_z_in_base_m' not in parameters
     assert parameters['target_recenter_trigger_px'] == pytest.approx(16.0)
-    assert parameters['target_recenter_workspace_px'] == pytest.approx(16.0)
+    assert parameters['target_recenter_workspace_px'] == pytest.approx(128.0)
+    assert parameters['visual_servo_entry_max_error_px'] == pytest.approx(128.0)
     assert parameters['target_recenter_max_total_angle_deg'] == pytest.approx(45.0)
     assert parameters['target_recenter_max_iterations'] == 8
     assert parameters['max_alignment_attempts'] == 3

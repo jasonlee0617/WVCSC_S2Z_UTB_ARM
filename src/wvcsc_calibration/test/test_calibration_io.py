@@ -1,6 +1,14 @@
-import pytest
+from pathlib import Path
 
-from wvcsc_calibration.calibration_io import expanded_path, normalized_calibration
+import pytest
+import yaml
+
+from wvcsc_calibration import calibration_io
+from wvcsc_calibration.calibration_io import (
+    expanded_path,
+    normalized_calibration,
+    write_calibration_outputs,
+)
 
 
 def _valid():
@@ -42,3 +50,61 @@ def test_expanded_path_supports_portable_home_environment_variable(monkeypatch, 
     monkeypatch.setenv('WVCSC_CALIBRATION_TEST_ROOT', str(tmp_path))
     assert expanded_path('$WVCSC_CALIBRATION_TEST_ROOT/result.yaml') == (
         tmp_path / 'result.yaml')
+
+
+def test_exported_easy_handeye_and_deployment_files_describe_same_transform(tmp_path):
+    transform = ((0.01, -0.02, -0.10), (0.0, 0.0, 0.0, 1.0))
+    deployment, normalized = write_calibration_outputs(
+        transform,
+        tmp_path / 'wvcsc_c10.calib',
+        tmp_path / 'c10_handeye.yaml')
+
+    easy_handeye = yaml.safe_load(deployment.read_text(encoding='utf-8'))
+    deployment_data = yaml.safe_load(normalized.read_text(encoding='utf-8'))
+    assert easy_handeye['parameters'] == {
+        'name': 'wvcsc_c10',
+        'calibration_type': 'eye_in_hand',
+        'robot_base_frame': 'alicia_base_link',
+        'robot_effector_frame': 'tool0',
+        'tracking_base_frame': 'camera_color_optical_frame',
+        'tracking_marker_frame': 'calibration_aruco',
+        'freehand_robot_movement': True,
+        'move_group_namespace': '/',
+        'move_group': 'arm',
+    }
+    assert easy_handeye['transform']['translation'] == \
+        deployment_data['calibration']['translation']
+    assert easy_handeye['transform']['rotation'] == \
+        deployment_data['calibration']['rotation']
+
+
+def test_invalid_or_unwritable_export_does_not_replace_existing_calibration(
+        monkeypatch, tmp_path):
+    deployment = tmp_path / 'wvcsc_c10.calib'
+    normalized = tmp_path / 'c10_handeye.yaml'
+    deployment.write_text('old_easy_handeye\n', encoding='utf-8')
+    normalized.write_text('old_deployment\n', encoding='utf-8')
+
+    with pytest.raises(ValueError, match='camera translation'):
+        write_calibration_outputs(
+            ((0.60, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+            deployment, normalized)
+    assert deployment.read_text(encoding='utf-8') == 'old_easy_handeye\n'
+    assert normalized.read_text(encoding='utf-8') == 'old_deployment\n'
+
+    real_stage = calibration_io._stage_bytes
+    calls = {'count': 0}
+
+    def fail_while_staging(destination, payload):
+        calls['count'] += 1
+        if calls['count'] == 2:
+            raise OSError('simulated staging failure')
+        return real_stage(destination, payload)
+
+    monkeypatch.setattr(calibration_io, '_stage_bytes', fail_while_staging)
+    with pytest.raises(OSError, match='staging failure'):
+        write_calibration_outputs(
+            ((0.01, 0.0, -0.10), (0.0, 0.0, 0.0, 1.0)),
+            deployment, normalized)
+    assert deployment.read_text(encoding='utf-8') == 'old_easy_handeye\n'
+    assert normalized.read_text(encoding='utf-8') == 'old_deployment\n'

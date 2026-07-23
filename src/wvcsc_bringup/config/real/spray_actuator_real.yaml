@@ -1,0 +1,14 @@
+wvcsc_spray_actuator:
+  ros__parameters:
+    action_name: /spray/execute
+    # The real arm launch must drive the physical relay controller.  The
+    # timer mode is simulation-only and would make a spray action look
+    # successful without switching any hardware output.
+    spray_mode: service
+    relay_service_name: /relay/set
+    relay_channel: 2
+    relay_service_timeout_sec: 2.0
+    active_topic: /spray/simulated_active
+    motion_locked_topic: /motion_control/locked
+    min_duration: 0.2
+    max_duration: 10.0

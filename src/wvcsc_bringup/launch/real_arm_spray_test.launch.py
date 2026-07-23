@@ -33,16 +33,17 @@ def _launch(context, *, launch_dir):
     bringup_share = get_package_share_directory('wvcsc_bringup')
     description_share = get_package_share_directory('wvcsc_description')
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
-    arm_share = get_package_share_directory('wvcsc_arm_task')
+    controller_share = get_package_share_directory('controller_pkg')
     real_config = os.path.join(bringup_share, 'config', 'real')
     helpers = _real_mission_helpers(launch_dir)
     handeye_path = helpers._expand_path(
         LaunchConfiguration('handeye_calibration').perform(context))
-    nozzle_path = helpers._expand_path(
-        LaunchConfiguration('nozzle_calibration').perform(context))
     c10_xyz, c10_rpy = helpers._load_calibrated_mount(handeye_path)
-    nozzle_xyz, nozzle_rpy, aim_range, aim_tolerance, trim_uv = (
-        helpers._load_nozzle_calibration(nozzle_path))
+    # This standalone test intentionally treats tool0 as the spray centerline.
+    # Keep the URDF nozzle link at the identity transform for shared launch
+    # compatibility, but aim and plan from tool0 itself.
+    nozzle_xyz = (0.0, 0.0, 0.0)
+    nozzle_rpy = (0.0, 0.0, 0.0)
     c10_mount_xyz = ' '.join(f'{value:.12g}' for value in c10_xyz)
     c10_mount_rpy = ' '.join(f'{value:.12g}' for value in c10_rpy)
     nozzle_mount_xyz = ' '.join(f'{value:.12g}' for value in nozzle_xyz)
@@ -66,7 +67,9 @@ def _launch(context, *, launch_dir):
             ' alicia_base_link:=alicia_base_link',
             ' use_collision_meshes:=true',
             ' enable_arm_control:=true',
-            ' enable_ackermann:=true',
+            # This launch owns only the arm; the chassis controller is not
+            # started, so do not add unreported wheel joints to MoveIt.
+            ' enable_ackermann:=false',
             ' enable_gazebo_ros2_control:=false',
             ' enable_c10_camera:=true',
             ' enable_c10_gazebo:=false',
@@ -75,10 +78,13 @@ def _launch(context, *, launch_dir):
             ' baudrate:=', LaunchConfiguration('baudrate'),
             ' control_mode:=', LaunchConfiguration('control_mode'),
             ' default_speed:=', LaunchConfiguration('default_speed'),
-            ' c10_mount_xyz:=', c10_mount_xyz,
-            ' c10_mount_rpy:=', c10_mount_rpy,
-            ' nozzle_mount_xyz:=', nozzle_mount_xyz,
-            ' nozzle_mount_rpy:=', nozzle_mount_rpy,
+            # Keep vector-valued xacro arguments as one quoted shell token.
+            # Without the quotes a negative first component (for example the
+            # calibrated RPY value -2.11) is parsed by xacro as an option.
+            ' c10_mount_xyz:="', c10_mount_xyz, '"',
+            ' c10_mount_rpy:="', c10_mount_rpy, '"',
+            ' nozzle_mount_xyz:="', nozzle_mount_xyz, '"',
+            ' nozzle_mount_rpy:="', nozzle_mount_rpy, '"',
         ]), value_type=str),
     }
     arm_motion_parameters = {
@@ -103,6 +109,13 @@ def _launch(context, *, launch_dir):
     }
 
     return [
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(
+                controller_share, 'launch', 'controller.launch.py')),
+            launch_arguments={
+                'config_file': LaunchConfiguration('relay_config_file'),
+            }.items(),
+        ),
         _include(launch_dir, 'real_arm.launch.py', {
             **shared_description_args,
             'publish_robot_state': 'true',
@@ -135,14 +148,7 @@ def _launch(context, *, launch_dir):
                 os.path.join(real_config, 'visual_servo_real.yaml'),
                 {
                     'use_sim_time': False,
-                    'aim_fixed_range_m': ParameterValue(
-                        str(aim_range), value_type=float),
-                    'aim_range_tolerance_m': ParameterValue(
-                        str(aim_tolerance), value_type=float),
-                    'desired_offset_u_px': ParameterValue(
-                        str(trim_uv[0]), value_type=float),
-                    'desired_offset_v_px': ParameterValue(
-                        str(trim_uv[1]), value_type=float),
+                    'aim_nozzle_frame': 'tool0',
                 },
             ],
             output='screen'),
@@ -154,19 +160,14 @@ def _launch(context, *, launch_dir):
             parameters=[
                 os.path.join(real_config, 'arm_task_real.yaml'),
                 arm_motion_parameters,
-                {
-                    'spray_working_distance_m': ParameterValue(
-                        str(aim_range), value_type=float),
-                    'spray_working_distance_tolerance_m': ParameterValue(
-                        str(aim_tolerance), value_type=float),
-                },
+                {'observation_mode': LaunchConfiguration('observation_mode')},
                 robot_description,
             ],
             output='screen'),
         Node(
-            package='wvcsc_arm_task', executable='spray_simulator',
+            package='wvcsc_arm_task', executable='spray_actuator',
             parameters=[
-                os.path.join(arm_share, 'config', 'spray_sim.yaml'),
+                os.path.join(real_config, 'spray_actuator_real.yaml'),
                 {'use_sim_time': False},
             ],
             output='screen'),
@@ -176,11 +177,12 @@ def _launch(context, *, launch_dir):
 def generate_launch_description():
     launch_dir = os.path.join(
         get_package_share_directory('wvcsc_bringup'), 'launch')
+    controller_share = get_package_share_directory('controller_pkg')
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'c10_device',
-            default_value='/dev/v4l/by-id/usb-Synria_C10-video-index0'),
+            default_value='/dev/video0'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value='package://wvcsc_c10_camera/config/c10_intrinsics.yaml'),
@@ -191,14 +193,14 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'handeye_calibration',
             default_value=(
-                '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
-                'c10_handeye.yaml')),
+                '~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib')),
         DeclareLaunchArgument(
-            'nozzle_calibration',
-            default_value=os.path.expanduser(
-                '~/.ros/wvcsc_calibration/nozzle.yaml')),
+            'relay_config_file',
+            default_value=os.path.join(
+                controller_share, 'config', 'fault.ini')),
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.20'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
+        DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
         DeclareLaunchArgument(
             'yolo_python_executable',
             default_value=os.path.expanduser(

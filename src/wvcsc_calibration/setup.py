@@ -30,5 +30,7 @@ setup(
         'export_handeye = wvcsc_calibration.calibration_io:main',
         'auto_calibration_collector = '
         'wvcsc_calibration.auto_calibration_collector:main',
+        'initial_calibration_pose = '
+        'wvcsc_calibration.initial_calibration_pose:main',
     ]},
 )

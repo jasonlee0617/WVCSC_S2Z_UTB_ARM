@@ -3,7 +3,7 @@
 两阶段 YOLO 感知节点的模型路径解析与合规性检验工具。
 
 职责：
-1. 定义感知任务中使用的标准类别映射 (Tree / Diseased Fruit)。
+1. 定义感知任务中使用的标准类别映射 (Tree / Diseased Target)。
 2. 在加载 YOLO 模型前进行“快速失败 (Fail-fast)”校验：确保模型的任务类型
     (detect/segment) 和类别名称完全符合预期。
 3. 统一处理模型权重文件的路径（支持绝对路径与 ROS 包共享目录的相对路径）。
@@ -17,8 +17,17 @@ from ament_index_python.packages import get_package_share_directory
 # 第一阶段 (Tree Detection) 的类别映射 (ID 0 对应 'tree')
 TREE_CLASS_NAMES = {0: 'tree'}
 
-# 第二阶段 (Fruit Segmentation) 的类别映射
-FRUIT_CLASS_NAMES = {0: 'diseased_fruit'}
+# 第二阶段 (病态目标分割) 的统一外部类别名。
+DISEASED_TARGET_CLASS_NAMES = {0: 'diseased_target'}
+
+# 权重文件保留各自训练时的原生类别名；ROS 输出统一为 diseased_target。
+DISEASED_TARGET_CLASS_ALIASES = {
+    'diseased_fruit': 'diseased_target',
+    'disease_leaf': 'diseased_target',
+    'diseased_target': 'diseased_target',
+}
+DISEASED_TARGET_NATIVE_CLASS_NAMES = frozenset(
+    {'diseased_fruit', 'disease_leaf'})
 
 
 def canonical_class_name(class_id, model_names):
@@ -38,10 +47,13 @@ def canonical_class_name(class_id, model_names):
     class_id = int(class_id)
     if isinstance(model_names, dict):
         # 处理字典形式的 names (YOLOv8 默认)
-        return str(model_names.get(class_id, model_names.get(str(class_id), f'cls{class_id}')))
+        name = str(model_names.get(
+            class_id, model_names.get(str(class_id), f'cls{class_id}')))
+        return DISEASED_TARGET_CLASS_ALIASES.get(name, name)
     if isinstance(model_names, (list, tuple)) and 0 <= class_id < len(model_names):
         # 处理列表或元组形式的 names
-        return str(model_names[class_id])
+        name = str(model_names[class_id])
+        return DISEASED_TARGET_CLASS_ALIASES.get(name, name)
     return f'cls{class_id}'
 
 
@@ -65,18 +77,29 @@ def validate_yolo_model(
     Raises:
         ValueError: 当模型的任务类型或类别名称与期望值不匹配时抛出异常。
     """
-    # 统一模型的 names 字典格式（处理各种可能的数据结构）
+    # 统一模型的 names 字典格式（处理各种可能的数据结构）。
     actual_names = ({int(key): str(value) for key, value in model.names.items()}
                     if isinstance(model.names, dict)
                     else {index: str(value) for index, value in enumerate(model.names)})
-                    
+
+    canonical_names = {
+        key: DISEASED_TARGET_CLASS_ALIASES.get(value, value)
+        for key, value in actual_names.items()}
     names_match = (
-        actual_names == expected_names if exact_names
-        else expected_names.items() <= actual_names.items())
+        canonical_names == expected_names if exact_names
+        else expected_names.items() <= canonical_names.items())
+    if (exact_names and expected_task == 'segment' and
+            expected_names == DISEASED_TARGET_CLASS_NAMES):
+        # Deployment weights must retain one of the two known training labels;
+        # the canonical ROS label is an output contract, not a checkpoint label.
+        names_match = names_match and (
+            len(actual_names) == 1 and
+            set(actual_names.values()) <= DISEASED_TARGET_NATIVE_CLASS_NAMES)
     if model.task != expected_task or not names_match:
         raise ValueError(
             f'YOLO model contract mismatch: expected task={expected_task}, '
-            f'names={expected_names}; found task={model.task}, names={model.names}')
+            f'names={expected_names}; found task={model.task}, '
+            f'native_names={actual_names}, canonical_names={canonical_names}')
 
 
 def resolve_yolo_model_path(path_value):

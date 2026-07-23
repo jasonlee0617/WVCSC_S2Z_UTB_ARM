@@ -101,32 +101,30 @@ OpenCV 的 Park/Horaud/Tsai-Lenz 闭式解首先提供确定性初值；随后�
 
 不启动底盘 CAN、底盘驱动、LiDAR、IMU、EKF、Nav2 或 MissionManager。车辆必须停稳、制动并禁止任何 `/cmd_vel` 输入。
 
-终端一：
+启动一条完整的最小链路：
 
 ```bash
-ros2 launch wvcsc_calibration c10_handeye.launch.py
+ros2 launch wvcsc_calibration auto_handeye.launch.py \
+  video_device:=/dev/video0 serial_port:=/dev/ttyACM0
 ```
 
-终端二：
-
-```bash
-ros2 run wvcsc_calibration auto_calibration_collector --ros-args \
-  --params-file "$(ros2 pkg prefix wvcsc_calibration)/share/wvcsc_calibration/config/auto_handeye_alicia.yaml"
-```
-
-操作者确认机械臂工作区安全后，在终端二按 `s` 或 Enter 开始；按 `q` 取消。可选安全终端：
+该入口只编排 C10、Alicia-M、MoveIt、ArUco、marker TF、easy_handeye2 与
+现有的安全采集器；不另建 IK、轨迹或直接关节控制路径。所有服务和图像
+就绪后，采集器仍等待操作者按 `s` 或 Enter 才开始运动；按 `q` 取消。可选安全终端：
 
 ```bash
 ros2 run wvcsc_arm_task motion_control_keyboard
 ```
 
-实机默认输出：
+仅当采样、PnP 质量、多算法共识和固定标定码残差均通过后，实机默认原子写入两份同一变换：
 
 ```text
+~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib
 $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml
 ```
 
-输出文件可纳入版本控制，但只应提交经过现场复测确认的安装外参。
+第一份供实机启动入口读取，第二份供 WVCSC 部署配置读取。任一质量门控或
+写入预处理失败都不会覆盖已有标定。输出文件可纳入版本控制，但只应提交经过现场复测确认的安装外参。
 
 ## 4. 速度、加速度与 marker 位置调整
 
@@ -162,6 +160,11 @@ ros2 run wvcsc_calibration auto_calibration_collector --ros-args \
 ```text
 package://wvcsc_c10_camera/config/c10_intrinsics.yaml
 ```
+
+当前 C10 内参来自 640×480 标定后向 1280×720 的近似映射；由于两个分辨率
+并非等比例缩放，当前文件只保证现有图像与 ArUco 链路可工作，**不能据此
+宣称实机具有毫米级几何精度**。需要该精度时，应以实际 C10 发布分辨率重新
+标定内参；本流程不会把该近似内参当成额外质量门控，也不会自动重标定。
 
 Gazebo 渲染使用其中的 `fx`、`fy`、`cx`、`cy` 与畸变参数。Gazebo Classic 的 `gazebo_ros_camera` 发布的 `CameraInfo.K` 只能使用单一焦距，因此 K 中 `fy` 近似为 `fx`；`P_fy` 仍使用真实 fy。该限制已在仿真真值门控中保留，不额外引入 CameraInfo 中继节点。
 

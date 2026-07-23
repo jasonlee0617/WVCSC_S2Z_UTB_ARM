@@ -15,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Target2D.msg"
   "srv/ComputeSprayAim.srv"
   "srv/LoadManualMission.srv"
+  "srv/SetRelay.srv"
   "action/AlignTarget.action"
   "action/ExecuteSpray.action"
   "action/Spray.action"

@@ -82,10 +82,19 @@
       <origin xyz="0 0 ${base_z + base_height/2}"/>
     </joint>
 
-    <xacro:front_wheel name="left_front" x="${wheel_x}" y="${wheel_y}"/>
-    <xacro:front_wheel name="right_front" x="${wheel_x}" y="${-wheel_y}"/>
-    <xacro:rear_wheel name="left_wheel" x="${-wheel_x}" y="${wheel_y}"/>
-    <xacro:rear_wheel name="right_wheel" x="${-wheel_x}" y="${-wheel_y}"/>
+    <!--
+      The arm-only real bringup reuses this vehicle description so that the
+      arm base has the correct parent frame.  It does not start a chassis
+      controller, therefore publishing the wheel joints would leave MoveIt
+      with an incomplete current state.  Keep the wheel joints in vehicle
+      sessions and omit them when ``enable_ackermann`` is false.
+    -->
+    <xacro:if value="$(arg enable_ackermann)">
+      <xacro:front_wheel name="left_front" x="${wheel_x}" y="${wheel_y}"/>
+      <xacro:front_wheel name="right_front" x="${wheel_x}" y="${-wheel_y}"/>
+      <xacro:rear_wheel name="left_wheel" x="${-wheel_x}" y="${wheel_y}"/>
+      <xacro:rear_wheel name="right_wheel" x="${-wheel_x}" y="${-wheel_y}"/>
+    </xacro:if>
 
     <link name="laser">
       <visual><geometry><cylinder radius="0.08" length="0.15"/></geometry><material name="wtb_gray"><color rgba="0.5 0.5 0.5 1"/></material></visual>

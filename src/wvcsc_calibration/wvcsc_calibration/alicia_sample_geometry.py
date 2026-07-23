@@ -22,6 +22,31 @@ class CalibrationCandidate:
     tool_quaternion: tuple
 
 
+def tool_orientation_toward_marker(tool_position, marker_position):
+    """Return an XYZW rotation whose local tool +Z axis points at a marker.
+
+    The base X axis fixes the remaining roll degree of freedom.  When that
+    axis is nearly parallel to the required tool Z axis, base Y is used to
+    avoid a degenerate cross product.
+    """
+    tool = tuple(float(value) for value in tool_position)
+    marker = tuple(float(value) for value in marker_position)
+    if (len(tool) != 3 or len(marker) != 3
+            or not all(math.isfinite(value) for value in (*tool, *marker))):
+        raise ValueError('tool and marker positions must contain three finite values')
+    tool_z = _unit(tuple(marker[index] - tool[index] for index in range(3)))
+    reference = (1.0, 0.0, 0.0)
+    if abs(sum(reference[index] * tool_z[index] for index in range(3))) > 0.95:
+        reference = (0.0, 1.0, 0.0)
+    tool_x = _unit(tuple(
+        reference[index]
+        - sum(reference[axis] * tool_z[axis] for axis in range(3))
+        * tool_z[index]
+        for index in range(3)))
+    tool_y = _unit(_cross(tool_z, tool_x))
+    return quaternion_from_matrix(tuple(zip(tool_x, tool_y, tool_z)))
+
+
 def generate_initial_anchor_candidates(
         marker_position, height_candidates, radial_backoff_candidates,
         tangential_offset_candidates):

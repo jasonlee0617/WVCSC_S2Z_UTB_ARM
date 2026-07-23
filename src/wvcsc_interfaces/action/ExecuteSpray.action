@@ -1,9 +1,8 @@
 # Goal
 string mission_id
 string tree_id
-string spray_side
 float32 spray_duration
-# Global tree-root hint in the map frame.
+# Tree-root hint expressed in tree_hint.header.frame_id.
 geometry_msgs/PointStamped tree_hint
 ---
 # Result

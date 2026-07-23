@@ -1,0 +1,37 @@
+# Template only.  Do not launch this file: map hashes, poses and capture
+# quality must be created on the actual field with capture_site_pose.
+schema_version: 4
+site_id: corn_field
+map:
+  frame_id: map
+  yaml_sha256: REPLACE_BY_CAPTURE_TOOL
+  image_sha256: REPLACE_BY_CAPTURE_TOOL
+arm_base_mount:
+  x_m: -0.4
+  y_m: 0.0
+mission:
+  mission_id: corn_field_five_point_001
+  route_steps:
+    - point_id: point_1
+      role: wide_start
+      navigation_pose: null
+    - point_id: point_2
+      role: inspect
+      navigation_pose: null
+      tree_id: corn_01
+      tree_offset_arm_base_m: [0.0, 1.2]
+      tree_base_z_m: 0.0
+      arm_spray_duration: 3.0
+    - point_id: point_3
+      role: inspect
+      navigation_pose: null
+      tree_id: corn_02
+      tree_offset_arm_base_m: [0.0, 1.2]
+      tree_base_z_m: 0.0
+      arm_spray_duration: 3.0
+    - point_id: point_4
+      role: wide_stop
+      navigation_pose: null
+    - point_id: point_5
+      role: finish
+      navigation_pose: null

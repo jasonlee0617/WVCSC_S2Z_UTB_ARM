@@ -464,10 +464,10 @@ def generate_launch_description():
         condition=IfCondition(enable_arm_control), output='screen',
     )
     # 喷洒仿真模拟器
-    spray_simulator = Node(
-        package='wvcsc_arm_task', executable='spray_simulator',
+    spray_actuator = Node(
+        package='wvcsc_arm_task', executable='spray_actuator',
         parameters=[
-            os.path.join(spray_share, 'config', 'spray_sim.yaml'),
+            os.path.join(spray_share, 'config', 'spray_actuator.yaml'),
             {'use_sim_time': True},
         ],
         condition=IfCondition(enable_arm_control), output='screen',
@@ -688,7 +688,7 @@ def generate_launch_description():
         start_arm_controller,
         start_gripper_controller,
         start_spray_task,
-        spray_simulator,
+        spray_actuator,
         visual_servo,
         rviz,
     ])

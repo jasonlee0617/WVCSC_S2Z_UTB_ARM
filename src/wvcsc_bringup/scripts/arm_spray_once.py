@@ -39,13 +39,12 @@ class ArmSprayOnce(Node):
         goal = ExecuteSpray.Goal()
         goal.mission_id = self.args.mission_id
         goal.tree_id = self.args.target_id
-        goal.spray_side = self.args.spray_side
         goal.spray_duration = self.args.spray_duration
         goal.tree_hint = PointStamped()
         goal.tree_hint.header.stamp = self.get_clock().now().to_msg()
         goal.tree_hint.header.frame_id = self.args.frame_id
-        goal.tree_hint.point.x = self.args.tree_forward_m
-        goal.tree_hint.point.y = self.args.tree_left_m
+        goal.tree_hint.point.x = self.args.tree_x_m
+        goal.tree_hint.point.y = self.args.tree_y_m
         goal.tree_hint.point.z = self.args.tree_z_m
         future = self.client.send_goal_async(
             goal, feedback_callback=self._feedback)
@@ -54,7 +53,7 @@ class ArmSprayOnce(Node):
             f'[ARM_TEST] sent target={goal.tree_id} '
             f'tree_hint={goal.tree_hint.header.frame_id}:'
             f'({goal.tree_hint.point.x:.2f},{goal.tree_hint.point.y:.2f},'
-            f'{goal.tree_hint.point.z:.2f}) side={goal.spray_side}')
+            f'{goal.tree_hint.point.z:.2f})')
 
     def _publish_active_status(self):
         if self.done:
@@ -118,10 +117,13 @@ def _args():
     parser.add_argument('--mission-id', default='arm_only_spray_001')
     parser.add_argument('--target-id', default='corn_01')
     parser.add_argument('--frame-id', default='alicia_base_link')
-    parser.add_argument('--tree-forward-m', type=float, default=0.0)
-    parser.add_argument('--tree-left-m', type=float, default=1.50)
+    parser.add_argument(
+        '--tree-x-m', type=float, default=0.0,
+        help='tree X in --frame-id (+X is forward for alicia_base_link)')
+    parser.add_argument(
+        '--tree-y-m', type=float, default=1.50,
+        help='tree Y in --frame-id (+Y is left; -Y is right for alicia_base_link)')
     parser.add_argument('--tree-z-m', type=float, default=0.0)
-    parser.add_argument('--spray-side', choices=('left', 'right'), default='left')
     parser.add_argument('--spray-duration', type=float, default=5.0)
     parser.add_argument('--timeout-sec', type=float, default=30.0)
     return parser.parse_args(argv)

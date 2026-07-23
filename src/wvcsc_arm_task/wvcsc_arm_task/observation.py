@@ -205,7 +205,9 @@ def recenter_camera_pose(
     angle = math.degrees(math.acos(max(-1.0, min(1.0, sum(
         left * right for left, right in zip(current_ray, desired_ray))))))
     if angle > float(max_angle_degrees) + 1e-9:
-        raise ValueError('target recenter angle exceeds limit')
+        raise ValueError(
+            f'target recenter angle exceeds limit: required_angle={angle:.1f}deg '
+            f'limit={float(max_angle_degrees):.1f}deg')
     camera_quat_xyzw = normalize_quaternion(camera_quat_xyzw)
     # 计算在世界坐标系下旋转视线所需的四元数
     world_rotation = _quaternion_between_vectors(
@@ -343,6 +345,8 @@ class ObservationCandidate:
     joint_motion_norm: float = math.inf
     rejection_reason: str = ''
     selection_phase: str = 'unranked'
+    observation_mode: str = 'ik'
+    joint_positions: tuple = ()
 
 
 def _build_candidate(
@@ -350,7 +354,7 @@ def _build_candidate(
         camera_position, camera_quat, tool_position, tool_quat,
         visible, visible_margin_px, visible_fraction=0.0,
         projected_bbox=(), target_u_px=0.0, target_v_px=0.0,
-        rejection_reason=''):
+        rejection_reason='', observation_mode='ik', joint_positions=()):
     return ObservationCandidate(
         candidate_id=candidate_id,
         distance_m=distance_m,
@@ -367,6 +371,8 @@ def _build_candidate(
         target_u_px=float(target_u_px),
         target_v_px=float(target_v_px),
         rejection_reason=rejection_reason,
+        observation_mode=str(observation_mode),
+        joint_positions=tuple(float(value) for value in joint_positions),
     )
 
 
@@ -745,6 +751,122 @@ class ObservationFlowMixin:
         return False
 
     # --------- 目标重心与姿态修正 ---------
+    def _motion_preflight(
+            self, target, current_joints, *, source, error_norm_px, stage):
+        """Verify the stationary state before a safety-critical next step.
+
+        Collision validity comes from the successful MoveIt observation or
+        recenter plan that placed the arm at this state.  Re-solving IK for the
+        same pose could choose a different branch and would not prove that the
+        measured current state is collision-free.  The missing stationary
+        checks are therefore the Jacobian condition number and joint-limit
+        margin, evaluated from the actual joint feedback.
+        """
+        stage_message = 'Servo' if stage == 'SERVO' else stage
+        index = self._observation_candidate_index
+        if index < 0 or index >= len(self._observation_candidates):
+            return False, (
+                f'no active observation candidate for {stage_message} preflight')
+        observation = self._observation_candidates[index]
+        if observation.rejection_reason:
+            return False, (
+                'active observation is not motion-safe: '
+                f'{observation.rejection_reason}')
+        preflight = _build_candidate(
+            candidate_id=f'{observation.candidate_id}_servo_preflight',
+            distance_m=observation.distance_m,
+            camera_height_m=observation.camera_height_m,
+            azimuth_deg=observation.azimuth_deg,
+            camera_position=observation.camera_position,
+            camera_quat=observation.camera_quat,
+            tool_position=observation.tool_position,
+            tool_quat=observation.tool_quat,
+            visible=True,
+            visible_margin_px=math.inf,
+            observation_mode=getattr(observation, 'observation_mode', 'ik'),
+            joint_positions=getattr(observation, 'joint_positions', ()),
+        )
+        try:
+            self._observation_optimizer.evaluate_ik(
+                preflight, current_joints, current_joints)
+        except (KeyError, TypeError, ValueError):
+            return False, f'incomplete joint state for {stage_message} preflight'
+        if preflight.rejection_reason:
+            return False, (
+                f'{stage_message} preflight rejected: '
+                f'{preflight.rejection_reason}')
+        self.get_logger().info(
+            f'[ARM][{stage}_PREFLIGHT] target={target.target_id} '
+            f'mode={getattr(observation, "observation_mode", "ik")} '
+            f'source={source} error={error_norm_px:.1f}px '
+            f'condition={preflight.condition_number:.2f} '
+            f'joint_margin={preflight.min_joint_margin_rad:.2f} '
+            'collision=active_moveit_plan')
+        return True, ''
+
+    def _servo_handoff_preflight(
+            self, target, current_joints, *, source, error_norm_px):
+        """Verify the stationary observation state before starting Servo."""
+        return self._motion_preflight(
+            target, current_joints, source=source,
+            error_norm_px=error_norm_px, stage='SERVO')
+
+    def _confirm_servo_handoff(
+            self, target, current_joints, desired_u, desired_v,
+            cancel_requested, *, pre_error_u, pre_error_v, planned_angle_deg,
+            event, source, candidate=None, confirmed=None):
+        """Reconfirm a target, enforce the bounded Servo entry, then preflight."""
+        if confirmed is None:
+            if not self._wait_for_target_confirmation(
+                    target.target_id, cancel_requested, require_workspace=False):
+                return False, 'target was not freshly reconfirmed before visual servo'
+            confirmed = self._latest_target()
+        post_error_u, post_error_v = target_pixel_error(
+            confirmed.center_u, confirmed.center_v, desired_u, desired_v)
+        post_error_norm = math.hypot(post_error_u, post_error_v)
+        entry_px = self._recenter_config.get(
+            'servo_entry_px', self._recenter_config['workspace_px'])
+        if post_error_norm > entry_px:
+            self._publish_observation_debug(
+                'target_recenter_failed', candidate,
+                target_id=target.target_id,
+                pre_error_u_px=pre_error_u,
+                pre_error_v_px=pre_error_v,
+                post_error_u_px=post_error_u,
+                post_error_v_px=post_error_v,
+                planned_angle_deg=planned_angle_deg,
+                rejection_reason='servo_entry_tolerance_not_reached')
+            return False, (
+                f'target residual {post_error_norm:.1f}px exceeds Servo entry '
+                f'tolerance {entry_px:.1f}px')
+        inputs = self._wait_for_observation_inputs()
+        if inputs is None:
+            return False, 'camera or joint state unavailable for Servo preflight'
+        _camera, current_joints = inputs
+        preflight_ok, preflight_message = self._servo_handoff_preflight(
+            confirmed, current_joints, source=source,
+            error_norm_px=post_error_norm)
+        if not preflight_ok:
+            self._publish_observation_debug(
+                'target_recenter_failed', candidate,
+                target_id=target.target_id,
+                pre_error_u_px=pre_error_u,
+                pre_error_v_px=pre_error_v,
+                post_error_u_px=post_error_u,
+                post_error_v_px=post_error_v,
+                planned_angle_deg=planned_angle_deg,
+                rejection_reason=preflight_message)
+            return False, preflight_message
+        self._publish_observation_debug(
+            event, candidate,
+            target_id=target.target_id,
+            pre_error_u_px=pre_error_u,
+            pre_error_v_px=pre_error_v,
+            post_error_u_px=post_error_u,
+            post_error_v_px=post_error_v,
+            planned_angle_deg=planned_angle_deg)
+        return True, 'target reconfirmed for visual servo'
+
     def _recenter_target(self, target, attempt, cancel_requested):
         """使用掩膜安全瞄准点执行有限角度重心，并重新确认同一逻辑目标。
 
@@ -763,41 +885,20 @@ class ObservationFlowMixin:
         pre_error_u, pre_error_v = target_pixel_error(
             target.center_u, target.center_v, desired_u, desired_v)
         
-        # 如果目标已经在配置的视觉伺服工作窗口内，则跳过重心动作
-        if not target_requires_recenter(
-                target.center_u, target.center_v, desired_u, desired_v,
-                self._recenter_config['trigger_px']):
-            if not self._wait_for_target_confirmation(
-                    target.target_id, cancel_requested, require_workspace=False):
-                return False, (
-                    'target was not freshly reconfirmed before visual servo')
-            confirmed = self._latest_target()
-            post_error_u, post_error_v = target_pixel_error(
-                confirmed.center_u, confirmed.center_v, desired_u, desired_v)
-            post_error_norm = math.hypot(post_error_u, post_error_v)
-            if post_error_norm > self._recenter_config['workspace_px']:
-                self._publish_observation_debug(
-                    'target_recenter_failed',
-                    target_id=target.target_id,
-                    pre_error_u_px=pre_error_u,
-                    pre_error_v_px=pre_error_v,
-                    post_error_u_px=post_error_u,
-                    post_error_v_px=post_error_v,
-                    planned_angle_deg=0.0,
-                    rejection_reason='servo_entry_tolerance_not_reached')
-                return False, (
-                    f'target drifted to {post_error_norm:.1f}px outside '
-                    f'Servo entry tolerance '
-                    f'{self._recenter_config["workspace_px"]:.1f}px')
-            self._publish_observation_debug(
-                'target_recenter_not_required',
-                target_id=target.target_id,
-                pre_error_u_px=pre_error_u,
-                pre_error_v_px=pre_error_v,
-                post_error_u_px=post_error_u,
-                post_error_v_px=post_error_v,
-                planned_angle_deg=0.0)
-            return True, 'target already inside fine-servo workspace'
+        entry_px = self._recenter_config.get(
+            'servo_entry_px', self._recenter_config['workspace_px'])
+        pre_error_norm = math.hypot(pre_error_u, pre_error_v)
+        if pre_error_norm <= entry_px:
+            source = (
+                'inside_recenter_trigger' if not target_requires_recenter(
+                    target.center_u, target.center_v, desired_u, desired_v,
+                    self._recenter_config['trigger_px'])
+                else 'bounded_servo_entry')
+            return self._confirm_servo_handoff(
+                target, current_joints, desired_u, desired_v, cancel_requested,
+                pre_error_u=pre_error_u, pre_error_v=pre_error_v,
+                planned_angle_deg=0.0,
+                event='target_recenter_not_required', source=source)
         
         # 若目标不在工作空间内，开始计算重心候选
         index = self._observation_candidate_index
@@ -917,35 +1018,16 @@ class ObservationFlowMixin:
                 f'total={total_angle_deg:.1f}deg '
                 f'error={previous_error_norm:.1f}px'
                 f'→{math.hypot(post_error_u, post_error_v):.1f}px')
-        post_error_norm = math.hypot(post_error_u, post_error_v)
-        if post_error_norm > self._recenter_config['workspace_px']:
-            self._publish_observation_debug(
-                'target_recenter_failed', candidate,
-                target_id=target.target_id,
-                pre_error_u_px=pre_error_u,
-                pre_error_v_px=pre_error_v,
-                post_error_u_px=post_error_u,
-                post_error_v_px=post_error_v,
-                planned_angle_deg=total_angle_deg,
-                rejection_reason='servo_entry_tolerance_not_reached')
-            return False, (
-                f'target recenter residual {post_error_norm:.1f}px exceeds '
-                f'Servo entry tolerance '
-                f'{self._recenter_config["workspace_px"]:.1f}px '
-                f'after {iterations} step(s), total_angle='
-                f'{total_angle_deg:.1f}deg')
-        # 粗对准只负责把一个新鲜、有效的锁定目标送入 Servo 可控窗口。
-        # 不在这里重复要求检测点连续 0.2s 漂移小于 4px：低置信度分割框在
-        # 静止画面也可能有数像素抖动，这个前置门控会阻止 Servo 启动；真正的
-        # 对准稳定性由 AlignTarget 的 4px/0.5s 闭环成功条件统一判定。
-        self._publish_observation_debug(
-            'target_recenter_confirmed', candidate,
-            target_id=target.target_id,
-            pre_error_u_px=pre_error_u,
-            pre_error_v_px=pre_error_v,
-            post_error_u_px=post_error_u,
-            post_error_v_px=post_error_v,
-            planned_angle_deg=total_angle_deg)
+        # 粗对准只负责把一个新鲜、有效的锁定目标送入 Servo 可控窗口；最终
+        # 4px/0.5s 稳定性仍由 AlignTarget 闭环统一判定。
+        handoff_ok, handoff_message = self._confirm_servo_handoff(
+            target, current_joints, desired_u, desired_v, cancel_requested,
+            pre_error_u=pre_error_u, pre_error_v=pre_error_v,
+            planned_angle_deg=total_angle_deg,
+            event='target_recenter_confirmed', source='safe_moveit_recenter',
+            candidate=candidate, confirmed=confirmed)
+        if not handoff_ok:
+            return False, handoff_message
         self.get_logger().info(
             f'[ARM][RECENTER] target={target.target_id} '
             f'iterations={iterations} angle={total_angle_deg:.1f}deg '
@@ -957,7 +1039,7 @@ class ObservationFlowMixin:
 
     def _move_recenter_step(
             self, observation, target, camera, current_joints, *, camera_pose=None,
-            suffix='', max_angle_deg=None):
+            suffix='', max_angle_deg=None, residual_candidates=None):
         """用真实 C10 起点生成并执行一次安全的重心姿态。
 
         ``observation`` 只提供候选的距离、高度、方位和诊断身份；若调用方传入
@@ -978,8 +1060,13 @@ class ObservationFlowMixin:
             max_angle_deg = self._recenter_config['max_angle_deg']
         if max_angle_deg <= 0.0:
             return None, 0.0, 'recenter total angle limit reached'
-        # 尝试不同的残差，以逐步逼近目标而不是一次超大幅运动
-        for residual_px in self._recenter_config['residual_candidates_px']:
+        # 闭环模式尝试多个残差；实机单次对准显式传入 (0.0,)。
+        residual_candidates = (
+            self._recenter_config['residual_candidates_px']
+            if residual_candidates is None else tuple(residual_candidates))
+        if not residual_candidates:
+            return None, 0.0, 'no recenter residual candidates configured'
+        for residual_px in residual_candidates:
             try:
                 camera_position, camera_quat, angle_deg = recenter_camera_pose(
                     start_camera_position, start_camera_quat,
@@ -1122,24 +1209,75 @@ class ObservationFlowMixin:
                 (tree_hint.point.x, tree_hint.point.y, tree_hint.point.z),
                 (translation.x, translation.y, translation.z),
                 (rotation.x, rotation.y, rotation.z, rotation.w))
-            # 获取 tool0 到 camera_link 的固定外参
-            camera_transform = self._tf_buffer.lookup_transform(
-                'tool0', self._camera_frame, rclpy.time.Time())
         except (TransformException, ValueError) as error:
             self._observation_failure_reason = f'observation_tf_failed: {error}'
             self.get_logger().error(f'[ARM] cannot build observation pose: {error}')
             return False
+        self._tree_in_base = tree_in_base
+
+        if self._observation_mode == 'joint_presets' and tree_in_base[1] <= 0.0:
+            self._observation_failure_reason = (
+                'joint_preset_tree_side_unsupported '
+                f'(tree_y_m={tree_in_base[1]:.3f}, requires>0)')
+            self.get_logger().error(
+                '[ARM][OBSERVE] mode=joint_presets rejects tree on or right of '
+                f'the base Y axis: y={tree_in_base[1]:.3f} m')
+            self._publish_observation_debug(
+                'search_failed',
+                rejection_reason=self._observation_failure_reason)
+            return False
+
+        try:
+            # 粗对准仍需已加载的 tool0 -> camera 外参；预设扫描本身不使用它求 IK。
+            camera_transform = self._tf_buffer.lookup_transform(
+                'tool0', self._camera_frame, rclpy.time.Time())
+        except TransformException as error:
+            self._observation_failure_reason = f'observation_tf_failed: {error}'
+            self.get_logger().error(f'[ARM] cannot load camera mount: {error}')
+            return False
         camera_translation = camera_transform.transform.translation
         camera_rotation = camera_transform.transform.rotation
-        self._tree_in_base = tree_in_base
         self._camera_mount = (
             (camera_translation.x, camera_translation.y, camera_translation.z),
             (camera_rotation.x, camera_rotation.y,
              camera_rotation.z, camera_rotation.w),
         )
+        if self._observation_mode == 'joint_presets':
+            if not self._prepare_joint_preset_observation_candidates():
+                return False
+            return self._move_to_next_observation()
         if not self._prepare_observation_candidates():
             return False
         return self._move_to_next_observation()
+
+    def _prepare_joint_preset_observation_candidates(self):
+        """Prepare the fixed real-arm scan order without camera look-at IK."""
+        self._observation_candidates = []
+        self._observation_candidate_index = -1
+        for index, (name, joints) in enumerate(self._joint_preset_positions):
+            self._observation_candidates.append(_build_candidate(
+                candidate_id=f'joint_preset_{name}',
+                distance_m=self._spray_working_distance,
+                camera_height_m=0.0,
+                azimuth_deg=(0.0, -1.0, 1.0)[index],
+                camera_position=(0.0, 0.0, 0.0),
+                camera_quat=(0.0, 0.0, 0.0, 1.0),
+                tool_position=(0.0, 0.0, 0.0),
+                tool_quat=(0.0, 0.0, 0.0, 1.0),
+                visible=True,
+                visible_margin_px=math.inf,
+                visible_fraction=1.0,
+                observation_mode='joint_presets',
+                joint_positions=joints,
+            ))
+            self._observation_candidates[-1].selection_phase = (
+                'center_initial' if index == 0 else 'fan_scan')
+        self.get_logger().info(
+            '[ARM][OBSERVE] mode=joint_presets tree_in_base='
+            f'({self._tree_in_base[0]:.2f},{self._tree_in_base[1]:.2f},'
+            f'{self._tree_in_base[2]:.2f}) prepared='
+            f'{len(self._observation_candidates)}')
+        return True
 
     def _prepare_observation_candidates(self):
         """生成观察网格，结合碰撞 IK 和 URDF 指标保留少量安全候选。"""
@@ -1194,7 +1332,19 @@ class ObservationFlowMixin:
             f'best_visible_fraction={best_fraction:.3f}')
         self._observation_candidate_index = -1
         if not self._observation_candidates:
-            if not candidates or visible_count == 0:
+            if not candidates:
+                tree_range = math.hypot(
+                    float(self._tree_in_base[0]),
+                    float(self._tree_in_base[1]))
+                minimum_range = (
+                    float(self._observation_config['distance_min_m']) + 0.05)
+                if tree_range <= minimum_range:
+                    reason = (
+                        'tree_too_close_for_observation_standoff '
+                        f'(range={tree_range:.3f}m, requires>{minimum_range:.3f}m)')
+                else:
+                    reason = 'no_camera_coverage_candidate'
+            elif visible_count == 0:
                 reason = 'no_camera_coverage_candidate'
             elif ik_count == 0:
                 reason = 'no_collision_free_ik_candidate'
@@ -1225,6 +1375,30 @@ class ObservationFlowMixin:
             candidate = self._observation_candidates[self._observation_candidate_index]
             if self._aborted(lambda: False):
                 return False
+            if getattr(candidate, 'observation_mode', 'ik') == 'joint_presets':
+                if not self.arm.move_joints(candidate.joint_positions):
+                    candidate.rejection_reason = 'joint_preset_move_failed'
+                    self.get_logger().warn(
+                        '[ARM][OBSERVE] mode=joint_presets failed '
+                        f'index={self._observation_candidate_index} '
+                        f'id={candidate.candidate_id}; trying next preset')
+                    self._publish_observation_debug('candidate_rejected', candidate)
+                    continue
+                camera_pose = self._current_camera_pose()
+                if camera_pose is not None:
+                    candidate.camera_position, candidate.camera_quat = camera_pose
+                    candidate.camera_height_m = candidate.camera_position[2]
+                self._observation_distance = self._spray_working_distance
+                self._observation_pose = None
+                joints_deg = ','.join(
+                    f'{math.degrees(value):.1f}'
+                    for value in candidate.joint_positions)
+                self.get_logger().info(
+                    '[ARM][OBSERVE] mode=joint_presets selected '
+                    f'index={self._observation_candidate_index} '
+                    f'id={candidate.candidate_id} joints_deg=[{joints_deg}]')
+                self._publish_observation_debug('candidate_selected', candidate)
+                return True
             if self._execute_candidate_motion(
                     candidate,
                     tolerance_position=self._observation_config[
@@ -1321,6 +1495,8 @@ class ObservationFlowMixin:
             visible_fraction = 0.0
             projected_bbox = ()
             target_u = target_v = None
+            observation_mode = getattr(self, '_observation_mode', 'ik')
+            joint_positions_deg = ()
         else:
             candidate_id = candidate.candidate_id
             distance = candidate.distance_m
@@ -1339,6 +1515,10 @@ class ObservationFlowMixin:
             target_u = candidate.target_u_px
             target_v = candidate.target_v_px
             rejection_reason = rejection_reason or candidate.rejection_reason
+            observation_mode = getattr(candidate, 'observation_mode', 'ik')
+            joint_positions_deg = tuple(
+                round(math.degrees(value), 4)
+                for value in getattr(candidate, 'joint_positions', ()))
         payload = {
             'event': event,
             'mission_id': self._active_mission,
@@ -1350,7 +1530,11 @@ class ObservationFlowMixin:
             'camera_z_in_base_m': camera_z_in_base,
             'azimuth_deg': azimuth,
             'observation_phase': selection_phase,
-            'selection_policy': 'center_then_fan',
+            'observation_mode': observation_mode,
+            'selection_policy': (
+                'joint_preset_center_then_fan'
+                if observation_mode == 'joint_presets' else 'center_then_fan'),
+            'joint_positions_deg': joint_positions_deg,
             'visible': visible,
             'visible_fraction': visible_fraction,
             'required_visible_fraction': self._observation_config[
@@ -1382,7 +1566,15 @@ class ObservationFlowMixin:
                 f'joint_margin={margin:.3f} reason={rejection_reason or "-"}')
 
     def _return_to_observation(self):
-        if self._observation_pose is None or self._abort.is_set():
+        if self._abort.is_set():
+            return False
+        index = self._observation_candidate_index
+        if (0 <= index < len(self._observation_candidates) and
+                getattr(self._observation_candidates[index], 'observation_mode', 'ik')
+                == 'joint_presets'):
+            return self.arm.move_joints(
+                self._observation_candidates[index].joint_positions)
+        if self._observation_pose is None:
             return False
         position, quat = self._observation_pose
         return self._move_to_pose((position, quat))

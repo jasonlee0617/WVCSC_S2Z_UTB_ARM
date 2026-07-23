@@ -1,15 +1,39 @@
 wvcsc_spray_task:
   ros__parameters:
-    # Real perception is leaf-only.  No diseased_fruit alias is permitted.
-    target_class_name: disease_leaf
+    # Real model is leaf-only; ROS interface uses the shared diseased_target name.
+    target_class_name: diseased_target
     tree_confidence: 0.25
     fruit_confidence: 0.25
     target_post_recenter_min_confidence: 0.30
+    # 仅用于已标定喷嘴轴线投影，不作为实际喷洒距离门控。
     spray_working_distance_m: 1.00
-    spray_working_distance_tolerance_m: 0.05
+    # Real hardware follows the same coarse-MoveIt + Visual Servo path as
+    # simulation.  If that alignment cannot complete, spraying may continue
+    # only after returning to a planned observation pose and reconfirming the
+    # same disease target.
+    spray_on_alignment_failure: true
+
+    # Field-validated left-side corn scan.  These are planned by MoveIt in
+    # joint space; they are not sent directly to the arm controller.
+    observation_mode: joint_presets
+    joint_preset_center_deg: [95.3, -136.9, -71.0, 7.7, 57.3, -4.4]
+    joint_preset_fan_left_deg: [52.2, -131.7, -55.4, -58.9, 76.5, 18.2]
+    joint_preset_fan_right_deg: [118.5, -129.4, -55.8, 47.6, 66.2, -17.1]
+
+    # ``joint_presets`` is MoveIt joint-space planning, not direct FK output.
+    # A target outside 48px receives collision-aware MoveIt coarse alignment
+    # before Visual Servo takes over.  The Servo entry window matches the
+    # shared closed-loop workflow; it is not a spray-distance gate.
+    target_recenter_trigger_px: 48.0
+    target_recenter_workspace_px: 128.0
+    visual_servo_entry_max_error_px: 128.0
+    # A single field-of-view correction may exceed the generic 20deg default.
+    # Final motion still must pass collision IK, kinematic and OMPL checks.
+    target_recenter_max_angle_deg: 45.0
+    target_recenter_max_total_angle_deg: 45.0
 
     max_alignment_attempts: 2
-    vision_timeout_sec: 8.0
+    vision_timeout_sec: 30.0
     spray_action_name: /spray/execute
     vision_action_name: /vision/align_target
 
@@ -18,12 +42,12 @@ wvcsc_spray_task:
     fruit_zone_height_max_m: 1.60
     fruit_zone_radius_m: 0.60
     observation_min_visible_fraction: 0.60
-    observation_distance_min_m: 1.00
-    observation_distance_max_m: 1.00
+    observation_distance_min_m: 1.0
+    observation_distance_max_m: 1.5
     observation_distance_step_m: 0.10
     # 相机光心相对 alicia_base_link 的 Z 高度；0.20 m 为确认的最小车顶净空。
-    camera_height_min_m: 0.20
-    camera_height_max_m: 0.40
+    camera_height_min_m: 0.15
+    camera_height_max_m: 0.30
     camera_height_step_m: 0.10
     observation_max_condition_number: 16.0
 

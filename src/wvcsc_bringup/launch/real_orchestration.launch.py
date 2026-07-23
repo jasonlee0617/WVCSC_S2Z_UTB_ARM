@@ -1,11 +1,12 @@
-"""Real perception, arm task and measured-site mission orchestration."""
+"""Real perception, arm task and fixed five-point field orchestration."""
 
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -14,8 +15,8 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     bringup_share = get_package_share_directory('wvcsc_bringup')
     description_share = get_package_share_directory('wvcsc_description')
-    mission_share = get_package_share_directory('wvcsc_mission_manager')
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
+    controller_share = get_package_share_directory('controller_pkg')
     real_config = os.path.join(bringup_share, 'config', 'real')
 
     xacro_file = os.path.join(
@@ -103,40 +104,38 @@ def generate_launch_description():
             {
                 'spray_working_distance_m': ParameterValue(
                     LaunchConfiguration('aim_fixed_range_m'), value_type=float),
-                'spray_working_distance_tolerance_m': ParameterValue(
-                    LaunchConfiguration('aim_range_tolerance_m'),
-                    value_type=float),
+                'observation_mode': LaunchConfiguration('observation_mode'),
             },
             robot_description,
         ],
         output='screen')
-    spray_simulator = Node(
-        package='wvcsc_arm_task', executable='spray_simulator',
+    spray_actuator = Node(
+        package='wvcsc_arm_task', executable='spray_actuator',
         parameters=[
-            os.path.join(
-                get_package_share_directory('wvcsc_arm_task'),
-                'config', 'spray_sim.yaml'),
+            os.path.join(real_config, 'spray_actuator_real.yaml'),
             {'use_sim_time': False},
         ],
         output='screen')
-    mission_manager = Node(
-        package='wvcsc_mission_manager', executable='mission_manager',
+    relay_controller = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            controller_share, 'launch', 'controller.launch.py')),
+        launch_arguments={
+            'config_file': LaunchConfiguration('relay_config_file'),
+        }.items(),
+    )
+    field_route_manager = Node(
+        package='wvcsc_bringup', executable='field_route_manager.py',
         parameters=[
-            os.path.join(mission_share, 'config', 'mission_manager.yaml'),
             {
                 'use_sim_time': False,
-                'auto_start': False,
-                'require_docking_quality': True,
+                'mission_file': LaunchConfiguration('mission_file'),
+                'map_file': LaunchConfiguration('map'),
+                'auto_start': True,
+                'wide_relay_channel': 1,
+                'arm_relay_channel': 2,
             },
         ],
         remappings=[('/odom', '/ekf_odom')],
-        output='screen')
-    measured_loader = Node(
-        package='wvcsc_bringup', executable='load_site_mission.py',
-        arguments=[
-            '--file', LaunchConfiguration('mission_file'),
-            '--map', LaunchConfiguration('map'),
-        ],
         output='screen')
     keyboard = Node(
         package='wvcsc_arm_task', executable='motion_control_keyboard',
@@ -152,7 +151,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'mission_file',
             default_value=os.path.expanduser(
-                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml')),
+                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/field_route_corn.yaml')),
         DeclareLaunchArgument('map'),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
@@ -160,6 +159,7 @@ def generate_launch_description():
         DeclareLaunchArgument('default_speed', default_value='0.5'),
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.20'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
+        DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
         DeclareLaunchArgument('c10_mount_xyz', default_value='-0.055 0 -0.10'),
         DeclareLaunchArgument(
             'c10_mount_rpy', default_value='0 -1.57079632679 0'),
@@ -169,12 +169,16 @@ def generate_launch_description():
         DeclareLaunchArgument('aim_range_tolerance_m', default_value='0.05'),
         DeclareLaunchArgument('aim_trim_u_px', default_value='0.0'),
         DeclareLaunchArgument('aim_trim_v_px', default_value='0.0'),
+        DeclareLaunchArgument(
+            'relay_config_file',
+            default_value=os.path.join(
+                controller_share, 'config', 'fault.ini')),
+        relay_controller,
         yolo,
         visual_servo,
         motion_control,
         spray_task,
-        spray_simulator,
-        mission_manager,
-        measured_loader,
+        spray_actuator,
+        field_route_manager,
         keyboard,
     ])

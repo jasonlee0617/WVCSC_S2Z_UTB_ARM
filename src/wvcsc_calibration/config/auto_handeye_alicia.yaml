@@ -80,3 +80,6 @@ auto_calibration_collector:
     # 每个视角族先规划前N个，再按需继续展开，避免人为截断安全候选。
     candidate_plan_attempts_per_family: 3
     output_file: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml
+    easy_handeye_output_file: ~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib
+    # 实机必须由操作者按 s/Enter 确认工作区安全后才开始运动。
+    auto_start: false

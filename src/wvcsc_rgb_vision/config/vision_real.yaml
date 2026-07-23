@@ -3,10 +3,10 @@ wvcsc_two_stage_yolo:
     image_topic: /camera/color/image_raw
     selected_target_topic: /vision/selected_target_id
     tree_detections_topic: /vision/tree_detections
-    fruit_detections_topic: /vision/fruit_detections
+    diseased_target_detections_topic: /vision/diseased_target_detections
     target_topic: /vision/target
     tree_visualization_topic: /vision/tree_debug_image
-    fruit_visualization_topic: /vision/fruit_debug_image
+    diseased_target_visualization_topic: /vision/diseased_target_debug_image
     perception_debug_topic: /vision/perception_debug
     perception_debug_rate_hz: 5.0
     inference_mode_topic: /vision/inference_mode
@@ -16,9 +16,9 @@ wvcsc_two_stage_yolo:
     tree_class_id: 0
     tree_class_name: tree
     target_class_id: 0
-    target_class_name: disease_leaf
-    target_id_prefix: leaf
-    # 实机权重必须严格为 detect:{0: tree} 和 segment:{0: disease_leaf}。
+    target_class_name: diseased_target
+    target_id_prefix: target
+    # 实机权重原生为 segment:{0: disease_leaf}，ROS 输出统一为 diseased_target。
     strict_model_classes: true
 
     tree_confidence: 0.25

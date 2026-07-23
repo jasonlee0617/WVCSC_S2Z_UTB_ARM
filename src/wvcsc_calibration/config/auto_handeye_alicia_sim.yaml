@@ -5,6 +5,8 @@ auto_calibration_collector:
     # 采集状态机。实机配置未设置该参数，默认必须人工按 s/Enter 启动。
     auto_start: true
     output_file: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye_sim.yaml
+    # Gazebo 回归不得覆盖实机部署外参。
+    easy_handeye_output_file: ''
     velocity_scaling: 0.20
     acceleration_scaling: 0.20
     # Gazebo 的 joint_states.velocity 与位置差分不一致，静止性以更可靠的

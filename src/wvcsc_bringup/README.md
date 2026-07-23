@@ -63,11 +63,22 @@ ls -l /dev/yesense_IMU
 旧版 `fdilink_ahrs` 代码和包仍保留，但已从默认启动链停用；只有回滚到旧 IMU
 时才恢复对应的注释启动块，禁止两个驱动同时运行。
 
-## 3. 逐树实测停靠点
+## 3. 旧共享逐树实测停靠点
+
+这一节的 schema-v3 文件仍供仿真、Nav2 Qt 和 `/mission/load_manual`
+使用；它不是新的实机五点作业入口。
 
 AMCL稳定后，人工驾驶并停稳。卷尺必须从机械臂基座物理原点测量，坐标轴
 保持与车体平行：`+X`为车头前方、`+Y`为车体左侧。树在机械臂基座正侧方时
-`--tree-forward-m`填`0.0`，允许的纵向误差为`±0.20 m`：
+`--tree-x-m`填`0.0`，允许的纵向误差为`±0.20 m`：
+
+已有的 schema-v2 站点文件可迁移，schema-v1 文件必须重新采集：
+
+```bash
+ros2 run wvcsc_bringup migrate_site_mission -- \
+  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
+  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
+```
 
 ```bash
 ros2 run wvcsc_bringup capture_site_pose -- \
@@ -79,7 +90,7 @@ ros2 run wvcsc_bringup capture_site_pose -- \
   --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
   --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
   --target-id corn_01 \
-  --tree-forward-m 0.0 --tree-left-m <左向实测值> \
+  --tree-x-m 0.0 --tree-y-m <带符号实测值> \
   --spray-duration 5.0
 ```
 
@@ -107,12 +118,33 @@ AMCL 位置/偏航标准差 ≤ 1.00 m/rad。门限集中定义在
 ```bash
 ros2 run wvcsc_bringup capture_site_pose -- \
   --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
-  --target-id tree_01 --tree-forward-m 0.0 --tree-left-m 1.60 \
+  --target-id tree_01 --tree-x-m 0.0 --tree-y-m 1.60 \
   --timeout-sec 60 --force-capture
 ```
 
 该模式仅保留初始 `/imu`、`/ekf_odom`、`/amcl_pose` 和 30 个有效 TF 样本要求，
 跳过新鲜度、停稳、质量和地图 footprint 门控；仅用于当前调试，不代表站点位姿可靠。
+
+### 3.1 实机五点路线采集
+
+实机完整作业只接受 schema-v4 的五点路线，不会读取上面的 `corn_site.yaml`。
+现场逐点停稳后，用同一个文件依次采集 `point_1` 至 `point_5`。点 2、3 的树位置
+仍以 `alicia_base_link` 为原点：`+X` 向车头、`+Y` 向左；两点喷洒时长固定为 3.0 s。
+
+```bash
+ROUTE_FILE="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/field_route_corn.yaml"
+MAP_FILE="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
+
+ros2 run wvcsc_bringup capture_site_pose -- --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_1
+ros2 run wvcsc_bringup capture_site_pose -- --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_2 --tree-id corn_01 --tree-x-m 0.0 --tree-y-m 1.20
+ros2 run wvcsc_bringup capture_site_pose -- --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_3 --tree-id corn_02 --tree-x-m 0.0 --tree-y-m 1.20
+ros2 run wvcsc_bringup capture_site_pose -- --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_4
+ros2 run wvcsc_bringup capture_site_pose -- --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_5
+ros2 run wvcsc_bringup validate_field_route -- --file "$ROUTE_FILE" --map "$MAP_FILE"
+```
+
+不要把图中约 8 m、2 m 的示意值直接写成导航坐标；采点工具会写入地图哈希、五点
+位姿和每点质量记录。地图改变后，旧路线将被前置检查拒绝。
 
 ## 4. 机械臂单独喷洒测试
 
@@ -127,8 +159,8 @@ VisualServo、SprayTask 和喷洒 Action。它不启动底盘、LiDAR、IMU、EK
 
 启动前还会读取实机标定：
 
-- `$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml`；
-- `~/.ros/wvcsc_calibration/nozzle.yaml`。
+- `~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib`（支持 easy_handeye2 原始格式）；
+- 喷洒测试暂时将 `tool0` 作为喷洒中心线，喷嘴挂载为零位姿，不读取喷嘴标定文件。
 
 启动机械臂单独测试栈：
 
@@ -139,13 +171,28 @@ ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
 
 另开终端，按机械臂基座 `alicia_base_link` 测量玉米树位置后发送一次喷洒目标。
 坐标约定与采点一致：`+X` 为车头前方，`+Y` 为车体左侧。玉米树放在机械臂正左侧
-时 `--tree-forward-m` 填 `0.0`：
+时 `--tree-x-m` 填 `0.0`：
+
+实机默认 `observation_mode:=joint_presets`：MoveIt 会按“正对、左扇形、右扇形”
+三组已现场确认的关节姿态扫描，且只允许 `tree_y_m > 0` 的左侧树。当前
+`spray_working_distance_m=1.00 m` 是这三组姿态的人工确认作业距离；不是由初始
+观察 IK 计算得出。右侧树（`tree_y_m <= 0`）会在机械臂运动前明确拒绝，必须显式
+改用原有 IK 观察模式：
+
+```bash
+ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
+  observation_mode:=ik \
+  yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python"
+```
+
+IK 模式才要求树到机械臂基座的二维距离**大于 `1.05 m`**，否则相机在基座与树之间
+没有生成 `1.00 m` 观察位姿的空间。建议使用 `|--tree-y-m| = 1.50 m`。
 
 ```bash
 ros2 run wvcsc_bringup arm_spray_once -- \
   --target-id corn_01 \
-  --tree-forward-m 0.0 \
-  --tree-left-m 1.50 \
+  --tree-x-m 0.0 \
+  --tree-y-m 1.50 \
   --spray-duration 5.0
 ```
 
@@ -156,7 +203,7 @@ ros2 topic hz /camera/color/image_raw
 ros2 topic echo /mission/status --once
 ros2 topic echo /vision/inference_mode
 ros2 topic hz /vision/tree_debug_image
-ros2 topic hz /vision/fruit_debug_image
+ros2 topic hz /vision/diseased_target_debug_image
 ros2 topic echo /vision/target
 ros2 topic echo /vision/visual_servo_debug
 ros2 topic echo /spray/simulated_active
@@ -165,18 +212,48 @@ ros2 topic echo /spray/simulated_active
 通过标准：日志依次出现 `MOVING_TO_OBSERVE`、`SCANNING_TREE`、
 `DETECTING_FRUITS`、`QUEUING`、`ALIGNING`、`SPRAYING`、
 `RETURNING_TO_OBSERVE`、`RETURNING_HOME`；`/vision/tree_debug_image` 能看到
-玉米树框，`/vision/fruit_debug_image` 能看到 `disease_leaf` 标注，
+玉米树框，`/vision/diseased_target_debug_image` 能看到 `diseased_target` 标注，
 `/vision/visual_servo_debug` 返回成功，对应喷洒期间
 `/spray/simulated_active` 为 `true`。
 
-当前入口默认使用 `spray_simulator` 验证流程，不直接控制真实泵/阀。接入真实喷洒
-硬件时，只替换 `/spray/execute` 的 Action server，保持 `Spray` Action 接口不变。
+当前实机入口默认通过 `controller_pkg` 的 `/relay/set` 控制第 2 路虫害喷洒
+继电器。实机 `spray_actuator_real.yaml` 固定使用 `spray_mode: service`，不会退回
+仿真的 `timer` 模式。启动前必须确认 `controller_pkg/resource/fault.ini` 的继电器
+串口、波特率和从站地址与实际设备一致；这里的继电器串口与上面的机械臂
+`serial_port` 是两条独立串口，不能因为机械臂使用 `/dev/ttyACM0` 就把继电器也改成
+同一个设备。
+
+在小车工控机上先验证服务和继电器，再启动完整测试：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/robot/WVCSC_S2Z_UTB_ARM/install/setup.bash
+ros2 service type /relay/set
+ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
+  "{channel: 2, enabled: true, duration: 1.0}"
+ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
+  "{channel: 2, enabled: false, duration: 0.0}"
+```
+
+确认第 2 路实际动作后，再启动：
+
+```bash
+ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
+  yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python" \
+  serial_port:=/dev/ttyACM0 \
+  relay_config_file:=/absolute/path/to/relay_fault.ini
+```
+
+`relay_config_file` 不传时使用安装包中的
+`controller_pkg/config/fault.ini`。喷洒 Action 开始时，执行器会先等待
+`/relay/set` 返回 `success=true`，请求第 2 路并带上喷洒时长；服务端还会按该时长
+自动断开，Action 结束和取消路径也会显式断开第 2 路。
 
 ## 5. 完整定位与作业
 
 ```bash
 ros2 launch wvcsc_bringup real_system_mission.launch.py \
-  mission_file:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml" \
+  mission_file:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/field_route_corn.yaml" \
   map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
 ```
 
@@ -184,7 +261,7 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 
 - C10 和 Alicia-M 设备路径；
 - 地图文件和 ROS 包；
-- 实测任务、地图哈希、停车区域与采样质量；
+- schema-v4 五点路线、地图哈希、停车区域与采样质量；
 - 独立 YOLO Python 环境；
 - `yolov8s_real.pt`: `detect`, `{0: tree}`；
 - `yolov8s_seg_real.pt`: `segment`, `{0: disease_leaf}`。
@@ -196,22 +273,27 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 `wvcsc_rgb_vision/models/`。权重缺失或类别契约不匹配时，整个实机启动会
 在硬件上电前失败，不会回退到仿真权重。
 
-任务默认不自动开始。检查相机、定位和 `/mission/plan` 后启动：
+前置检查、Nav2、机械臂 Action 和 `/relay/set` 都就绪后，五点路线会自动开始：
+
+1. 进入第 1 点前接通第 1 路广域喷洒；
+2. 第 2、3 点到达后断开第 1 路，确认车辆停稳，机械臂识别病害并只通过第 2 路喷洒 3.0 s；
+3. 每次机械臂成功后重新接通第 1 路并驶向下一点；第 4 点关闭第 1 路；
+4. 第 5 点再次关闭第 1、2 路，确认停稳后结束。
+
+任一继电器、导航、机械臂、病害识别、取消或超时失败都会取消活动 Action，命令第 1、2
+路断开，并以 `FAILED` 结束。运行中查看 `/mission/status`；人工取消使用：
 
 ```bash
-ros2 service call /mission/start std_srvs/srv/Trigger "{}"
+ros2 service call /field_route/cancel std_srvs/srv/Trigger "{}"
 ```
-
-实测任务加载后不会自动执行。先检查`/mission/plan`中的树根坐标和停靠位姿，
-再调用 `/mission/start`。
 
 ## 6. 停止与恢复
 
-停止任务时先取消任务或终止 launch，确认 `/cmd_vel` 已归零，再使用机械臂
+停止五点任务时先调用 `/field_route/cancel` 或终止 launch，确认 `/cmd_vel` 已归零，再使用机械臂
 控制命令：
 
 ```bash
-ros2 service call /mission/cancel std_srvs/srv/Trigger "{}"
+ros2 service call /field_route/cancel std_srvs/srv/Trigger "{}"
 ros2 topic pub --once /motion_control/command \
   std_msgs/msg/String "{data: stop}"
 ros2 topic pub --once /motion_control/command \
@@ -219,8 +301,6 @@ ros2 topic pub --once /motion_control/command \
 # 等待 /motion_control/state 显示 HOME_LOCKED 后再恢复。
 ros2 topic pub --once /motion_control/command \
   std_msgs/msg/String "{data: resume}"
-ros2 service call /mission/reset std_srvs/srv/Trigger "{}"
-ros2 service call /mission/start std_srvs/srv/Trigger "{}"
 ```
 
 `motion_control_keyboard` 只提供空格停止、`h` 回 HOME、`r` 恢复；不会自动

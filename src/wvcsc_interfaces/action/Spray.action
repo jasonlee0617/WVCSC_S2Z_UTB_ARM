@@ -10,6 +10,7 @@ uint16 INVALID_GOAL=1
 uint16 BUSY=2
 uint16 CANCELED=3
 uint16 EMERGENCY_STOPPED=4
+uint16 RELAY_FAILED=5
 bool success
 uint16 error_code
 string message

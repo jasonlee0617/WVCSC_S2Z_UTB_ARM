@@ -7,7 +7,7 @@
 - 小车停在现场固定位置，底盘不运动；
 - 参照仿真，将玉米树放在机械臂左侧；
 - 只测试 Alicia-M、C10、真实 YOLO、VisualServo、SprayTask 和喷洒 Action；
-- 默认使用 `spray_simulator` 验证流程，不直接打开真实喷头或水泵。
+- 默认使用 `spray_actuator` 的 `timer` 模式验证流程，不直接打开真实喷头或水泵。
 
 ## 1. 当前解耦边界
 
@@ -24,7 +24,7 @@ ros2 launch wvcsc_bringup real_arm_spray_test.launch.py
 - `wvcsc_rgb_vision/two_stage_yolo`，加载 `vision_real.yaml`；
 - `wvcsc_visual_servo`；
 - `wvcsc_arm_task/spray_task`；
-- `wvcsc_arm_task/spray_simulator`。
+- `wvcsc_arm_task/spray_actuator`。
 
 该启动文件不会启动：
 
@@ -55,16 +55,15 @@ alicia_base_link
 - `+X`：车头前方；
 - `+Y`：车体左侧；
 - `+Z`：向上；
-- 玉米树放在机械臂正左侧时，`tree-forward-m=0.0`；
-- 玉米树距离机械臂基座左侧 1.50 m 时，`tree-left-m=1.50`。
+- 玉米树放在机械臂正侧方时，`tree-x-m=0.0`；
+- 玉米树距离机械臂基座左侧 1.50 m 时，`tree-y-m=1.50`；右侧填写负值。
 
 现场摆放建议：
 
 ```text
-tree-forward-m = 0.0
-tree-left-m    = 1.50
+tree-x-m       = 0.0
+tree-y-m       = 1.50
 tree-z-m       = 0.0
-spray-side     = left
 ```
 
 如果机械臂观察位姿规划失败，先不要调 VisualServo。优先检查树相对机械臂基座的位置是否过近、过远或不在左侧可达区域。
@@ -123,7 +122,7 @@ ls -l /dev/v4l/by-id/
 默认设备为：
 
 ```text
-/dev/v4l/by-id/usb-Synria_C10-video-index0
+/dev/video0
 ```
 
 如果现场设备名不同，启动时用 `c10_device:=...` 显式传入。
@@ -159,7 +158,7 @@ ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
 ```bash
 ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python" \
-  c10_device:=/dev/v4l/by-id/usb-Synria_C10-video-index0 \
+  c10_device:=/dev/video0 \
   serial_port:=/dev/ttyACM0 \
   arm_velocity_scaling:=0.20 \
   arm_acceleration_scaling:=0.20 \
@@ -185,8 +184,8 @@ source ~/WVCSC_S2Z_UTB_ARM/install/setup.bash
 
 ros2 run wvcsc_bringup arm_spray_once -- \
   --target-id corn_01 \
-  --tree-forward-m 0.0 \
-  --tree-left-m 1.50 \
+  --tree-x-m 0.0 \
+  --tree-y-m -1.0 \
   --spray-duration 5.0
 ```
 
@@ -194,10 +193,9 @@ ros2 run wvcsc_bringup arm_spray_once -- \
 
 - `--target-id`：本次测试目标 ID，只用于日志和视觉目标关联；
 - `--frame-id`：默认 `alicia_base_link`，不建议改；
-- `--tree-forward-m`：树相对机械臂基座的 X；
-- `--tree-left-m`：树相对机械臂基座的 Y；
+- `--tree-x-m`：树相对机械臂基座的 X；
+- `--tree-y-m`：树相对机械臂基座的 Y；正值表示左侧，负值表示右侧。
 - `--tree-z-m`：树根高度，默认 `0.0`；
-- `--spray-side`：默认 `left`；
 - `--spray-duration`：喷洒 Action 持续时间，默认建议 `5.0` 秒。
 
 如果树离机械臂左侧 1.60 m：
@@ -205,8 +203,8 @@ ros2 run wvcsc_bringup arm_spray_once -- \
 ```bash
 ros2 run wvcsc_bringup arm_spray_once -- \
   --target-id corn_01 \
-  --tree-forward-m 0.0 \
-  --tree-left-m 1.60 \
+  --tree-x-m 0.0 \
+  --tree-y-m 1.60 \
   --spray-duration 5.0
 ```
 
@@ -222,7 +220,7 @@ ros2 topic hz /camera/color/image_raw
 ros2 topic echo /mission/status --once
 ros2 topic echo /vision/inference_mode
 ros2 topic hz /vision/tree_debug_image
-ros2 topic hz /vision/fruit_debug_image
+ros2 topic hz /vision/diseased_target_debug_image
 ros2 topic echo /vision/target
 ros2 topic echo /vision/visual_servo_debug
 ros2 topic echo /spray/simulated_active
@@ -239,10 +237,10 @@ rqt_image_view
 ```text
 /camera/color/image_raw
 /vision/tree_debug_image
-/vision/fruit_debug_image
+/vision/diseased_target_debug_image
 ```
 
-注意：进入 `SPRAYING` 后，`spray_task` 会把 `/vision/inference_mode` 切到 `idle`，因此 `/vision/fruit_debug_image` 不会持续刷新。这不是识别失败，而是当前流程在喷洒阶段主动停止 YOLO 推理。
+注意：进入 `SPRAYING` 后，`spray_task` 会把 `/vision/inference_mode` 切到 `idle`，因此 `/vision/diseased_target_debug_image` 不会持续刷新。这不是识别失败，而是当前流程在喷洒阶段主动停止 YOLO 推理。
 
 ## 7. 成功标准
 
@@ -262,7 +260,7 @@ RETURNING_HOME
 视觉应满足：
 
 - `/vision/tree_debug_image` 能看到 `tree` 框；
-- `/vision/fruit_debug_image` 能看到 `disease_leaf` 标注；
+- `/vision/diseased_target_debug_image` 能看到 `diseased_target` 标注；
 - `/vision/target` 中 `valid: true`；
 - `/vision/visual_servo_debug` 最终 `result_code=0`。
 
@@ -322,8 +320,8 @@ source install/setup.bash
 
 优先调整树的相对位置：
 
-- 保持 `tree-forward-m` 接近 `0.0`；
-- 将 `tree-left-m` 在 `1.30`、`1.40`、`1.50`、`1.60` 中逐步尝试；
+- 保持 `tree-x-m` 接近 `0.0`；
+- 将 `tree-y-m` 在 `1.30`、`1.40`、`1.50`、`1.60` 或对应负值中逐步尝试；
 - 确保玉米树主体在 C10 初始观察视野内；
 - 不要先放宽碰撞、奇异或关节限位参数。
 
@@ -370,7 +368,6 @@ ros2 topic pub --once /motion_control/command std_msgs/msg/String "{data: resume
 
 ## 10. 真实喷洒硬件接入边界
 
-当前单独测试默认使用 `spray_simulator`，不会控制真实泵/阀。
+当前单独测试默认使用 `spray_actuator` 的 `timer` 模式，不会控制真实泵/阀。
 
 后续接入真实喷洒硬件时，只替换 `/spray/execute` 的 `wvcsc_interfaces/action/Spray` Action server。上层 `spray_task`、VisualServo、YOLO 和 `arm_spray_once` 不需要改接口。
-

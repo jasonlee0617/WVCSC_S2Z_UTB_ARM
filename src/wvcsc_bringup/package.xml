@@ -10,12 +10,14 @@
   <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
   <exec_depend>alicia_m_bringup</exec_depend>
   <exec_depend>alicia_m_driver</exec_depend>
   <exec_depend>alicia_m_moveit_config</exec_depend>
   <exec_depend>can_bridge</exec_depend>
   <exec_depend>cartographer_ros</exec_depend>
   <exec_depend>controller_manager</exec_depend>
+  <exec_depend>controller_pkg</exec_depend>
   <!-- Current real-vehicle IMU driver. fdilink_ahrs is retained only as a
        commented rollback path and is not a runtime dependency. -->
   <exec_depend>yesense_std_ros2</exec_depend>
@@ -29,6 +31,7 @@
   <exec_depend>my_cartographer</exec_depend>
   <exec_depend>my_navigation2</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>pointcloud_to_laserscan</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

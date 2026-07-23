@@ -32,6 +32,7 @@ from wvcsc_visual_servo.servo.servo_status_policy import (
 )
 from wvcsc_visual_servo.visual_servo_node import (
     VisualServo, _GoalState,
+    _direction_guard_result,
     _positive_finite_rate,
 )
 from wvcsc_interfaces.action import AlignTarget
@@ -76,13 +77,15 @@ def test_servo_execution_diagnostics_distinguish_output_from_joint_motion():
 
     node._on_servo_output(SimpleNamespace(
         joint_names=[f'joint{index}' for index in range(1, 7)],
-        points=[SimpleNamespace(positions=[0.01] * 6)]))
+        points=[SimpleNamespace(
+            positions=[0.01] * 6, velocities=[0.02] * 6)]))
     node._on_joint_state(SimpleNamespace(
         name=[f'joint{index}' for index in range(1, 7)],
         position=[0.004] * 6))
 
     assert node._goal_state.servo_output_count == 1
     assert node._goal_state.servo_output_points == 1
+    assert node._goal_state.servo_output_velocity_count == 1
     assert node._goal_state.max_commanded_joint_delta_rad == pytest.approx(0.01)
     assert node._goal_state.max_joint_delta_rad == pytest.approx(0.004)
 
@@ -168,6 +171,33 @@ def test_angular_ibvs_matches_camera_optical_axes():
     # u-right -> camera yaw-right (+Y); v-down -> camera pitch-down (-X).
     assert node._command_components(0.030, -0.020) == pytest.approx(
         (0.0, 0.0, 0.020, 0.030))
+
+
+def test_real_u_axis_sign_can_reverse_without_changing_v_axis():
+    node = object.__new__(VisualServo)
+    node._command_mode = 'angular_xy'
+    node._angular_u_sign = -1.0
+    node._angular_v_sign = 1.0
+
+    assert node._command_components(0.030, -0.020) == pytest.approx(
+        (0.0, 0.0, 0.020, -0.030))
+
+
+def test_direction_guard_rejects_axis_that_moves_farther_from_aim():
+    outcome = _direction_guard_result(
+        (10.0, -60.0, -86.0), (-74.0, -52.0), 1.0,
+        window_sec=1.0, min_axis_error_px=20.0,
+        max_axis_growth_px=10.0)
+
+    assert outcome is not None
+    assert 'u:abs_error=60.0px→74.0px' in outcome
+
+
+def test_direction_guard_accepts_converging_axes_after_window():
+    assert _direction_guard_result(
+        (10.0, -60.0, -86.0), (-50.0, -70.0), 1.0,
+        window_sec=1.0, min_axis_error_px=20.0,
+        max_axis_growth_px=10.0) == ''
 
 
 def test_nozzle_axis_projection_uses_camera_tf_and_pixel_trim():

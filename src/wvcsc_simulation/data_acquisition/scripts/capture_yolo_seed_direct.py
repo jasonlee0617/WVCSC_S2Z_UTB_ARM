@@ -30,12 +30,12 @@ from wvcsc_simulation.data_acquisition.yolo_seed_dataset import (
 
 
 TARGETS = (
-    ('left_tree_01', 'left', 3.0, 2.0, 0.5),
-    ('left_tree_02', 'left', 7.0, 2.0, 0.5),
-    ('left_tree_03', 'left', 11.0, 2.0, 0.5),
-    ('right_tree_01', 'right', 1.0, -2.0, -0.5),
-    ('right_tree_02', 'right', 5.0, -2.0, -0.5),
-    ('right_tree_03', 'right', 9.0, -2.0, -0.5),
+    ('tree_01', 3.0, 2.0, 0.5, 0.4, 1.5),
+    ('tree_02', 7.0, 2.0, 0.5, 0.4, 1.5),
+    ('tree_03', 11.0, 2.0, 0.5, 0.4, 1.5),
+    ('tree_04', 1.0, -2.0, -0.5, 0.4, -1.5),
+    ('tree_05', 5.0, -2.0, -0.5, 0.4, -1.5),
+    ('tree_06', 9.0, -2.0, -0.5, 0.4, -1.5),
 )
 
 
@@ -109,10 +109,10 @@ class DirectCapture(Node):
             return
         try:
             image = self.bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
-            tree_id, side, tree_x, tree_y, _dock_y = self.target
+            tree_id, tree_x, tree_y, _dock_y, base_x, base_y = self.target
             metadata = {
                 'tree_id': tree_id,
-                'spray_side': side,
+                'tree_offset_arm_base_m': {'x_m': base_x, 'y_m': base_y},
                 'orchard_seed': self.args.orchard_seed,
                 'diseased_fruit_ratio': self.args.diseased_fruit_ratio,
                 'camera_pose': {'frame_id': 'map'},
@@ -140,7 +140,7 @@ class DirectCapture(Node):
             self.pending = True
 
     def _set_robot_pose(self):
-        _tree_id, _side, tree_x, _tree_y, dock_y = self.target
+        _tree_id, tree_x, _tree_y, dock_y, _base_x, _base_y = self.target
         self.x, self.y = tree_x, dock_y
         state = EntityState()
         state.name = 'wvcsc_utb_alicia'
@@ -154,11 +154,10 @@ class DirectCapture(Node):
         self.started_at = time.monotonic()
 
     def _send_goal(self):
-        tree_id, side, tree_x, tree_y, _dock_y = self.target
+        tree_id, tree_x, tree_y, _dock_y, _base_x, _base_y = self.target
         goal = ExecuteSpray.Goal()
         goal.mission_id = f'c10_capture_{self.args.orchard_seed}'
         goal.tree_id = tree_id
-        goal.spray_side = side
         goal.spray_duration = 0.2
         goal.tree_hint = PointStamped()
         goal.tree_hint.header.frame_id = 'map'

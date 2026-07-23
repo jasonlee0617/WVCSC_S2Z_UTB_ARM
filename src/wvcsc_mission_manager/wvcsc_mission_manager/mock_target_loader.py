@@ -60,8 +60,6 @@ def load_mock_document(path):
         confidence = _finite(tree.get('confidence'), f'{tree_id}.confidence')
         if not 0.0 < confidence <= 1.0:
             raise ValueError(f'{tree_id}.confidence must be in (0, 1]')
-        if str(tree.get('spray_side', '')) not in ('left', 'right'):
-            raise ValueError(f'{tree_id}.spray_side must be left or right')
         duration = _finite(tree.get('spray_duration'), f'{tree_id}.spray_duration')
         if duration <= 0.0:
             raise ValueError(f'{tree_id}.spray_duration must be positive')
@@ -89,7 +87,6 @@ def build_request(document, stamp):
     for tree in mission['trees']:
         target = ManualMissionTarget()
         target.target_id = str(tree['tree_id']).strip()
-        target.spray_side = str(tree['spray_side'])
         target.spray_duration = float(tree['spray_duration'])
         target.confidence = float(tree['confidence'])
         target.evidence_uri = str(tree.get('evidence_uri', '')).strip()

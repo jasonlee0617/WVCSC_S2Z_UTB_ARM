@@ -4,9 +4,10 @@ import pytest
 
 from wvcsc_calibration.alicia_sample_geometry import (
     generate_alicia_candidates,
+    generate_camera_centered_candidates,
     generate_initial_anchor_candidates,
 )
-from wvcsc_arm_task.observation import rotate_vector
+from wvcsc_arm_task.observation import quaternion_multiply, rotate_vector
 
 
 def _marker_alignment(candidate, marker):
@@ -107,3 +108,26 @@ def test_candidate_generation_does_not_depend_on_camera_mount():
     for left, right in zip(first, second):
         assert left.tool_position == pytest.approx(right.tool_position)
         assert left.tool_quaternion == pytest.approx(right.tool_quaternion)
+
+
+def test_camera_centered_candidates_keep_marker_on_the_optical_axis():
+    marker = (0.40, 0.20, 0.10)
+    mount = ((0.08, -0.02, 0.04), (0.0, 0.0, 0.0, 1.0))
+    candidates = generate_camera_centered_candidates(
+        marker, (0.50, -0.20, 0.40), (0.0, 0.0, 0.0, 1.0),
+        mount, include_fine=True)
+    assert len(candidates) == 49
+    assert candidates[0].candidate_id == 'camera_center_seed'
+    for candidate in candidates:
+        camera_position = tuple(
+            candidate.tool_position[index] + rotate_vector(
+                mount[0], candidate.tool_quaternion)[index]
+            for index in range(3))
+        camera_quaternion = quaternion_multiply(
+            candidate.tool_quaternion, mount[1])
+        optical_z = rotate_vector((0.0, 0.0, 1.0), camera_quaternion)
+        ray = tuple(marker[index] - camera_position[index]
+                    for index in range(3))
+        ray_norm = math.sqrt(sum(value * value for value in ray))
+        assert sum(left * right for left, right in zip(
+            optical_z, (value / ray_norm for value in ray))) > 0.999

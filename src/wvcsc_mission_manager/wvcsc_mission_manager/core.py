@@ -47,7 +47,6 @@ class Target:
     y: float
     z: float
     confidence: float
-    spray_side: str         # 'left' 或 'right'
     spray_duration: float
     evidence_uri: str = ''
     docking_pose_override: tuple | None = None  # 如果手动注入任务，可覆盖自动生成的停靠点
@@ -260,14 +259,7 @@ def docking_pose(
         lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET,
         arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
         arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
-    """
-    核心几何函数：根据树的坐标和方位，计算小车行驶的停靠位姿。
-    
-    算法：
-    - 如果病树在左侧 (spray_side=left)，小车需停在道路中心的左侧，车头朝向 YAW。
-    - 如果病树在右侧 (spray_side=right)，小车需停在道路中心的右侧。
-    - 确保横向偏移量 `lateral_offset` (0.2m) 使得小车外沿与树基部保持安全距离。
-    """
+    """Compute a parking pose from the tree's signed road-normal position."""
     values = (
         target.x, target.y, road_center_y, road_yaw, lateral_offset,
         arm_base_forward_offset, arm_base_left_offset)
@@ -275,28 +267,25 @@ def docking_pose(
         raise ValueError(f'{target.tree_id}: non-finite docking pose')
     if lateral_offset < 0.0:
         raise ValueError('lateral_offset must be non-negative')
-    if target.spray_side == 'left':
-        if target.y <= road_center_y:
-            raise ValueError(f'{target.tree_id}: left target is not left of the road')
-        goal_y = road_center_y + lateral_offset
-    elif target.spray_side == 'right':
-        if target.y >= road_center_y:
-            raise ValueError(f'{target.tree_id}: right target is not right of the road')
-        goal_y = road_center_y - lateral_offset
-    else:
-        raise ValueError(f'{target.tree_id}: invalid spray_side')
     cosine, sine = math.cos(road_yaw), math.sin(road_yaw)
-    arm_x = (
-        target.x + cosine * arm_base_forward_offset -
+    normal_x, normal_y = -sine, cosine
+    relative_x, relative_y = target.x, target.y - road_center_y
+    lateral = relative_x * normal_x + relative_y * normal_y
+    if abs(lateral) < 1e-6:
+        raise ValueError(f'{target.tree_id}: tree lies on the road center line')
+    longitudinal = relative_x * cosine + relative_y * sine
+    lateral_goal = lateral_offset if lateral > 0.0 else -lateral_offset
+    arm_x = cosine * longitudinal + normal_x * lateral_goal
+    arm_y = road_center_y + sine * longitudinal + normal_y * lateral_goal
+    mount_x = (
+        cosine * arm_base_forward_offset -
         sine * arm_base_left_offset)
-    arm_y = (
-        goal_y + sine * arm_base_forward_offset +
+    mount_y = (
+        sine * arm_base_forward_offset +
         cosine * arm_base_left_offset)
-    tangent_error = (
-        (target.x - arm_x) * cosine + (target.y - arm_y) * sine)
     return (
-        target.x + tangent_error * cosine,
-        goal_y + tangent_error * sine,
+        arm_x - mount_x,
+        arm_y - mount_y,
         road_yaw,
     )
 
@@ -313,35 +302,45 @@ def navigation_pose(
         arm_base_forward_offset, arm_base_left_offset)
 
 
-def manual_tree_hint(
-        docking, spray_side, standoff, tree_base_z=0.0,
+def tree_hint_from_arm_base_offset(
+        docking, tree_x_m, tree_y_m, tree_base_z=0.0,
         arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
         arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
-    """从手动选择的停靠点反向推算树根的世界坐标 (用于人工定义任务)。"""
+    """Transform a signed alicia_base_link XY offset into a map tree hint."""
     x, y, yaw = (float(value) for value in docking)
-    standoff = float(standoff)
+    tree_x_m = float(tree_x_m)
+    tree_y_m = float(tree_y_m)
     tree_base_z = float(tree_base_z)
     if not all(math.isfinite(value) for value in (
-            x, y, yaw, standoff, tree_base_z,
+            x, y, yaw, tree_x_m, tree_y_m, tree_base_z,
             arm_base_forward_offset, arm_base_left_offset)):
-        raise ValueError('manual tree hint values must be finite')
-    if standoff <= 0.0:
-        raise ValueError('manual_tree_standoff must be positive')
-    if spray_side not in ('left', 'right'):
-        raise ValueError(f'invalid spray_side: {spray_side}')
-    sign = 1.0 if spray_side == 'left' else -1.0
+        raise ValueError('tree offset values must be finite')
     cosine, sine = math.cos(yaw), math.sin(yaw)
-    arm_x = (
-        x + cosine * arm_base_forward_offset -
-        sine * arm_base_left_offset)
-    arm_y = (
-        y + sine * arm_base_forward_offset +
-        cosine * arm_base_left_offset)
-    normal_x, normal_y = -math.sin(yaw), math.cos(yaw)
     return (
-        arm_x + sign * standoff * normal_x,
-        arm_y + sign * standoff * normal_y,
+        x + cosine * (arm_base_forward_offset + tree_x_m) -
+        sine * (arm_base_left_offset + tree_y_m),
+        y + sine * (arm_base_forward_offset + tree_x_m) +
+        cosine * (arm_base_left_offset + tree_y_m),
         tree_base_z,
+    )
+
+
+def tree_offset_from_docking(
+        docking, tree_hint,
+        arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
+        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
+    """Return signed alicia_base_link XY coordinates for a map tree hint."""
+    x, y, yaw = (float(value) for value in docking)
+    tree_x, tree_y, _tree_z = (float(value) for value in tree_hint)
+    if not all(math.isfinite(value) for value in (
+            x, y, yaw, tree_x, tree_y,
+            arm_base_forward_offset, arm_base_left_offset)):
+        raise ValueError('tree offset values must be finite')
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    dx, dy = tree_x - x, tree_y - y
+    return (
+        cosine * dx + sine * dy - arm_base_forward_offset,
+        -sine * dx + cosine * dy - arm_base_left_offset,
     )
 
 

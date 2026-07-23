@@ -102,6 +102,7 @@ class RqtHandeyeEvaluatorWidget(QWidget):
         self.update_timer.start(500)
 
         self.last_robot_transform = None  # used to see if we are in a steady state
+        self._tf_wait_logged = False
 
         self.measurement_transforms = []  # used to measure the quality of the calibration: should have the same value
         self.robot_transforms = []  # used to determine when to sample: we wait for a steady state that has not been sampled yet
@@ -156,14 +157,15 @@ class RqtHandeyeEvaluatorWidget(QWidget):
             # TODO: provide feedback if the data is sufficient
 
         except (LookupException, ExtrapolationException, ConnectivityException) as e:
-            self.node.get_logger().error(
-                'The specified tf frames for the robot base and hand do not seem to be connected')
-            self.node.get_logger().error('Run the following command and check its output:')
-            self.node.get_logger().error(
-                f'ros2 run tf2_ros tf2_echo {self.robot_base_frame} {self.robot_effector_frame}')
-            self.node.get_logger().error(
-                f'You may need to correct the base_frame or effector_frame argument passed to the easy_handeye2 launch file')
-            self.node.get_logger().error(f'Underlying tf exception: {e}')
+            # The marker TF is intentionally dynamic: ros2_aruco only creates
+            # it after the marker is visible.  Keep the evaluator usable while
+            # waiting instead of raising an AttributeError every timer tick.
+            self.output_label.setText('Waiting for robot/marker TF...')
+            if not self._tf_wait_logged:
+                self._node.get_logger().info(
+                    'Waiting for robot/marker TF; evaluator will retry '
+                    f'({e})')
+                self._tf_wait_logged = True
             return False
 
     def reset(self):

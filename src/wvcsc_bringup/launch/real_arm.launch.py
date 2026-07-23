@@ -68,7 +68,7 @@ def generate_launch_description():
             ' alicia_base_link:=alicia_base_link',
             ' use_collision_meshes:=true',
             ' enable_arm_control:=true',
-            ' enable_ackermann:=true',
+            ' enable_ackermann:=', LaunchConfiguration('enable_ackermann'),
             ' enable_gazebo_ros2_control:=false',
             ' enable_c10_camera:=true',
             ' enable_c10_gazebo:=false',
@@ -77,10 +77,10 @@ def generate_launch_description():
             ' baudrate:=', LaunchConfiguration('baudrate'),
             ' control_mode:=', LaunchConfiguration('control_mode'),
             ' default_speed:=', LaunchConfiguration('default_speed'),
-            ' c10_mount_xyz:=', LaunchConfiguration('c10_mount_xyz'),
-            ' c10_mount_rpy:=', LaunchConfiguration('c10_mount_rpy'),
-            ' nozzle_mount_xyz:=', LaunchConfiguration('nozzle_mount_xyz'),
-            ' nozzle_mount_rpy:=', LaunchConfiguration('nozzle_mount_rpy'),
+            ' c10_mount_xyz:="', LaunchConfiguration('c10_mount_xyz'), '"',
+            ' c10_mount_rpy:="', LaunchConfiguration('c10_mount_rpy'), '"',
+            ' nozzle_mount_xyz:="', LaunchConfiguration('nozzle_mount_xyz'), '"',
+            ' nozzle_mount_rpy:="', LaunchConfiguration('nozzle_mount_rpy'), '"',
         ]), value_type=str),
     }
     robot_description_semantic = {
@@ -238,6 +238,10 @@ def generate_launch_description():
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('control_mode', default_value='pv'),
         DeclareLaunchArgument('default_speed', default_value='0.5'),
+        # Arm-only sessions do not start the chassis controller.  Excluding
+        # wheel joints keeps MoveIt's current joint state complete; the full
+        # vehicle stack overrides this with true in real_sensors.launch.py.
+        DeclareLaunchArgument('enable_ackermann', default_value='false'),
         DeclareLaunchArgument('c10_mount_xyz', default_value='-0.055 0 -0.10'),
         DeclareLaunchArgument(
             'c10_mount_rpy', default_value='0 -1.57079632679 0'),

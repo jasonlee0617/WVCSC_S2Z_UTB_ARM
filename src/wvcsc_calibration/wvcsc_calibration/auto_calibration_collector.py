@@ -50,7 +50,7 @@ from .alicia_sample_geometry import (
     generate_camera_centered_candidates,
     generate_initial_anchor_candidates,
 )
-from .calibration_io import write_calibration
+from .calibration_io import write_calibration, write_calibration_outputs
 from .calibration_quality import (
     MarkerObservation,
     calibration_consensus,
@@ -325,6 +325,8 @@ class AutoCalibrationCollector(Node):
             'output_file': (
                 '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
                 'c10_handeye.yaml'),
+            'easy_handeye_output_file': (
+                '~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib'),
             'marker_position_base_m': [0.0, 0.25, 0.0],
             'seed_height_candidates_m': [0.30, 0.35, 0.40, 0.45, 0.50],
             'seed_radial_backoff_candidates_m': [0.05, 0.10, 0.15, 0.20],
@@ -1225,6 +1227,27 @@ class AutoCalibrationCollector(Node):
         plans, _stats = self._screen_candidate_plans(candidates, optimizer)
         return [plan.candidate for plan in plans]
 
+    def _provisional_camera_model(self):
+        """Estimate a planning-only camera mount from bootstrap measurements."""
+        (algorithm, handeye, samples, translation_delta,
+         rotation_delta) = self._compute_consensus_solution()
+        marker_poses = [
+            compose_transforms(
+                compose_transforms(transform_components(sample.robot), handeye),
+                transform_components(sample.tracking))
+            for sample in samples]
+        marker_pose = average_marker_pose(marker_poses)
+        marker_position_rms, marker_rotation_rms = marker_pose_rms(
+            samples, handeye)
+        self.get_logger().info(
+            '[CALIBRATION][PROVISIONAL] '
+            f'source=measured_samples algorithm={algorithm} '
+            f'samples={len(samples)} algorithm_spread='
+            f'{translation_delta * 1000.0:.2f}mm/{rotation_delta:.2f}deg '
+            f'marker_rms={marker_position_rms * 1000.0:.2f}mm/'
+            f'{marker_rotation_rms:.2f}deg')
+        return handeye, marker_pose
+
     def _run_session(self):
         self._wait_moveit_services()
         self._install_calibration_surface()
@@ -1246,6 +1269,7 @@ class AutoCalibrationCollector(Node):
         minimum_safe = int(self.get_parameter('minimum_safe_candidates').value)
         minimum_samples = int(self.get_parameter('minimum_samples').value)
         target_samples = int(self.get_parameter('target_samples').value)
+        bootstrap_target = min(_BOOTSTRAP_TARGET_SAMPLES, target_samples)
         # ``target_samples`` improves solution quality but is not a
         # reachability precondition.  Requiring every target view before any
         # motion made valid 18-sample sessions fail with 18--21 safe plans.
@@ -1337,7 +1361,9 @@ class AutoCalibrationCollector(Node):
         accepted_poses = []
         sample_count = 0
         maximum_samples = int(self.get_parameter('maximum_samples').value)
-        # ``maximum_samples`` limits recorded samples, not motion attempts.
+        # Bootstrap samples are collected from tool-space targets only.  They
+        # establish a measured provisional mount; no Gazebo mount value is
+        # involved in this phase.
         # A collision-safe trajectory can still be rejected later because the
         # marker is too near the image edge or duplicates an already accepted
         # pose.  The strict image gate is intentionally the only camera-based
@@ -1345,6 +1371,88 @@ class AutoCalibrationCollector(Node):
         # Keep trying the remaining pre-screened plans until the recorded
         # sample limit (or the target) is actually reached.
         for plan in safe_plans:
+            if sample_count >= bootstrap_target:
+                break
+            candidate = plan.candidate
+            if self._session_cancel.is_set() or self._session_invalid.is_set():
+                raise RuntimeError('session canceled or invalidated')
+            if not self._execute_candidate_plan(plan, optimizer):
+                self.get_logger().warn(
+                    f'[CALIBRATION] rejected during execution: {candidate.candidate_id}')
+                continue
+            time.sleep(float(self.get_parameter('settle_time_sec').value))
+            stationary, reason = self._wait_for_joint_stationary()
+            if not stationary:
+                self.get_logger().warn(
+                    f'[CALIBRATION] rejected {candidate.candidate_id}: '
+                    f'joints did not stop: {reason}')
+                continue
+            frames, reason = self._stable_observation()
+            if frames is None:
+                self.get_logger().warn(
+                    f'[CALIBRATION] image quality rejected '
+                    f'{candidate.candidate_id}: {reason}')
+                continue
+            current_tool = self._lookup(
+                str(self.get_parameter('base_frame').value),
+                str(self.get_parameter('tool_link').value))
+            pose = _transform_tuple(current_tool)
+            if not pose_is_diverse(
+                    pose[0], pose[1], accepted_poses,
+                    float(self.get_parameter('minimum_translation_delta_m').value),
+                    float(self.get_parameter('minimum_rotation_delta_deg').value)):
+                self.get_logger().warn(
+                    f'[CALIBRATION] diversity rejected {candidate.candidate_id}')
+                continue
+            self._publish_stable_marker_pose(frames)
+            response = self._call('take', TakeSample.Request())
+            new_count = len(response.samples.samples)
+            if new_count <= sample_count:
+                self.get_logger().warn(
+                    f'[CALIBRATION] easy_handeye2 rejected {candidate.candidate_id}')
+                continue
+            sample_count = new_count
+            accepted_poses.append(pose)
+            self.get_logger().info(
+                f'[CALIBRATION][BOOTSTRAP] sample={sample_count}/{bootstrap_target} '
+                f'candidate={candidate.candidate_id}')
+            if sample_count >= bootstrap_target:
+                break
+
+        if sample_count < _BOOTSTRAP_MINIMUM_SAMPLES:
+            raise RuntimeError(
+                f'only {sample_count} bootstrap samples; need '
+                f'{_BOOTSTRAP_MINIMUM_SAMPLES}')
+        provisional_handeye, marker_pose = self._provisional_camera_model()
+        current_tool = self._lookup(
+            str(self.get_parameter('base_frame').value),
+            str(self.get_parameter('tool_link').value))
+        current_tool_position, current_tool_quaternion = _transform_tuple(
+            current_tool)
+        centered_candidates = generate_camera_centered_candidates(
+            marker_pose[0], current_tool_position, current_tool_quaternion,
+            provisional_handeye, include_fine=True)
+        centered_plans, centered_stats = self._screen_candidate_plans(
+            centered_candidates, optimizer)
+        self.get_logger().info(
+            '[CALIBRATION] camera-centred candidate probe: '
+            f'ik_safe={centered_stats["ik_safe"]} '
+            f'rejected_ik={centered_stats["rejected_ik"]} '
+            f'rejected_condition={centered_stats["rejected_condition"]} '
+            f'rejected_margin={centered_stats["rejected_margin"]} '
+            f'planned_ok={centered_stats["planned_ok"]} '
+            f'planned_failed={centered_stats["planned_failed"]} '
+            f'total={len(centered_candidates)} tool_camera_prior=bootstrap')
+        if len(centered_plans) < minimum_safe:
+            raise RuntimeError(
+                f'only {len(centered_plans)} safe camera-centred candidates; '
+                f'need {minimum_safe}')
+
+        # ``maximum_samples`` limits recorded samples, not motion attempts.
+        # Continue through all safety-screened camera-centred plans after an
+        # image rejection so the final target is constrained by measurements,
+        # not by an arbitrary prefix of the plan pool.
+        for plan in balanced_candidate_order(centered_plans):
             if sample_count >= maximum_samples:
                 break
             candidate = plan.candidate
@@ -1508,16 +1616,23 @@ class AutoCalibrationCollector(Node):
         sample_save = self._call('save_samples', SaveSamples.Request())
         if not sample_save.success:
             raise RuntimeError('easy_handeye2 sample save failed')
-        output = write_calibration(
-            handeye,
-            str(self.get_parameter('output_file').value))
+        output_path = str(self.get_parameter('output_file').value)
+        deployment_path = str(
+            self.get_parameter('easy_handeye_output_file').value).strip()
+        if deployment_path:
+            deployment_output, output = write_calibration_outputs(
+                handeye, deployment_path, output_path)
+        else:
+            deployment_output = None
+            output = write_calibration(handeye, output_path)
         self.get_logger().info(
             '[CALIBRATION] SUCCESS '
             f'algorithm={selected_algorithm} samples={len(samples)} '
             f'algorithm_spread={translation_delta * 1000.0:.2f}mm/'
             f'{rotation_delta:.2f}deg marker_rms='
             f'{marker_position_rms * 1000.0:.2f}mm/'
-            f'{marker_rotation_rms:.2f}deg output={output}')
+            f'{marker_rotation_rms:.2f}deg output={output}'
+            + (f' deployment={deployment_output}' if deployment_output else ''))
 
     def _compute_consensus_solution(self):
         """Solve all configured algorithms and select their transform medoid."""

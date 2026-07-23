@@ -27,7 +27,7 @@ class SeedCapture(Node):
         self.args = args
         self.bridge = CvBridge()
         self.current_tree = ''
-        self.sides = {}
+        self.tree_offsets = {}
         self.pending = ''
         self.captured = set()
         self.failure = ''
@@ -55,8 +55,12 @@ class SeedCapture(Node):
             self.done.set()
 
     def _plan(self, message):
-        self.sides.update({
-            target.target_id: target.spray_side for target in message.targets})
+        self.tree_offsets.update({
+            target.target_id: {
+                'x_m': target.tree_x_m,
+                'y_m': target.tree_y_m,
+            }
+            for target in message.targets})
 
     def _feedback(self, message):
         if (message.feedback.phase == ExecuteSpray.Feedback.SCANNING_TREE and
@@ -85,7 +89,7 @@ class SeedCapture(Node):
         stamp = message.header.stamp
         metadata = {
             'tree_id': tree_id,
-            'spray_side': self.sides.get(tree_id, 'unknown'),
+            'tree_offset_arm_base_m': self.tree_offsets.get(tree_id),
             'orchard_seed': self.args.orchard_seed,
             'diseased_fruit_ratio': self.args.diseased_fruit_ratio,
             'observation_distance': self.args.observation_distance,

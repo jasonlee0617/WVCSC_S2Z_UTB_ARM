@@ -148,7 +148,7 @@ def test_collector_waits_for_marker_only_after_the_adaptive_anchor_move():
     assert 'self._wait_robot_inputs()' in guarded
     assert 'self._wait_inputs()' not in guarded
     run_session = source.split('    def _run_session(self):', 1)[1].split(
-        '    def _solve', 1)[0]
+        '    def _verify_simulation_ground_truth(', 1)[0]
     assert run_session.index('self._move_to_initial_anchor(') < \
         run_session.index('self._wait_inputs()')
     assert run_session.index('self._wait_inputs()') < \
@@ -206,18 +206,26 @@ def test_collector_waits_for_a_fresh_position_convergence_window_before_pnp_samp
         run_session.index('frames, reason = self._stable_observation(')
 
 
-def test_collector_samples_with_strict_image_gate_and_no_camera_mount_prior():
+def test_collector_uses_only_measured_bootstrap_mount_for_camera_centred_views():
     source = (
         Path(__file__).parents[1] / 'wvcsc_calibration' /
         'auto_calibration_collector.py').read_text(encoding='utf-8')
     run_session = source.split('    def _run_session(self):', 1)[1].split(
-        '    def _solve', 1)[0]
-    assert 'tool_camera_prior=false' in run_session
+        '    def _verify_simulation_ground_truth(', 1)[0]
+    assert '_BOOTSTRAP_MINIMUM_SAMPLES = 6' in source
+    assert '_BOOTSTRAP_TARGET_SAMPLES = 8' in source
+    assert 'generate_camera_centered_candidates(' in run_session
+    assert 'self._provisional_camera_model()' in run_session
+    assert 'tool_camera_prior=bootstrap' in run_session
+    assert '[CALIBRATION][BOOTSTRAP]' in run_session
     assert 'frames, reason = self._stable_observation()' in run_session
     assert '_recenter_marker_if_needed' not in run_session
-    assert 'tool_pose_from_camera_pose' not in source
-    assert 'base_camera' not in run_session
-    assert 'base_marker' not in run_session
+    provisional = source.split('    def _provisional_camera_model(self):', 1)[1].split(
+        '    def _run_session(self):', 1)[0]
+    assert 'source=measured_samples' in provisional
+    assert 'self._compute_consensus_solution()' in provisional
+    assert 'ground_truth' not in provisional
+    assert 'ground_truth_translation_m' not in run_session
 
 
 def test_simulation_config_keeps_marker_position_and_final_truth_gate_only():
@@ -351,7 +359,7 @@ def test_aruco_overlay_does_not_overwrite_rclpy_parameter_storage():
     assert 'self._parameters =' not in source
 
 
-def test_collector_generates_tool_space_candidates_without_camera_mount_input():
+def test_collector_bootstraps_in_tool_space_before_camera_centred_sampling():
     source = (
         Path(__file__).parents[1] / 'wvcsc_calibration' /
         'auto_calibration_collector.py').read_text(encoding='utf-8')
@@ -361,6 +369,9 @@ def test_collector_generates_tool_space_candidates_without_camera_mount_input():
     assert 'current_tool_quaternion' in run_session
     assert 'generate_alicia_candidates(' in run_session
     assert 'tool_camera_prior=false' in run_session
+    assert 'generate_camera_centered_candidates(' in run_session
+    assert run_session.index('generate_alicia_candidates(') < \
+        run_session.index('generate_camera_centered_candidates(')
     anchor = source.split('    def _move_to_initial_anchor(', 1)[1].split(
         '    def _install_calibration_surface(', 1)[0]
     assert 'tool_z_down=true' in anchor

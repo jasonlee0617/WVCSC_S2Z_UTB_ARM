@@ -38,7 +38,7 @@ ros2 bag record --include-hidden-topics -o "$bag_dir/servo_debug" \
   /vision/visual_servo_debug \
   /vision/target \
   /vision/tree_detections \
-  /vision/fruit_detections \
+  /vision/diseased_target_detections \
   /vision/debug_image \
   /vision/perception_debug \
   /vision/selected_target_id \

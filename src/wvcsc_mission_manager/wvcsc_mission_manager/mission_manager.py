@@ -45,8 +45,9 @@ from .core import (
     MissionState,
     StopDetector,
     Target,
-    manual_tree_hint,
     navigation_pose,
+    tree_hint_from_arm_base_offset,
+    tree_offset_from_docking,
 )
 
 
@@ -67,10 +68,6 @@ class MissionManager(Node):
             self.get_parameter('arm_base_forward_offset_m').value)
         self._arm_base_left_offset = float(
             self.get_parameter('arm_base_left_offset_m').value)
-        self._manual_tree_standoff = float(
-            self.get_parameter('manual_tree_standoff').value)
-        self._manual_tree_base_z = float(
-            self.get_parameter('manual_tree_base_z').value)
         self._require_docking_quality = bool(
             self.get_parameter('require_docking_quality').value)
         self._localization_max_age = float(
@@ -209,8 +206,6 @@ class MissionManager(Node):
             'docking_lateral_offset': DEFAULT_DOCKING_LATERAL_OFFSET,
             'arm_base_forward_offset_m': DEFAULT_ARM_BASE_FORWARD_OFFSET,
             'arm_base_left_offset_m': DEFAULT_ARM_BASE_LEFT_OFFSET,
-            'manual_tree_standoff': 1.5,
-            'manual_tree_base_z': 0.0,
             'require_docking_quality': False,
             'localization_pose_topic': '/amcl_pose',
             'localization_max_age_sec': 1.0,
@@ -295,8 +290,6 @@ class MissionManager(Node):
             target_id = item.target_id.strip()
             if not target_id or target_id in seen:
                 raise ValueError('target_id must be non-empty and unique')
-            if item.spray_side not in ('left', 'right'):
-                raise ValueError(f'{target_id}: invalid spray_side')
             duration = float(item.spray_duration)
             if not math.isfinite(duration) or not min_duration <= duration <= max_duration:
                 raise ValueError(f'{target_id}: spray_duration out of range')
@@ -311,13 +304,16 @@ class MissionManager(Node):
                     item.docking_pose, f'{target_id}.docking_pose')
                 if abs(docking[0]) > bound or abs(docking[1]) > bound:
                     raise ValueError(f'{target_id}: docking pose out of bounds')
-            tree_base_z = getattr(self, '_manual_tree_base_z', 0.0)
-            tree_standoff = getattr(self, '_manual_tree_standoff', 1.5)
             explicit_hint = bool(getattr(
                 item, 'use_explicit_tree_hint', False))
-            if compute_docking and not explicit_hint:
+            use_offset = bool(getattr(
+                item, 'use_tree_offset_from_arm_base', False))
+            if explicit_hint == use_offset:
                 raise ValueError(
-                    f'{target_id}: compute_docking_pose requires tree_hint')
+                    f'{target_id}: select exactly one tree coordinate source')
+            if compute_docking and use_offset:
+                raise ValueError(
+                    f'{target_id}: compute_docking_pose requires a map tree_hint')
             if explicit_hint:
                 point = item.tree_hint
                 tree_hint = (
@@ -330,24 +326,32 @@ class MissionManager(Node):
                     str(getattr(item, 'evidence_uri', '')).strip()
                     or 'manual://measured')
             else:
-                tree_hint = manual_tree_hint(
-                    docking, item.spray_side, tree_standoff, tree_base_z,
+                tree_x_m = float(getattr(item, 'tree_x_m', float('nan')))
+                tree_y_m = float(getattr(item, 'tree_y_m', float('nan')))
+                tree_base_z = float(getattr(
+                    item, 'tree_base_z_m', float('nan')))
+                if not all(math.isfinite(value) for value in (
+                        tree_x_m, tree_y_m, tree_base_z)):
+                    raise ValueError(f'{target_id}: non-finite arm-base tree offset')
+                if math.hypot(tree_x_m, tree_y_m) < 1e-6:
+                    raise ValueError(f'{target_id}: arm-base tree offset is zero')
+                tree_hint = tree_hint_from_arm_base_offset(
+                    docking, tree_x_m, tree_y_m, tree_base_z,
                     self._arm_base_forward_offset,
                     self._arm_base_left_offset)
                 source = (
                     str(getattr(item, 'evidence_uri', '')).strip()
-                    or 'manual://inferred')
+                    or 'manual://arm-base-offset')
             target = Target(
                 target_id,
                 tree_hint[0],
                 tree_hint[1],
                 tree_hint[2],
                 confidence,
-                item.spray_side,
                 duration,
                 source,
                 docking,
-                tree_hint if explicit_hint else None,
+                tree_hint,
             )
             # Mock YAML only supplies a tree hint.  Validate its derived
             # parking pose here so an invalid road-side relation is rejected
@@ -759,7 +763,6 @@ class MissionManager(Node):
         goal = ExecuteSpray.Goal()
         goal.mission_id = self.core.mission_id
         goal.tree_id = target.tree_id
-        goal.spray_side = target.spray_side
         goal.spray_duration = target.spray_duration
         tree_x, tree_y, tree_z = self._tree_hint(target)
         goal.tree_hint.header.stamp = self.get_clock().now().to_msg()
@@ -778,13 +781,7 @@ class MissionManager(Node):
     def _tree_hint(self, target):
         if target.tree_hint_override is not None:
             return target.tree_hint_override
-        if target.docking_pose_override is None:
-            return target.x, target.y, target.z
-        return manual_tree_hint(
-            target.docking_pose_override, target.spray_side,
-            self._manual_tree_standoff, self._manual_tree_base_z,
-            self._arm_base_forward_offset,
-            self._arm_base_left_offset)
+        return target.x, target.y, target.z
 
     def _spray_goal_response(self, future):
         self._spray_pending = False
@@ -1005,16 +1002,20 @@ class MissionManager(Node):
             item.tree_hint.x = target.x
             item.tree_hint.y = target.y
             item.tree_hint.z = target.z
-            item.spray_side = target.spray_side
             item.spray_duration = target.spray_duration
             item.evidence_uri = target.evidence_uri
+            docking = navigation_pose(
+                target, self._road_center_y, self._road_yaw,
+                self._docking_lateral_offset,
+                self._arm_base_forward_offset,
+                self._arm_base_left_offset)
+            item.tree_x_m, item.tree_y_m = tree_offset_from_docking(
+                docking, (target.x, target.y, target.z),
+                self._arm_base_forward_offset,
+                self._arm_base_left_offset)
             self._set_pose(
                 item.docking_pose,
-                *navigation_pose(
-                    target, self._road_center_y, self._road_yaw,
-                    self._docking_lateral_offset,
-                    self._arm_base_forward_offset,
-                    self._arm_base_left_offset),
+                *docking,
             )
             message.targets.append(item)
         self._plan_pub.publish(message)

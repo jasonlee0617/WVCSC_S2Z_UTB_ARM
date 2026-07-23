@@ -345,8 +345,8 @@ ros2 topic list | grep /vision
 ```bash
 ros2 run wvcsc_bringup arm_spray_once -- \
   --target-id corn_01 \
-  --tree-forward-m 0.0 \
-  --tree-left-m 1.50 \
+  --tree-x-m 0.0 \
+  --tree-y-m 1.50 \
   --spray-duration 5.0
 ```
 
@@ -354,7 +354,7 @@ ros2 run wvcsc_bringup arm_spray_once -- \
 
 ```bash
 ros2 topic hz /vision/tree_debug_image
-ros2 topic hz /vision/fruit_debug_image
+ros2 topic hz /vision/diseased_target_debug_image
 ros2 topic echo /vision/perception_debug
 ros2 topic echo /vision/target
 ```
@@ -448,4 +448,3 @@ PY
 ```
 
 如果后续需要复现问题，这些信息比“有 GPU/没 GPU”的口头描述更可靠。
-

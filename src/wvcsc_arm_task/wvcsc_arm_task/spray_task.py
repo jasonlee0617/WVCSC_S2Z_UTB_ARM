@@ -38,6 +38,13 @@ from .target_flow import (TargetAttempt, TargetFlowMixin,
                           target_accounting_is_complete)
 
 
+DEFAULT_JOINT_PRESETS_DEG = {
+    'center': (95.3, -136.9, -71.0, 7.7, 57.3, -4.4),
+    'fan_left': (52.2, -131.7, -55.4, -58.9, 76.5, 18.2),
+    'fan_right': (118.5, -129.4, -55.8, 47.6, 66.2, -17.1),
+}
+
+
 class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, Node):
     """
     协调 MoveIt、YOLO、视觉伺服和喷洒执行器的长时 Action Server。
@@ -64,13 +71,13 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self._base_frame = str(self.get_parameter('base_frame').value)
         self._spray_working_distance = float(
             self.get_parameter('spray_working_distance_m').value)
-        self._spray_working_distance_tolerance = float(
-            self.get_parameter('spray_working_distance_tolerance_m').value)
         if (not math.isfinite(self._spray_working_distance)
-                or not math.isfinite(self._spray_working_distance_tolerance)
-                or self._spray_working_distance <= 0.0
-                or self._spray_working_distance_tolerance <= 0.0):
-            raise ValueError('spray working-distance parameters are invalid')
+                or self._spray_working_distance <= 0.0):
+            raise ValueError('spray working range is invalid')
+        self._spray_on_alignment_failure = bool(
+            self.get_parameter('spray_on_alignment_failure').value)
+        self._observation_mode, self._joint_preset_positions = (
+            self._joint_preset_parameters())
         self._observation_config = self._observation_parameters()
         self._recenter_config = self._target_recenter_parameters()
 
@@ -130,7 +137,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             Detection2DArray, str(self.get_parameter('tree_detection_topic').value),
             self._on_tree_detections, 10, callback_group=self._callback_group)
         self.create_subscription(
-            Detection2DArray, str(self.get_parameter('fruit_detection_topic').value),
+            Detection2DArray, str(self.get_parameter(
+                'diseased_target_detection_topic').value),
             self._on_fruit_detections, 10, callback_group=self._callback_group)
         self.create_subscription(
             Target2D, str(self.get_parameter('vision_target_topic').value),
@@ -206,26 +214,42 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'downstream_server_timeout_sec': 2.0,
             'downstream_result_margin_sec': 2.0,
             'tree_detection_topic': '/vision/tree_detections',
-            'fruit_detection_topic': '/vision/fruit_detections',
+            'diseased_target_detection_topic': (
+                '/vision/diseased_target_detections'),
             'vision_target_topic': '/vision/target',
             'selected_target_topic': '/vision/selected_target_id',
             'inference_mode_topic': '/vision/inference_mode',
             'motion_locked_topic': '/motion_control/locked',
             'tree_confidence': 0.10,
             'fruit_confidence': 0.20,
-            # 兼容话题仍名为 fruit；该参数区分仿真病果与实机病斑叶。
-            'target_class_name': 'diseased_fruit',
+            # 仿真病果与实机病叶共用同一个外部类别名。
+            'target_class_name': 'diseased_target',
+            # Calibrated nozzle-aim plane; this is not a measured-distance
+            # acceptance gate for the task state machine.
             'spray_working_distance_m': 1.0,
-            'spray_working_distance_tolerance_m': 0.05,
+            # Real hardware may spray from a re-confirmed safe observation
+            # pose when visual alignment cannot complete.  Simulation keeps
+            # this disabled and therefore remains fail-closed.
+            'spray_on_alignment_failure': False,
+            # ``joint_presets`` is a field-validated real-arm scan mode.
+            # Keep the generic default as IK so simulation behavior is unchanged.
+            'observation_mode': 'ik',
+            'joint_preset_center_deg': list(DEFAULT_JOINT_PRESETS_DEG['center']),
+            'joint_preset_fan_left_deg': list(
+                DEFAULT_JOINT_PRESETS_DEG['fan_left']),
+            'joint_preset_fan_right_deg': list(
+                DEFAULT_JOINT_PRESETS_DEG['fan_right']),
             'confirmation_frames': 3,                # 连续 3 帧锁定目标，过滤单帧误检
             # 真实场景下 YOLO 检测有延迟，5秒超时确保足够的容错空间
             'scan_pose_detection_timeout_sec': 5.0,
             'detection_timeout_sec': 2.0,
             'fruit_collection_settle_sec': 1.00,
             'max_alignment_attempts': 2,
-            # 视觉伺服和重心的像素窗口边界
+            # A bounded residual can enter Servo after the stationary safety
+            # preflight, without weakening IK/MoveIt/kinematic gates.
             'target_recenter_trigger_px': 48.0,
             'target_recenter_workspace_px': 48.0,
+            'visual_servo_entry_max_error_px': 128.0,
             'target_recenter_max_angle_deg': 20.0,
             'target_recenter_max_total_angle_deg': 30.0,
             'target_recenter_refine_goal_px': 8.0,
@@ -282,16 +306,26 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             raise ValueError(f'{name} must contain six finite joint positions')
         return values
 
-    def _working_distance_ready(self):
-        """Fail closed unless the selected observation is inside the spray band."""
-        return (
-            self._observation_distance is not None
-            and math.isfinite(float(self._observation_distance))
-            and abs(
-                float(self._observation_distance)
-                - self._spray_working_distance
-            ) <= self._spray_working_distance_tolerance
-        )
+    def _joint_preset_parameters(self):
+        mode = str(self.get_parameter('observation_mode').value).strip().lower()
+        if mode not in {'ik', 'joint_presets'}:
+            raise ValueError('observation_mode must be ik or joint_presets')
+        if mode == 'ik':
+            return mode, ()
+        presets = []
+        for name, parameter in (
+                ('center', 'joint_preset_center_deg'),
+                ('fan_left', 'joint_preset_fan_left_deg'),
+                ('fan_right', 'joint_preset_fan_right_deg')):
+            try:
+                degrees = tuple(
+                    float(value) for value in self.get_parameter(parameter).value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f'{parameter} must contain six finite degrees') from error
+            if len(degrees) != 6 or not all(math.isfinite(value) for value in degrees):
+                raise ValueError(f'{parameter} must contain six finite degrees')
+            presets.append((name, tuple(math.radians(value) for value in degrees)))
+        return mode, tuple(presets)
 
     def _observation_parameters(self):
         """解析观察位姿生成的网格参数与运动学安全阈值"""
@@ -363,6 +397,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'trigger_px': float(self.get_parameter('target_recenter_trigger_px').value),
             'workspace_px': float(
                 self.get_parameter('target_recenter_workspace_px').value),
+            'servo_entry_px': float(self.get_parameter(
+                'visual_servo_entry_max_error_px').value),
             'max_angle_deg': float(self.get_parameter('target_recenter_max_angle_deg').value),
             'max_total_angle_deg': float(self.get_parameter(
                 'target_recenter_max_total_angle_deg').value),
@@ -397,6 +433,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 values['max_total_angle_deg'] < values['max_angle_deg'] or
                 values['max_total_angle_deg'] > 180.0 or
                 values['workspace_px'] < values['trigger_px'] or
+                values['servo_entry_px'] < values['workspace_px'] or
                 values['refine_goal_px'] <= 0.0 or
                 values['refine_goal_px'] > values['trigger_px'] or
                 values['position_tolerance_m'] <= 0.0 or
@@ -516,12 +553,14 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self._active_tree = tree
         self.get_logger().info(
             f'[ARM][{tree}] GOAL_ACCEPTED mission={request.mission_id.strip()} '
-            f'side={request.spray_side} spray_duration={request.spray_duration:.1f}s')
+            f'spray_duration={request.spray_duration:.1f}s')
         self._reset_vision()
         self._set_inference_mode('idle')
 
         # 阶段 1: MOVING_TO_OBSERVE（动态计算观察位姿并执行）
-        self.get_logger().info(f'[ARM][{tree}] OBSERVE computing look-at pose from tree_hint...')
+        self.get_logger().info(
+            f'[ARM][{tree}] OBSERVE mode={self._observation_mode} '
+            'preparing observation motion from tree_hint...')
         feedback(ExecuteSpray.Feedback.MOVING_TO_OBSERVE, 0.05, 'MOVING_TO_OBSERVE')
         if not self._move_to_observation(request.tree_hint):
             failure = self._observation_failure_reason or 'unknown observation failure'
@@ -652,7 +691,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                     f'(processed={len(processed)} exhausted={len(exhausted)}) → breaking loop')
                 break
 
-            # 阶段 5: ALIGNING (锁定目标，重心，IBVS 视觉伺服)
+            # 阶段 5: ALIGNING (锁定目标，单次 MoveIt 对准或 IBVS 闭环)
             if pending_attempt is not None:
                 attempt = pending_attempt
                 attempt.target = target
@@ -666,79 +705,90 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
 
             feedback(ExecuteSpray.Feedback.ALIGNING, 0.40, 'LOCKING_TARGET')
             recenter_attempts += 1
-            aim_ready, aim_message = self._request_spray_aim(cancel_requested)
-            locked_target = (
-                self._lock_target(target.target_id, cancel_requested)
-                if aim_ready else None)
-            if not aim_ready:
+            locked_target = self._lock_target(target.target_id, cancel_requested)
+            if locked_target is None:
                 recentered = False
-                recenter_message = aim_message
-            elif locked_target is None:
-                recentered = False
-                recenter_message = 'target was not locked before recenter'
+                recenter_message = 'target was not locked before alignment'
             else:
-                feedback(ExecuteSpray.Feedback.ALIGNING, 0.42, 'RECENTERING_TARGET')
-                recentered, recenter_message = self._recenter_target(
-                    locked_target, attempt, cancel_requested)
+                aim_ready, aim_message = self._request_spray_aim(cancel_requested)
+                if not aim_ready:
+                    recentered = False
+                    recenter_message = aim_message
+                else:
+                    feedback(
+                        ExecuteSpray.Feedback.ALIGNING, 0.42,
+                        'RECENTERING_TARGET')
+                    recentered, recenter_message = self._recenter_target(
+                        locked_target, attempt, cancel_requested)
 
+            fallback_spray = False
             if not recentered:
                 if self._aborted(cancel_requested):
                     return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
-                self._select_target('')
-                self._set_inference_mode('idle')
-                self.get_logger().warn(
-                    f'[ARM][RECENTER] target={target.target_id} {recenter_message}; '
-                    'trying the next observation candidate')
-                self._rewind_for_untried_observation(attempt)
-                recovered, moved = self._recover_to_next_observation(
-                    cancel_requested, feedback,
-                    attempt.recentered_observation_indices)
-                if recovered:
-                    pending_attempt = attempt
+                fallback_target, fallback_message = (
+                    self._alignment_fallback_target(
+                        locked_target, cancel_requested))
+                if fallback_target is not None:
+                    target = fallback_target
+                    attempt.target = target
+                    fallback_spray = True
+                    alignment_failures += 1
+                    self.get_logger().warn(
+                        f'[ARM][ALIGN_FALLBACK] target={target.target_id} '
+                        f'alignment_failed={recenter_message}; '
+                        'spraying_from_safe_pose')
+                else:
+                    self._select_target('')
+                    self._set_inference_mode('idle')
+                    self.get_logger().warn(
+                        f'[ARM][ALIGN_FALLBACK] target={target.target_id} '
+                        f'alignment_failed={recenter_message}; '
+                        f'blocked={fallback_message}; '
+                        'trying the next observation candidate')
+                    self._rewind_for_untried_observation(attempt)
+                    recovered, moved = self._recover_to_next_observation(
+                        cancel_requested, feedback,
+                        attempt.recentered_observation_indices)
+                    if recovered:
+                        pending_attempt = attempt
+                        self._reset_fruit_tracking()
+                        continue
+                    if moved:
+                        recenter_failures += 1
+                        return self._alignment_recovery_failure(
+                            f'target preparation failed: {recenter_message}; '
+                            'tree reconfirmation failed after observation recovery',
+                            cancel_requested)
+                    recenter_failures += 1
+                    self._mark_unresolved(attempt.target, exhausted)
+                    feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
+                             'RETURNING_TO_OBSERVE')
+                    if not self._return_to_observation():
+                        return self._alignment_recovery_failure(
+                            f'target preparation failed: {recenter_message}; '
+                            'observation recovery failed', cancel_requested)
                     self._reset_fruit_tracking()
                     continue
-                if moved:
-                    recenter_failures += 1
-                    return self._alignment_recovery_failure(
-                        f'target recenter failed: {recenter_message}; '
-                        'tree reconfirmation failed after observation recovery',
-                        cancel_requested)
-                recenter_failures += 1
-                self._mark_unresolved(attempt.target, exhausted)
-                feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
-                         'RETURNING_TO_OBSERVE')
-                if not self._return_to_observation():
-                    return self._alignment_recovery_failure(
-                        f'target recenter failed: {recenter_message}; '
-                        'observation recovery failed', cancel_requested)
-                self._reset_fruit_tracking()
-                continue
 
-            attempt.count += 1
-            alignment_attempts += 1
-            if not self._working_distance_ready():
-                return self._alignment_recovery_failure(
-                    'spray working distance is outside '
-                    f'{self._spray_working_distance:.2f}±'
-                    f'{self._spray_working_distance_tolerance:.2f} m; '
-                    f'actual={self._observation_distance}',
-                    cancel_requested)
-            feedback(ExecuteSpray.Feedback.ALIGNING, 0.45, 'ALIGNING')
-            self.get_logger().info(
-                f'[ARM][ALIGN] ENTER_VISUAL_SERVO target={target.target_id} '
-                f'attempt={attempt.count}/'
-                f'{int(self.get_parameter("max_alignment_attempts").value)} '
-                f'timeout={self._vision_timeout:.1f}s '
-                f'observation_distance={self._observation_distance}')
-            ok, canceled, align_code, message = self._align_target(
-                request.mission_id, request.tree_id, target.target_id,
-                self._active_aim, cancel_requested)
+            if not fallback_spray:
+                attempt.count += 1
+                alignment_attempts += 1
+                feedback(ExecuteSpray.Feedback.ALIGNING, 0.45, 'ALIGNING')
+                self.get_logger().info(
+                    f'[ARM][ALIGN] ENTER_VISUAL_SERVO target={target.target_id} '
+                    f'attempt={attempt.count}/'
+                    f'{int(self.get_parameter("max_alignment_attempts").value)} '
+                    f'timeout={self._vision_timeout:.1f}s '
+                    f'observation_mode={self._observation_mode}')
+                ok, canceled, align_code, message = self._align_target(
+                    request.mission_id, request.tree_id, target.target_id,
+                    self._active_aim, cancel_requested)
 
-            self.get_logger().debug(
-                f'[ARM][ALIGN] result target={target.target_id} '
-                f'code={align_code} message={message}')
+                self.get_logger().debug(
+                    f'[ARM][ALIGN] result target={target.target_id} '
+                    f'code={align_code} message={message}')
 
-            if not ok:
+            if not fallback_spray and not ok:
                 alignment_failures += 1
                 if canceled:
                     return ExecuteSpray.Result.CANCELED, message
@@ -748,54 +798,67 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                     return (
                         ExecuteSpray.Result.VISION_FAILED,
                         f'visual alignment hard safety stop: {message}')
-                recoverable = self._is_recoverable_alignment_code(align_code)
-                if not recoverable:
-                    return self._alignment_recovery_failure(
-                        f'visual alignment code={align_code}: {message}',
-                        cancel_requested)
-                self._select_target('')
-                self._set_inference_mode('idle')
-                if self._alignment_retry_allowed(attempt.count):
+                fallback_target, fallback_message = (
+                    self._alignment_fallback_target(
+                        locked_target, cancel_requested)
+                    if self._alignment_code_allows_fallback(align_code)
+                    else (None, f'visual alignment code={align_code}'))
+                if fallback_target is not None:
+                    target = fallback_target
+                    attempt.target = target
+                    fallback_spray = True
                     self.get_logger().warn(
-                        f'[ARM][ALIGN] recoverable failure code={align_code}; '
-                        'trying the next observation candidate')
-                    self._rewind_for_untried_observation(attempt)
-                    recovered, moved = self._recover_to_next_observation(
-                        cancel_requested, feedback,
-                        attempt.recentered_observation_indices)
-                    if recovered:
-                        pending_attempt = attempt
-                        self._reset_fruit_tracking()
-                        self.get_logger().info(
-                            f'[ARM][ALIGN] recovery ready at '
-                            f'{self._observation_distance} m; redetecting fruit')
-                        continue
-                    if moved:
-                        recenter_failures += 1
+                        f'[ARM][ALIGN_FALLBACK] target={target.target_id} '
+                        f'alignment_failed={message}; '
+                        'spraying_from_safe_pose')
+                else:
+                    self._select_target('')
+                    self._set_inference_mode('idle')
+                    self.get_logger().warn(
+                        f'[ARM][ALIGN_FALLBACK] target={target.target_id} '
+                        f'blocked={fallback_message}')
+                if not fallback_spray:
+                    recoverable = self._is_recoverable_alignment_code(align_code)
+                    if not recoverable:
+                        return self._alignment_recovery_failure(
+                            f'visual alignment code={align_code}: {message}',
+                            cancel_requested)
+                    if self._alignment_retry_allowed(attempt.count):
+                        self.get_logger().warn(
+                            f'[ARM][ALIGN] recoverable failure code={align_code}; '
+                            'trying the next observation candidate')
+                        self._rewind_for_untried_observation(attempt)
+                        recovered, moved = self._recover_to_next_observation(
+                            cancel_requested, feedback,
+                            attempt.recentered_observation_indices)
+                        if recovered:
+                            pending_attempt = attempt
+                            self._reset_fruit_tracking()
+                            self.get_logger().info(
+                                f'[ARM][ALIGN] recovery ready at '
+                                f'{self._observation_distance} m; redetecting fruit')
+                            continue
+                        if moved:
+                            recenter_failures += 1
+                            return self._alignment_recovery_failure(
+                                f'visual alignment code={align_code}: {message}; '
+                                'tree reconfirmation failed after observation recovery',
+                                cancel_requested)
+                    recenter_failures += 1
+                    self._mark_unresolved(attempt.target, exhausted)
+                    feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
+                             'RETURNING_TO_OBSERVE')
+                    if not self._return_to_observation():
                         return self._alignment_recovery_failure(
                             f'visual alignment code={align_code}: {message}; '
-                            'tree reconfirmation failed after observation recovery',
-                            cancel_requested)
-                recenter_failures += 1
-                self._mark_unresolved(attempt.target, exhausted)
-                feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
-                         'RETURNING_TO_OBSERVE')
-                if not self._return_to_observation():
-                    return self._alignment_recovery_failure(
-                        f'visual alignment code={align_code}: {message}; '
-                        'observation recovery failed', cancel_requested)
-                self.get_logger().warn(
-                    f'[ARM][ALIGN] exhausted target={target.target_id} '
-                    f'after {attempt.count} attempt(s)')
-                self._reset_fruit_tracking()
-                continue
+                            'observation recovery failed', cancel_requested)
+                    self.get_logger().warn(
+                        f'[ARM][ALIGN] exhausted target={target.target_id} '
+                        f'after {attempt.count} attempt(s)')
+                    self._reset_fruit_tracking()
+                    continue
 
             # 阶段 6: SPRAYING (调用下游喷洒 Action)
-            if not self._working_distance_ready():
-                return self._recover_failure(
-                    ExecuteSpray.Result.SPRAY_FAILED,
-                    'working-distance verification failed after alignment; '
-                    'spray was inhibited', cancel_requested)
             self._set_inference_mode('idle')
             feedback(ExecuteSpray.Feedback.SPRAYING, 0.60, 'SPRAYING')
             self.get_logger().info(
@@ -861,7 +924,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             recenter_attempts, recenter_failures, alignment_attempts)
         self.get_logger().info(
             f'[ARM][{tree}] ═══ SUMMARY ═══ '
-            f'side={request.spray_side} distance={self._observation_distance}m '
+            f'distance={self._observation_distance}m '
             f'{summary}')
         code, message = final_spray_outcome(
             accounted_sprayed, unresolved, saw_disease, summary)
@@ -883,12 +946,58 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             self.get_parameter('max_alignment_attempts').value)
 
     @staticmethod
+    def _alignment_code_allows_fallback(align_code):
+        return align_code in {
+            AlignTarget.Result.TIMEOUT,
+            AlignTarget.Result.TARGET_STALE,
+        }
+
+    @staticmethod
     def _is_recoverable_alignment_code(align_code):
         return align_code in {
             AlignTarget.Result.TIMEOUT,
             AlignTarget.Result.TARGET_STALE,
             AlignTarget.Result.SERVO_SINGULARITY,
         }
+
+    def _alignment_fallback_target(self, target, cancel_requested):
+        """Return a freshly confirmed target only when direct spraying is safe.
+
+        The fallback is real-arm opt-in.  It never sprays from an interrupted
+        Servo endpoint: MoveIt first returns to the active, previously planned
+        observation pose, then a new joint-state and target confirmation are
+        required.
+        """
+        if not self._spray_on_alignment_failure:
+            return None, 'alignment fallback is disabled'
+        if target is None:
+            return None, 'target was not confirmed before alignment failure'
+        if self._aborted(cancel_requested) or self.state.locked:
+            return None, 'motion is canceled or locked'
+        if not self._return_to_observation():
+            return None, 'could not return to the safe observation pose'
+        with self._state_mutex:
+            sequence = self._joint_state_sequence
+        current_joints = self._wait_for_joint_state(after_sequence=sequence)
+        if current_joints is None:
+            return None, 'fresh joint state is unavailable after observation return'
+        if self._aborted(cancel_requested) or self.state.locked:
+            return None, 'motion became canceled or locked'
+        preflight_ok, preflight_message = self._motion_preflight(
+            target, current_joints, source='alignment_failure_fallback',
+            error_norm_px=0.0, stage='FALLBACK')
+        if not preflight_ok:
+            return None, preflight_message
+        self._reset_target_confirmation(target.target_id)
+        self._select_target(target.target_id)
+        self._set_inference_mode('target')
+        if not self._wait_for_target_confirmation(
+                target.target_id, cancel_requested, require_workspace=False):
+            return None, 'target was not reconfirmed at the safe observation pose'
+        confirmed = self._latest_target()
+        if confirmed is None:
+            return None, 'target snapshot is unavailable after reconfirmation'
+        return confirmed, ''
 
     def _rewind_for_untried_observation(self, attempt):
         current = self._observation_candidate_index
@@ -1039,7 +1148,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self.get_logger().info(
             '[ARM][AIM] calibrated nozzle target='
             f'({values[0]:.1f},{values[1]:.1f})px '
-            f'range={values[4]:.2f}m image={values[2]}x{values[3]}')
+            f'aim_plane_range={values[4]:.2f}m image={values[2]}x{values[3]}')
         return True, ''
 
     def _active_aim_pixel(self, image_width, image_height):
@@ -1069,8 +1178,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
     def _validate_goal(self, request):
         if not str(request.mission_id).strip() or not str(request.tree_id).strip():
             return 'mission_id and tree_id are required'
-        if request.spray_side not in ('left', 'right'):
-            return 'spray_side must be left or right'
         if (not math.isfinite(float(request.spray_duration)) or
                 not self._min_duration <= request.spray_duration <= self._max_duration):
             return 'spray_duration out of range'

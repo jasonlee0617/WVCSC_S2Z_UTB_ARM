@@ -59,7 +59,7 @@ class _FakeServers(Node):
 
     def _execute_spray(self, goal_handle):
         request = goal_handle.request
-        self.spray_goals.append((request.tree_id, request.spray_side))
+        self.spray_goals.append(request.tree_id)
         self.tree_hints.append((
             request.tree_hint.header.frame_id,
             request.tree_hint.point.x,
@@ -118,9 +118,9 @@ class _Harness(Node):
         request.home_pose.position.y = home[1]
         request.home_pose.orientation.z = math.sin(home[2] / 2.0)
         request.home_pose.orientation.w = math.cos(home[2] / 2.0)
-        for tree_id, x, y, side in (
-                ('tree_01', 3.0, 2.0, 'left'),
-                ('tree_02', 5.0, -2.0, 'right')):
+        for tree_id, x, y in (
+                ('tree_01', 3.0, 2.0),
+                ('tree_02', 5.0, -2.0)):
             target = ManualMissionTarget()
             target.target_id = tree_id
             target.tree_hint.x = x
@@ -130,7 +130,6 @@ class _Harness(Node):
             target.compute_docking_pose = True
             target.confidence = 0.95
             target.evidence_uri = f'mock://{tree_id}'
-            target.spray_side = side
             target.spray_duration = 0.2
             request.targets.append(target)
         return self.manual_client.call_async(request)
@@ -142,17 +141,20 @@ class _Harness(Node):
         request.mission_id = mission_id
         request.home_pose.orientation.w = 1.0
         request.return_home_after_finish = return_home
-        for target_id, x, y, yaw, side in targets:
+        for target_id, x, y, yaw, tree_x_m, tree_y_m in targets:
             target = ManualMissionTarget()
             target.target_id = target_id
             target.docking_pose.position.x = x
             target.docking_pose.position.y = y
             target.docking_pose.orientation.z = math.sin(yaw / 2.0)
             target.docking_pose.orientation.w = math.cos(yaw / 2.0)
-            target.spray_side = side
             target.spray_duration = 0.2
             target.confidence = 1.0
             target.evidence_uri = 'manual://test'
+            target.tree_x_m = tree_x_m
+            target.tree_y_m = tree_y_m
+            target.tree_base_z_m = 0.0
+            target.use_tree_offset_from_arm_base = True
             target.compute_docking_pose = False
             request.targets.append(target)
         return self.manual_client.call_async(request)
@@ -215,10 +217,7 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
         for actual, expected in zip(servers.nav_goals, expected_nav):
             assert math.isclose(actual[0], expected[0], abs_tol=1e-6)
             assert math.isclose(actual[1], expected[1], abs_tol=1e-6)
-        assert servers.spray_goals == [
-            ('tree_01', 'left'),
-            ('tree_02', 'right'),
-        ] * 3
+        assert servers.spray_goals == ['tree_01', 'tree_02'] * 3
         assert servers.tree_hints == [
             ('map', 3.0, 2.0, 0.0),
             ('map', 5.0, -2.0, 0.0),
@@ -287,8 +286,7 @@ def test_optional_return_home_adds_final_nav_goal():
         )
         assert servers.nav_goals == [
             (3.4, 0.2), (5.4, -0.2), (0.25, -0.1)]
-        assert servers.spray_goals == [
-            ('tree_01', 'left'), ('tree_02', 'right')]
+        assert servers.spray_goals == ['tree_01', 'tree_02']
     finally:
         for _ in range(5):
             executor.spin_once(timeout_sec=0.02)
@@ -329,7 +327,7 @@ def test_manual_mission_preserves_rviz_pose_and_yaw():
         assert _spin_until(executor, harness.start_client.service_is_ready)
         load = harness.load_manual(
             'manual_pose_loop',
-            [('single_01', 3.2, 0.7, 0.4, 'left')],
+            [('single_01', 3.2, 0.7, 0.4, 0.0, 1.5)],
         )
         assert _spin_until(executor, load.done)
         assert load.result().success
@@ -345,7 +343,7 @@ def test_manual_mission_preserves_rviz_pose_and_yaw():
         )
         assert servers.nav_goals == [(3.2, 0.7)]
         assert math.isclose(servers.nav_yaws[0], 0.4, abs_tol=1e-6)
-        assert servers.spray_goals == [('single_01', 'left')]
+        assert servers.spray_goals == ['single_01']
         assert servers.tree_hints[0][0] == 'map'
         assert servers.tree_hints[0][1:] == pytest.approx(
             (2.247448, 1.925824, 0.0))

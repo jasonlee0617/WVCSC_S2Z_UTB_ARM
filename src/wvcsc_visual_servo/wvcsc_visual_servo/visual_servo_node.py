@@ -74,7 +74,12 @@ class _GoalState:
     max_joint_delta_rad: float = 0.0                # Action 期间实际最大关节位移
     servo_output_count: int = 0                     # MoveIt Servo 输出轨迹条数
     servo_output_points: int = 0                    # 最近一条输出轨迹的点数
+    servo_output_velocity_count: int = 0            # 含完整速度字段的输出轨迹条数
+    servo_output_first_monotonic: float | None = None
+    servo_output_last_monotonic: float | None = None
     max_commanded_joint_delta_rad: float = 0.0      # Servo 轨迹相对实测关节的最大位移
+    direction_guard_baseline: tuple | None = None   # (wall_time, error_u_px, error_v_px)
+    direction_guard_checked: bool = False
 
 
 def _positive_finite_rate(node, name):
@@ -83,6 +88,42 @@ def _positive_finite_rate(node, name):
     if not math.isfinite(value) or value <= 0.0:
         raise ValueError(f'{name} must be finite and positive')
     return value
+
+
+def _unit_axis_sign(node, name):
+    """Read an explicitly configured image-axis sign without accepting gain-like values."""
+    value = float(node.get_parameter(name).value)
+    if not math.isfinite(value) or value not in {-1.0, 1.0}:
+        raise ValueError(f'{name} must be exactly -1.0 or 1.0')
+    return value
+
+
+def _unit_interval_value(node, name):
+    value = float(node.get_parameter(name).value)
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ValueError(f'{name} must be finite and in [0.0, 1.0]')
+    return value
+
+
+def _direction_guard_result(
+        baseline, latest_error, elapsed_sec, *, window_sec,
+        min_axis_error_px, max_axis_growth_px):
+    """Return ``None`` while sampling, ``''`` on pass, else a safe-stop reason."""
+    if baseline is None or elapsed_sec < window_sec:
+        return None
+    _, baseline_u, baseline_v = baseline
+    current_u, current_v = (float(value) for value in latest_error)
+    violations = []
+    for axis, initial, current in (
+            ('u', float(baseline_u), current_u),
+            ('v', float(baseline_v), current_v)):
+        if (abs(initial) >= min_axis_error_px
+                and abs(current) >= abs(initial) + max_axis_growth_px):
+            violations.append(
+                f'{axis}:abs_error={abs(initial):.1f}px→{abs(current):.1f}px')
+    if violations:
+        return '; '.join(violations)
+    return ''
 
 
 class VisualServo(Node):
@@ -101,6 +142,18 @@ class VisualServo(Node):
         self._config = ServoRuntimeConfig.from_node(self)
         _positive_finite_rate(self, 'debug_rate_hz')
         _positive_finite_rate(self, 'terminal_status_rate_hz')
+        self._angular_u_sign = _unit_axis_sign(self, 'angular_u_sign')
+        self._angular_v_sign = _unit_axis_sign(self, 'angular_v_sign')
+        self._direction_guard_enabled = bool(
+            self.get_parameter('direction_guard_enabled').value)
+        self._direction_guard_window_sec = _positive_finite_rate(
+            self, 'direction_guard_window_sec')
+        self._direction_guard_min_error_px = _positive_finite_rate(
+            self, 'direction_guard_min_error_px')
+        self._direction_guard_max_growth_px = _positive_finite_rate(
+            self, 'direction_guard_max_growth_px')
+        self._direction_guard_min_confidence = _unit_interval_value(
+            self, 'direction_guard_min_confidence')
 
         # 1. 实例化各个独立算法模块 (保持单一职责原则)
         self._controller = PIDController2D(ServoControlConfig(
@@ -259,8 +312,15 @@ class VisualServo(Node):
             'predict_lead_sec': 0.0,
             'max_predict_horizon_sec': 0.05,
             'command_mode': 'angular_xy',
+            'angular_u_sign': 1.0,
+            'angular_v_sign': 1.0,
             'max_angular_speed': 0.45,
             'max_angular_acceleration': 3.00,
+            'direction_guard_enabled': False,
+            'direction_guard_window_sec': 1.0,
+            'direction_guard_min_error_px': 20.0,
+            'direction_guard_max_growth_px': 10.0,
+            'direction_guard_min_confidence': 0.60,
             'zero_command_count': 8,
             'service_timeout_sec': 5.0,
             'initial_start_timeout_sec': 12.0,
@@ -550,10 +610,16 @@ class VisualServo(Node):
         with self._lock:
             if not self._busy:
                 return
+            observed_at = time.monotonic()
             self._goal_state.servo_output_count += 1
             self._goal_state.servo_output_points = len(message.points)
+            if self._goal_state.servo_output_first_monotonic is None:
+                self._goal_state.servo_output_first_monotonic = observed_at
+            self._goal_state.servo_output_last_monotonic = observed_at
             current = dict(zip(self._ARM_JOINT_NAMES, self._joint_positions))
             point = message.points[0]
+            if len(getattr(point, 'velocities', ())) == len(message.joint_names):
+                self._goal_state.servo_output_velocity_count += 1
             if len(point.positions) != len(message.joint_names):
                 return
             commanded = dict(zip(message.joint_names, point.positions))
@@ -563,6 +629,70 @@ class VisualServo(Node):
                     self._goal_state.max_commanded_joint_delta_rad,
                     max(abs(float(commanded[name]) - current[name])
                         for name in self._ARM_JOINT_NAMES))
+
+    def _servo_output_diagnostics(self):
+        """Return downstream trajectory cadence without making it a motion gate."""
+        with self._lock:
+            state = self._goal_state
+            first = state.servo_output_first_monotonic
+            last = state.servo_output_last_monotonic
+            count = state.servo_output_count
+            velocity_count = state.servo_output_velocity_count
+        rate = 0.0
+        if first is not None and last is not None and last > first and count > 1:
+            rate = float(count - 1) / (last - first)
+        return count, velocity_count, rate
+
+    def _direction_guard_decision(self, now, latest):
+        """Sample the commanded image response once and stop on axis divergence.
+
+        The active target id is already matched by ``_on_target``.  This guard
+        is deliberately a one-shot real-arm safety check, not an automatic
+        sign learner: ambiguous target motion must not reverse a live arm.
+        """
+        if not getattr(self, '_direction_guard_enabled', False):
+            return None
+        if (float(latest.get('confidence', 0.0))
+                < getattr(self, '_direction_guard_min_confidence', 0.60)):
+            return None
+        error = (float(latest['error_u']), float(latest['error_v']))
+        if not all(math.isfinite(value) for value in error):
+            return None
+        with self._lock:
+            state = self._goal_state
+            if state.direction_guard_checked:
+                return None
+            if state.direction_guard_baseline is None:
+                if max(abs(value) for value in error) < (
+                        getattr(self, '_direction_guard_min_error_px', 20.0)):
+                    return None
+                state.direction_guard_baseline = (now, *error)
+                baseline = state.direction_guard_baseline
+                should_log_baseline = True
+            else:
+                baseline = state.direction_guard_baseline
+                should_log_baseline = False
+            outcome = _direction_guard_result(
+                baseline, error, now - baseline[0],
+                window_sec=getattr(self, '_direction_guard_window_sec', 1.0),
+                min_axis_error_px=getattr(
+                    self, '_direction_guard_min_error_px', 20.0),
+                max_axis_growth_px=getattr(
+                    self, '_direction_guard_max_growth_px', 10.0))
+            if outcome is not None:
+                state.direction_guard_checked = True
+        if should_log_baseline:
+            self.get_logger().info(
+                '[VISUAL_SERVO][DIRECTION_GUARD] baseline '
+                f'error_px=({error[0]:.1f},{error[1]:.1f}) '
+                f'window={getattr(self, "_direction_guard_window_sec", 1.0):.2f}s '
+                f'u_sign={getattr(self, "_angular_u_sign", 1.0):+.0f} '
+                f'v_sign={getattr(self, "_angular_v_sign", 1.0):+.0f}')
+        if outcome == '':
+            self.get_logger().info(
+                '[VISUAL_SERVO][DIRECTION_GUARD] passed '
+                f'error_px=({error[0]:.1f},{error[1]:.1f})')
+        return outcome
 
     def _on_servo_status(self, message):
         """仲裁 MoveIt Servo 的安全状态，并将不可恢复的错误直接传递给主循环。"""
@@ -684,6 +814,8 @@ class VisualServo(Node):
                 f'[VISUAL_SERVO] 进入伺服 target={request.target_id} '
                 f'rate={self._config.control_rate_hz:.1f}Hz '
                 f'command_mode={self._command_mode} '
+                f'angular_u_sign={getattr(self, "_angular_u_sign", 1.0):+.0f} '
+                f'angular_v_sign={getattr(self, "_angular_v_sign", 1.0):+.0f} '
                 f'terminal_rate='
                 f'{float(self.get_parameter("terminal_status_rate_hz").value):.1f}Hz')
             
@@ -774,7 +906,15 @@ class VisualServo(Node):
                         'WAIT', now, latest, reason='camera_info_unavailable')
                     time.sleep(period)
                     continue
-                
+
+                direction_guard = self._direction_guard_decision(now, latest)
+                if direction_guard:
+                    return abort_with_stop(
+                        AlignTarget.Result.SERVO_SAFETY_STOP,
+                        'image-axis direction guard stopped Servo: '
+                        f'{direction_guard}',
+                        self._terminal_target_snapshot(now, latest))
+
                 # 5. 评估对准状态 (AlignmentProgress)
                 with self._lock:
                     aligned = self._progress.aligned
@@ -944,6 +1084,8 @@ class VisualServo(Node):
             0.0, self._now() - float(latest.get('received', self._now())))
         unavailable = 0.0 if latest is None else float(
             latest.get('target_unavailable_sec', 0.0))
+        (servo_outputs, servo_velocity_outputs,
+         servo_output_rate_hz) = self._servo_output_diagnostics()
         self.get_logger().warn(
             f'[VISUAL_SERVO] {event} code={code} target_age={age:.2f}s '
             f'target_unavailable={unavailable:.2f}s '
@@ -956,7 +1098,9 @@ class VisualServo(Node):
             f'{self._goal_state.last_command[1]:.3f}) '
             f'peak_command_{self._command_labels()[1]}={self._goal_state.peak_command_norm:.3f} '
             f'control_cycles={self._goal_state.control_cycles} control_dt={self._goal_state.last_control_dt:.3f}s '
-            f'servo_outputs={self._goal_state.servo_output_count} '
+            f'servo_outputs={servo_outputs} '
+            f'servo_velocity_outputs={servo_velocity_outputs} '
+            f'servo_output_rate_hz={servo_output_rate_hz:.1f} '
             f'servo_output_points={self._goal_state.servo_output_points} '
             f'commanded_joint_delta={self._goal_state.max_commanded_joint_delta_rad:.5f}rad '
             f'actual_joint_delta={self._goal_state.max_joint_delta_rad:.5f}rad '
@@ -1064,13 +1208,16 @@ class VisualServo(Node):
     def _command_components(self, x, y):
         """把图像平面 PID 输出映射为完整的 camera optical Twist。
 
-        optical 坐标为 +X 右、+Y 下、+Z 前。静止目标的 u 正误差需要相机向右
-        转（+angular.y），v 正误差需要相机向下转（-angular.x）。这与任务层
-        ``recenter_camera_pose`` 的姿态重心方向一致。
+        optical 坐标为 +X 右、+Y 下、+Z 前。默认静止目标的 u 正误差需要相机
+        向右转（+angular.y），v 正误差需要相机向下转（-angular.x）。实机可
+        仅通过 ±1 的轴符号参数适配经标定后的安装方向，而不改变 PID 本身。
         """
         x, y = float(x), float(y)
         if self._command_mode == 'angular_xy':
-            return 0.0, 0.0, -y, x
+            return (
+                0.0, 0.0,
+                -getattr(self, '_angular_v_sign', 1.0) * y,
+                getattr(self, '_angular_u_sign', 1.0) * x)
         return x, y, 0.0, 0.0
 
     def _command_labels(self):
@@ -1138,6 +1285,8 @@ class VisualServo(Node):
             f' servo_status={servo_status}({self._policy.status_text(servo_status)})')
         cmd_label, cmd_unit = self._command_labels()
         speed_label = f'{cmd_label}_speed'
+        (servo_outputs, servo_velocity_outputs,
+         servo_output_rate_hz) = self._servo_output_diagnostics()
         self.get_logger().info(
             f'[VISUAL_SERVO] TRACK target={target_id} elapsed={elapsed:.2f}s '
             f'error_px=({error_u:.1f},{error_v:.1f}) '
@@ -1145,7 +1294,11 @@ class VisualServo(Node):
             f'{cmd_label}=({command[0]:.3f},{command[1]:.3f}) '
             f'{speed_label}={math.hypot(*command):.3f} '
             f'confidence={confidence:.2f} '
-            f'stable_duration={stable_duration:.2f}s{status_suffix}')
+            f'stable_duration={stable_duration:.2f}s '
+            f'servo_output_rate_hz={servo_output_rate_hz:.1f} '
+            f'servo_outputs={servo_outputs} '
+            f'servo_velocity_outputs={servo_velocity_outputs}'
+            f'{status_suffix}')
 
     def _publish_debug(
             self, event, result_code=-1, message='', force=False,
@@ -1169,12 +1322,15 @@ class VisualServo(Node):
                 latest is not None and latest.get('valid')
                 and not latest.get('hold') and self._progress.stalled(now))
             stable_duration = self._progress.stable_duration
+            direction_guard_checked = self._goal_state.direction_guard_checked
         confidence = 0.0 if latest is None else float(
             latest.get('confidence', 0.0))
         if not math.isfinite(confidence):
             confidence = 0.0
         linear_x, linear_y, angular_x, angular_y = (
             self._command_components(*command))
+        (servo_outputs, servo_velocity_outputs,
+         servo_output_rate_hz) = self._servo_output_diagnostics()
         aim = self._aim_solution
         estimated_error = 0.0
         if (aim is not None and latest is not None and latest.get('valid')
@@ -1225,6 +1381,8 @@ class VisualServo(Node):
             stable_duration_sec=float(stable_duration),
             progress_stalled=bool(progress_stalled),
             command_mode=self._command_mode,
+            angular_u_sign=getattr(self, '_angular_u_sign', 1.0),
+            angular_v_sign=getattr(self, '_angular_v_sign', 1.0),
             command_x_mps=linear_x,
             command_y_mps=linear_y,
             command_angular_x_rps=angular_x,
@@ -1236,8 +1394,11 @@ class VisualServo(Node):
             lifecycle_transition=self._last_lifecycle_transition,
             service_latency_sec=self._last_service_latency_sec,
             joint_positions=list(self._joint_positions),
-            servo_output_count=int(self._goal_state.servo_output_count),
+            servo_output_count=int(servo_outputs),
             servo_output_points=int(self._goal_state.servo_output_points),
+            servo_output_velocity_count=int(servo_velocity_outputs),
+            servo_output_rate_hz=float(servo_output_rate_hz),
+            direction_guard_checked=bool(direction_guard_checked),
             max_commanded_joint_delta_rad=float(
                 self._goal_state.max_commanded_joint_delta_rad),
             max_joint_delta_rad=float(self._goal_state.max_joint_delta_rad),

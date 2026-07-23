@@ -10,7 +10,9 @@ publish_period: 0.05
 low_latency_mode: false
 command_out_type: trajectory_msgs/JointTrajectory
 publish_joint_positions: true
-publish_joint_velocities: false
+# The position-interface JTC still consumes this velocity field for smooth
+# interpolation of consecutive 50 ms Servo trajectories.
+publish_joint_velocities: true
 publish_joint_accelerations: false
 smoothing_filter_plugin_name: online_signal_smoothing::ButterworthFilterPlugin
 is_primary_planning_scene_monitor: false

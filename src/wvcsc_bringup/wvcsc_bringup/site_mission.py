@@ -6,6 +6,7 @@ executables so those three entry points cannot silently interpret a site file
 differently.
 """
 
+import copy
 from dataclasses import dataclass
 import hashlib
 import math
@@ -21,8 +22,9 @@ from wvcsc_mission_manager.core import (
 )
 
 
-SCHEMA_VERSION = 2
-ARM_BASE_OFFSET_REFERENCE = 'arm_base_vehicle_axes'
+SCHEMA_VERSION = 3
+ARM_BASE_OFFSET_REFERENCE = 'alicia_base_link_xy'
+LEGACY_ARM_BASE_OFFSET_REFERENCE = 'arm_base_vehicle_axes'
 DEFAULT_FOOTPRINT = ((0.8, -0.4), (0.8, 0.4), (-0.8, 0.4), (-0.8, -0.4))
 MIN_TREE_DISTANCE_M = 0.95
 MAX_TREE_DISTANCE_M = 1.80
@@ -113,22 +115,22 @@ def pose_sample_statistics(samples):
     return x, y, yaw, position_spread, yaw_spread
 
 
-def tree_hint_from_offset(
-        docking_pose, forward_m, left_m, z=0.0,
-        arm_base_forward_m=DEFAULT_ARM_BASE_FORWARD_OFFSET,
-        arm_base_left_m=DEFAULT_ARM_BASE_LEFT_OFFSET):
+def tree_hint_from_arm_base_offset(
+        docking_pose, tree_x_m, tree_y_m, z=0.0,
+        arm_base_x_m=DEFAULT_ARM_BASE_FORWARD_OFFSET,
+        arm_base_y_m=DEFAULT_ARM_BASE_LEFT_OFFSET):
     """Convert an offset measured from the arm-base origin into map coordinates."""
     x, y, yaw = (_finite(value, 'docking_pose') for value in docking_pose)
-    forward = _finite(forward_m, 'tree_forward_m')
-    left = _finite(left_m, 'tree_left_m')
-    arm_forward = _finite(arm_base_forward_m, 'arm_base_forward_m')
-    arm_left = _finite(arm_base_left_m, 'arm_base_left_m')
-    tree_z = _finite(z, 'tree_hint.z')
+    tree_x = _finite(tree_x_m, 'tree_x_m')
+    tree_y = _finite(tree_y_m, 'tree_y_m')
+    arm_x = _finite(arm_base_x_m, 'arm_base_mount.x_m')
+    arm_y = _finite(arm_base_y_m, 'arm_base_mount.y_m')
+    tree_z = _finite(z, 'tree_base_z_m')
     return (
-        x + math.cos(yaw) * (arm_forward + forward) -
-        math.sin(yaw) * (arm_left + left),
-        y + math.sin(yaw) * (arm_forward + forward) +
-        math.cos(yaw) * (arm_left + left),
+        x + math.cos(yaw) * (arm_x + tree_x) -
+        math.sin(yaw) * (arm_y + tree_y),
+        y + math.sin(yaw) * (arm_x + tree_x) +
+        math.cos(yaw) * (arm_y + tree_y),
         tree_z,
     )
 
@@ -280,8 +282,8 @@ def new_site_document(site_id, mission_id, map_yaml):
         'site_id': str(site_id).strip(),
         'map': map_hashes(map_yaml),
         'arm_base_mount': {
-            'forward_m': DEFAULT_ARM_BASE_FORWARD_OFFSET,
-            'left_m': DEFAULT_ARM_BASE_LEFT_OFFSET,
+            'x_m': DEFAULT_ARM_BASE_FORWARD_OFFSET,
+            'y_m': DEFAULT_ARM_BASE_LEFT_OFFSET,
         },
         'mission': {
             'mission_id': str(mission_id).strip(),
@@ -302,8 +304,8 @@ def load_site_document(path):
         raise ValueError('site mission root must be a mapping')
     if document.get('schema_version') != SCHEMA_VERSION:
         raise ValueError(
-            f'site schema_version must be {SCHEMA_VERSION}; back up the old '
-            'site file and recapture HOME and targets from the arm-base origin')
+            f'site schema_version must be {SCHEMA_VERSION}; migrate a schema-v2 '
+            'file with migrate_site_mission or recapture HOME and targets')
     return document
 
 
@@ -335,13 +337,12 @@ def validate_site_document(
               f'schema_version must be {SCHEMA_VERSION}')
         check(bool(str(document.get('site_id', '')).strip()), 'site_id is required')
         mount = document.get('arm_base_mount') or {}
-        arm_forward = _finite(
-            mount.get('forward_m'), 'arm_base_mount.forward_m')
-        arm_left = _finite(mount.get('left_m'), 'arm_base_mount.left_m')
-        check(abs(arm_forward - DEFAULT_ARM_BASE_FORWARD_OFFSET) <= 1e-9,
-              'arm_base_mount.forward_m does not match robot geometry')
-        check(abs(arm_left - DEFAULT_ARM_BASE_LEFT_OFFSET) <= 1e-9,
-              'arm_base_mount.left_m does not match robot geometry')
+        arm_x = _finite(mount.get('x_m'), 'arm_base_mount.x_m')
+        arm_y = _finite(mount.get('y_m'), 'arm_base_mount.y_m')
+        check(abs(arm_x - DEFAULT_ARM_BASE_FORWARD_OFFSET) <= 1e-9,
+              'arm_base_mount.x_m does not match robot geometry')
+        check(abs(arm_y - DEFAULT_ARM_BASE_LEFT_OFFSET) <= 1e-9,
+              'arm_base_mount.y_m does not match robot geometry')
         expected_hashes = map_hashes(map_yaml)
         map_section = document.get('map') or {}
         check(map_section.get('frame_id') == 'map', 'map.frame_id must be map')
@@ -368,31 +369,23 @@ def validate_site_document(
             check(target_id not in seen, f'duplicate target_id: {target_id}')
             seen.add(target_id)
             docking = _pose(target.get('docking_pose'), f'{label}.docking_pose')
-            hint = _point(target.get('tree_hint'), f'{label}.tree_hint')
-            offset = target.get('measured_tree_offset') or {}
+            offset = target.get('tree_offset_arm_base_m') or {}
             check(offset.get('reference') == ARM_BASE_OFFSET_REFERENCE,
-                  f'{label}.measured_tree_offset.reference must be '
+                  f'{label}.tree_offset_arm_base_m.reference must be '
                   f'{ARM_BASE_OFFSET_REFERENCE}')
-            forward = _finite(offset.get('forward_m'), f'{label}.forward_m')
-            left = _finite(offset.get('left_m'), f'{label}.left_m')
-            check(abs(forward) <= MAX_ARM_BASE_FORWARD_ERROR_M,
-                  f'{label} arm-base forward error exceeds '
+            tree_x = _finite(offset.get('x_m'), f'{label}.tree_x_m')
+            tree_y = _finite(offset.get('y_m'), f'{label}.tree_y_m')
+            tree_base_z = _finite(target.get('tree_base_z_m'),
+                                  f'{label}.tree_base_z_m')
+            check(abs(tree_x) <= MAX_ARM_BASE_FORWARD_ERROR_M,
+                  f'{label} arm-base X error exceeds '
                   f'{MAX_ARM_BASE_FORWARD_ERROR_M:.2f} m')
-            side = str(target.get('spray_side', '')).strip().lower()
-            check(side in {'left', 'right'}, f'{label}.spray_side is invalid')
-            check((side == 'left' and left > 0.0) or
-                  (side == 'right' and left < 0.0),
-                  f'{label}.spray_side conflicts with measured left offset')
-            distance = math.hypot(forward, left)
+            distance = math.hypot(tree_x, tree_y)
             check(MIN_TREE_DISTANCE_M <= distance <= MAX_TREE_DISTANCE_M,
                   f'{label} tree distance must be within '
                   f'{MIN_TREE_DISTANCE_M:.2f}-{MAX_TREE_DISTANCE_M:.2f} m')
-            expected_hint = tree_hint_from_offset(
-                docking, forward, left, hint[2], arm_forward, arm_left)
-            check(math.hypot(hint[0] - expected_hint[0],
-                             hint[1] - expected_hint[1]) <=
-                  MAX_HINT_RECONSTRUCTION_ERROR_M,
-                  f'{label}.tree_hint does not match its measured offset')
+            tree_hint_from_arm_base_offset(
+                docking, tree_x, tree_y, tree_base_z, arm_x, arm_y)
             duration = _finite(target.get('spray_duration'),
                                f'{label}.spray_duration')
             check(0.2 <= duration <= 10.0,
@@ -433,6 +426,43 @@ def validate_site_document(
     if errors:
         raise ValueError('; '.join(errors))
     return document
+
+
+def migrate_site_document(document, map_yaml):
+    """Convert one schema-v2 site file using its recorded numeric offsets."""
+    if not isinstance(document, dict) or document.get('schema_version') != 2:
+        raise ValueError('site migration requires schema_version 2')
+    converted = copy.deepcopy(document)
+    mount = converted.get('arm_base_mount') or {}
+    arm_x = _finite(mount.get('forward_m'), 'arm_base_mount.forward_m')
+    arm_y = _finite(mount.get('left_m'), 'arm_base_mount.left_m')
+    converted['arm_base_mount'] = {'x_m': arm_x, 'y_m': arm_y}
+    for index, target in enumerate((converted.get('mission') or {}).get('targets') or []):
+        label = f'mission.targets[{index}]'
+        docking = _pose(target.get('docking_pose'), f'{label}.docking_pose')
+        hint = _point(target.get('tree_hint'), f'{label}.tree_hint')
+        offset = target.get('measured_tree_offset') or {}
+        if offset.get('reference') != LEGACY_ARM_BASE_OFFSET_REFERENCE:
+            raise ValueError(f'{label}.measured_tree_offset.reference is invalid')
+        tree_x = _finite(offset.get('forward_m'), f'{label}.forward_m')
+        tree_y = _finite(offset.get('left_m'), f'{label}.left_m')
+        expected = tree_hint_from_arm_base_offset(
+            docking, tree_x, tree_y, hint[2], arm_x, arm_y)
+        if math.hypot(expected[0] - hint[0], expected[1] - hint[1]) > \
+                MAX_HINT_RECONSTRUCTION_ERROR_M:
+            raise ValueError(f'{label}.tree_hint does not match recorded offset')
+        target['tree_offset_arm_base_m'] = {
+            'reference': ARM_BASE_OFFSET_REFERENCE,
+            'x_m': tree_x,
+            'y_m': tree_y,
+        }
+        target['tree_base_z_m'] = hint[2]
+        target.pop('tree_hint', None)
+        target.pop('measured_tree_offset', None)
+        target.pop('spray_side', None)
+    converted['schema_version'] = SCHEMA_VERSION
+    validate_site_document(converted, map_yaml)
+    return converted
 
 
 def atomic_write_site(path, document, *, backup=True):

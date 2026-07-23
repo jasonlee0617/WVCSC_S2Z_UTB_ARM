@@ -205,22 +205,29 @@ def validate_unlabeled_dataset(root, expected=30):
             errors.append(f'{sample.get("image")}: contains annotation metadata')
     if expected == 30:
         seed_counts = {}
-        side_counts = {'left': 0, 'right': 0}
+        y_sign_counts = {'positive': 0, 'negative': 0}
         for sample in samples:
             seed = sample.get('orchard_seed')
             seed_counts[seed] = seed_counts.get(seed, 0) + 1
-            side = sample.get('spray_side')
-            if side in side_counts:
-                side_counts[side] += 1
+            offset = sample.get('tree_offset_arm_base_m') or {}
+            try:
+                tree_y = float(offset['y_m'])
+            except (KeyError, TypeError, ValueError):
+                errors.append(f'{sample.get("image")}: invalid tree_offset_arm_base_m')
             else:
-                errors.append(f'{sample.get("image")}: invalid spray_side {side}')
+                if tree_y > 0.0:
+                    y_sign_counts['positive'] += 1
+                elif tree_y < 0.0:
+                    y_sign_counts['negative'] += 1
+                else:
+                    errors.append(f'{sample.get("image")}: zero tree offset Y')
             pose = sample.get('camera_pose')
             if not isinstance(pose, dict) or pose.get('frame_id') != 'map':
                 errors.append(f'{sample.get("image")}: invalid camera_pose')
         if seed_counts != {seed: 6 for seed in range(50, 55)}:
             errors.append(f'expected seeds 50..54 with 6 images each, found {seed_counts}')
-        if side_counts != {'left': 15, 'right': 15}:
-            errors.append(f'expected 15 images per side, found {side_counts}')
+        if y_sign_counts != {'positive': 15, 'negative': 15}:
+            errors.append(f'expected 15 images per signed Y, found {y_sign_counts}')
     if errors:
         raise ValueError('\n'.join(errors))
     return {'images': len(images)}
@@ -282,22 +289,29 @@ def validate_fruit_seg_dataset(root, expected_train=24, expected_val=6):
         expected_train, expected_val)
     if expected_train + expected_val == 30:
         seed_counts = {}
-        side_counts = {'left': 0, 'right': 0}
+        y_sign_counts = {'positive': 0, 'negative': 0}
         for sample in samples:
             seed = sample.get('orchard_seed')
             seed_counts[seed] = seed_counts.get(seed, 0) + 1
-            side = sample.get('spray_side')
-            if side in side_counts:
-                side_counts[side] += 1
+            offset = sample.get('tree_offset_arm_base_m') or {}
+            try:
+                tree_y = float(offset['y_m'])
+            except (KeyError, TypeError, ValueError):
+                errors.append(f'{sample.get("image")}: invalid tree_offset_arm_base_m')
             else:
-                errors.append(f'{sample.get("image")}: invalid spray_side {side}')
+                if tree_y > 0.0:
+                    y_sign_counts['positive'] += 1
+                elif tree_y < 0.0:
+                    y_sign_counts['negative'] += 1
+                else:
+                    errors.append(f'{sample.get("image")}: zero tree offset Y')
             expected_split = 'val' if seed == 54 else 'train'
             if sample.get('split') != expected_split:
                 errors.append(f'{sample.get("image")}: invalid seed split')
         if seed_counts != {seed: 6 for seed in range(50, 55)}:
             errors.append(f'expected seeds 50..54 with 6 images each, found {seed_counts}')
-        if side_counts != {'left': 15, 'right': 15}:
-            errors.append(f'expected 15 images per side, found {side_counts}')
+        if y_sign_counts != {'positive': 15, 'negative': 15}:
+            errors.append(f'expected 15 images per signed Y, found {y_sign_counts}')
     if errors:
         raise ValueError('\n'.join(errors))
     return {'train': len(images_by_split['train']), 'val': len(images_by_split['val'])}

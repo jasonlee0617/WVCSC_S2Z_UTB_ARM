@@ -72,6 +72,7 @@ class MarkerTransformPublisher(Node):
                 or stable_pose_hold_sec <= 0.0):
             raise ValueError('stable_pose_hold_sec must be finite and positive')
         self._broadcaster = TransformBroadcaster(self)
+        self._published_once = False
         self._last_log = 0.0
         self._poses = deque(maxlen=smoothing_window)
         self._stable_pose_hold_sec = stable_pose_hold_sec
@@ -99,6 +100,11 @@ class MarkerTransformPublisher(Node):
         transform.transform.rotation.z = quaternion[2]
         transform.transform.rotation.w = quaternion[3]
         self._broadcaster.sendTransform(transform)
+        if not self._published_once:
+            self._published_once = True
+            self.get_logger().info(
+                f'[HAND_EYE][MARKER_TF_READY] '
+                f'{self._base}->{self._marker}')
 
     def _on_stable_pose(self, message):
         """Temporarily prefer the collector's quality-gated sample pose.

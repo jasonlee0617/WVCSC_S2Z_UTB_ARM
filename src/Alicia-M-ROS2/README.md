@@ -11,7 +11,7 @@
 - `ros2_control` 硬件驱动集成（串口通信）
 - MoveIt2 规划与执行支持
 - 机械臂模型显示与 RViz 可视化
-- 手眼标定（眼在手上，适配intel realsense d405）与标定结果验证
+- 手眼标定由工作区的 `wvcsc_calibration` 提供（C10 + easy_handeye2）
 - Python 脚本示例（如 Pick and Place）
 - (待开发)物块分拣工作流（2D抓取）
 - (待开发)基于 GraspGen（NVIDIA 2025）的 6D 抓取工作流。
@@ -21,7 +21,6 @@
 ```text
 src/
 ├── alicia_m_bringup/          # 机械臂硬件与 MoveIt 启动入口
-├── alicia_m_calibration/      # 手眼标定与验证脚本
 ├── alicia_m_descriptions/     # URDF、mesh、RViz 显示配置
 ├── alicia_m_driver/           # ros2_control 硬件驱动（串口通信）
 ├── alicia_m_grasp_6d/         # 6D 抓取模块（待开发）

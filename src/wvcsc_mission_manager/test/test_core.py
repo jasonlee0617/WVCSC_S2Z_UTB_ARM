@@ -8,19 +8,20 @@ from wvcsc_mission_manager.core import (
     StopDetector,
     Target,
     docking_pose,
-    manual_tree_hint,
     navigation_pose,
+    tree_hint_from_arm_base_offset,
+    tree_offset_from_docking,
 )
 
 
 def _targets():
     return [
-        Target('tree_1', 3.0, 2.0, 0.0, 0.9, 'left', 2.0),
-        Target('tree_2', 5.0, -2.0, 0.0, 0.9, 'right', 2.0),
+        Target('tree_1', 3.0, 2.0, 0.0, 0.9, 2.0),
+        Target('tree_2', 5.0, -2.0, 0.0, 0.9, 2.0),
     ]
 
 
-def test_docking_pose_offsets_toward_target_side():
+def test_docking_pose_uses_signed_road_normal():
     assert docking_pose(_targets()[0]) == (3.4, 0.2, 0.0)
     assert docking_pose(_targets()[1]) == (5.4, -0.2, 0.0)
 
@@ -40,8 +41,8 @@ def test_docking_aligns_arm_base_with_tree_along_road_heading():
     assert tangent_error == pytest.approx(0.0)
 
 
-def test_rejects_side_that_disagrees_with_road_geometry():
-    target = Target('bad', 1.0, -2.0, 0.0, 0.9, 'left', 2.0)
+def test_rejects_tree_on_road_center_line():
+    target = Target('bad', 1.0, 0.0, 0.0, 0.9, 2.0)
     with pytest.raises(ValueError):
         docking_pose(target)
 
@@ -53,20 +54,30 @@ def test_rejects_negative_lateral_offset():
 
 def test_manual_docking_pose_overrides_orchard_offset():
     target = Target(
-        'manual_1', 3.0, 2.0, 0.0, 1.0, 'left', 2.0,
+        'manual_1', 3.0, 2.0, 0.0, 1.0, 2.0,
         docking_pose_override=(3.2, 0.7, 1.2))
     assert navigation_pose(target) == (3.2, 0.7, 1.2)
 
 
-def test_manual_tree_hint_uses_docking_yaw_and_spray_side():
-    assert manual_tree_hint((3.0, 0.5, 0.0), 'left', 1.5) == (2.6, 2.0, 0.0)
-    assert manual_tree_hint((3.0, 0.5, 0.0), 'right', 1.5) == (2.6, -1.0, 0.0)
+def test_tree_hint_uses_signed_arm_base_xy_and_round_trips():
+    hint = tree_hint_from_arm_base_offset((3.0, 0.5, 0.0), 0.0, -1.5)
+    assert hint == (2.6, -1.0, 0.0)
+    assert tree_offset_from_docking((3.0, 0.5, 0.0), hint) == pytest.approx(
+        (0.0, -1.5))
+
+
+def test_docking_pose_aligns_arm_base_with_tree_for_rotated_road():
+    target = Target('tree', 3.0, 2.0, 0.0, 0.9, 2.0)
+    docking = docking_pose(target, road_yaw=math.pi / 2.0)
+    arm_x = docking[0]
+    arm_y = docking[1] - 0.40
+    assert arm_y == pytest.approx(target.y)
 
 
 def test_stop_verification_can_return_to_navigation_for_same_target():
     core = MissionCore()
     core.load('retry', [
-        Target('tree_1', 3.0, 2.0, 0.0, 0.9, 'left', 2.0)])
+        Target('tree_1', 3.0, 2.0, 0.0, 0.9, 2.0)])
     assert core.start()
     assert core.nav_succeeded()
     assert core.retry_navigation()

@@ -2,6 +2,7 @@
 """Fail-fast checks for mutually exclusive WVCSC real operating modes."""
 
 import argparse
+import configparser
 import os
 from pathlib import Path
 import subprocess
@@ -32,6 +33,7 @@ MISSION_PACKAGES = (
     'moveit_ros_move_group', 'moveit_servo', 'pymoveit2',
     'trajectory_retime_server', 'wvcsc_interfaces', 'wvcsc_rgb_vision',
     'wvcsc_visual_servo', 'wvcsc_arm_task', 'wvcsc_mission_manager',
+    'controller_pkg',
 )
 MAPPING_PACKAGES = (
     'cartographer_ros', 'my_cartographer', 'joint_state_publisher', 'rviz2',
@@ -46,7 +48,9 @@ REAL_MODEL_CONTRACTS = (
 def _arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', required=True, choices=('localization', 'mapping'))
-    parser.add_argument('--operation', default='mission', choices=('survey', 'mission'))
+    parser.add_argument(
+        '--operation', default='mission',
+        choices=('survey', 'mission', 'field_route'))
     parser.add_argument('--mission-file', default='')
     parser.add_argument('--camera-device', default='')
     parser.add_argument('--arm-device', default='')
@@ -55,6 +59,7 @@ def _arguments():
     parser.add_argument('--camera-info', default='')
     parser.add_argument('--handeye-calibration', default='')
     parser.add_argument('--nozzle-calibration', default='')
+    parser.add_argument('--relay-config', default='')
     parser.add_argument(
         '--require-nozzle-calibration', default='true',
         choices=('true', 'false'))
@@ -157,6 +162,31 @@ def _calibration_checks(args, failures):
         _exists('spray nozzle calibration', args.nozzle_calibration, failures)
 
 
+def _relay_config(path, failures):
+    config_path = Path(path).expanduser()
+    _exists('relay configuration', config_path, failures)
+    if not config_path.is_file():
+        return
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(config_path, encoding='utf-8')
+        section = parser['serial']
+        port = section['PortName'].strip()
+        baudrate = section.getint('BaudRate')
+        address = section.getint('Address')
+        timeout = section.getfloat('Timeout')
+    except (KeyError, ValueError, configparser.Error) as error:
+        failures.append(f'invalid relay configuration: {error}')
+        print(f'  [FAIL] relay configuration: {error}')
+        return
+    if (not port or baudrate <= 0 or not 1 <= address <= 255 or
+            timeout <= 0.0):
+        failures.append('relay configuration values are out of range')
+        print('  [FAIL] relay configuration values are out of range')
+        return
+    _exists('relay serial', port, failures)
+
+
 def main():
     args = _arguments()
     failures = []
@@ -171,7 +201,7 @@ def main():
         _packages(LOCALIZATION_PACKAGES, failures)
         _exists('C10 camera', args.camera_device, failures)
         _exists('map YAML', args.map, failures)
-        if args.operation == 'mission':
+        if args.operation in ('mission', 'field_route'):
             _packages(MISSION_PACKAGES, failures)
             _exists('Alicia-M serial', args.arm_device, failures)
             _yolo_runtime(args.yolo_python, failures)
@@ -184,18 +214,30 @@ def main():
                 _exists(f'real YOLO weight {model}', model_dir / model, failures)
             _yolo_contracts(args.yolo_python, model_dir, failures)
             _calibration_checks(args, failures)
-            _exists('measured site mission', args.mission_file, failures)
+            _relay_config(args.relay_config, failures)
+            route_label = (
+                'five-point field route' if args.operation == 'field_route'
+                else 'measured site mission')
+            _exists(route_label, args.mission_file, failures)
             if Path(args.mission_file).expanduser().is_file():
                 try:
-                    from wvcsc_bringup.site_mission import (
-                        load_site_document, validate_site_document)
-                    validate_site_document(
-                        load_site_document(args.mission_file), args.map)
-                    print('  [OK]   measured site mission contract')
+                    if args.operation == 'field_route':
+                        from wvcsc_bringup.field_route import (
+                            load_field_route_document,
+                            validate_field_route_document)
+                        validate_field_route_document(
+                            load_field_route_document(args.mission_file), args.map)
+                        print('  [OK]   five-point field route contract')
+                    else:
+                        from wvcsc_bringup.site_mission import (
+                            load_site_document, validate_site_document)
+                        validate_site_document(
+                            load_site_document(args.mission_file), args.map)
+                        print('  [OK]   measured site mission contract')
                 except (ImportError, ValueError) as error:
                     failures.append(
-                        f'measured site mission validation failed: {error}')
-                    print(f'  [FAIL] measured site mission: {error}')
+                        f'{route_label} validation failed: {error}')
+                    print(f'  [FAIL] {route_label}: {error}')
 
     if failures:
         print('\n[ABORT] Real bringup prerequisites failed:')

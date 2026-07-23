@@ -42,14 +42,14 @@ class SiteMissionLoader(Node):
             target = ManualMissionTarget()
             target.target_id = str(source['target_id'])
             _set_pose(target.docking_pose, source['docking_pose'])
-            target.spray_side = str(source['spray_side'])
             target.spray_duration = float(source['spray_duration'])
             target.confidence = 1.0
             target.evidence_uri = 'manual://measured'
-            target.tree_hint.x = float(source['tree_hint']['x'])
-            target.tree_hint.y = float(source['tree_hint']['y'])
-            target.tree_hint.z = float(source['tree_hint']['z'])
-            target.use_explicit_tree_hint = True
+            offset = source['tree_offset_arm_base_m']
+            target.tree_x_m = float(offset['x_m'])
+            target.tree_y_m = float(offset['y_m'])
+            target.tree_base_z_m = float(source['tree_base_z_m'])
+            target.use_tree_offset_from_arm_base = True
             target.compute_docking_pose = False
             request.targets.append(target)
         future = self._client.call_async(request)

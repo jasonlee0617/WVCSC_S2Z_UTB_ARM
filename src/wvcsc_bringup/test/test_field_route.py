@@ -1,0 +1,97 @@
+from pathlib import Path
+
+import pytest
+import yaml
+
+from wvcsc_bringup.field_route import (
+    ARM_SPRAY_DURATION_SEC,
+    ROUTE_POINT_IDS,
+    ROUTE_ROLES,
+    load_field_route_document,
+    new_field_route_document,
+    route_steps,
+    validate_field_route_document,
+)
+
+
+PACKAGE = Path(__file__).resolve().parents[1]
+
+
+def _map(tmp_path):
+    image = tmp_path / 'map.pgm'
+    image.write_bytes(b'P5\n100 100\n255\n' + bytes([254]) * 10000)
+    yaml_path = tmp_path / 'map.yaml'
+    yaml_path.write_text(
+        'image: map.pgm\nresolution: 0.1\norigin: [-5.0, -5.0, 0.0]\n'
+        'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n',
+        encoding='utf-8')
+    return yaml_path
+
+
+def _document(map_yaml):
+    document = new_field_route_document(
+        'corn_field', 'corn_field_five_point_001', map_yaml)
+    quality = {
+        'samples': 30,
+        'position_spread_m': 0.01,
+        'yaw_spread_rad': 0.01,
+        'max_position_stddev_m': 0.04,
+        'max_yaw_stddev_rad': 0.04,
+    }
+    for index, step in enumerate(document['mission']['route_steps']):
+        step['navigation_pose'] = {'x': -1.0 + index * 0.5, 'y': 0.0, 'yaw': 0.0}
+        step['capture_quality'] = quality.copy()
+        if step['role'] == 'inspect':
+            step['tree_id'] = f'corn_{index:02d}'
+            step['tree_offset_arm_base_m'] = [0.0, 1.2]
+            step['tree_base_z_m'] = 0.0
+            step['arm_spray_duration'] = ARM_SPRAY_DURATION_SEC
+    return document
+
+
+def test_v4_route_requires_exact_five_point_order_and_two_three_second_inspects(tmp_path):
+    map_yaml = _map(tmp_path)
+    document = _document(map_yaml)
+    route_file = tmp_path / 'field_route.yaml'
+    route_file.write_text(yaml.safe_dump(document), encoding='utf-8')
+
+    steps = validate_field_route_document(load_field_route_document(route_file), map_yaml)
+
+    assert tuple(step.point_id for step in steps) == ROUTE_POINT_IDS
+    assert tuple(step.role for step in steps) == ROUTE_ROLES
+    assert [step.arm_spray_duration for step in steps if step.role == 'inspect'] == [3.0, 3.0]
+
+
+def test_v4_route_rejects_role_order_duplicate_tree_and_duration_drift(tmp_path):
+    map_yaml = _map(tmp_path)
+    document = _document(map_yaml)
+    document['mission']['route_steps'][0]['role'] = 'inspect'
+    with pytest.raises(ValueError, match='wide_start'):
+        route_steps(document)
+
+    document = _document(map_yaml)
+    document['mission']['route_steps'][2]['tree_id'] = 'corn_01'
+    with pytest.raises(ValueError, match='duplicate inspect tree_id'):
+        validate_field_route_document(document, map_yaml)
+
+    document = _document(map_yaml)
+    document['mission']['route_steps'][1]['arm_spray_duration'] = 2.9
+    with pytest.raises(ValueError, match='must be 3.0'):
+        route_steps(document)
+
+
+def test_real_field_manager_is_fail_closed_and_keeps_shared_manual_route_untouched():
+    manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
+        encoding='utf-8')
+    orchestration = (PACKAGE / 'launch' / 'real_orchestration.launch.py').read_text(
+        encoding='utf-8')
+
+    assert "executable='field_route_manager.py'" in orchestration
+    assert "executable='load_site_mission.py'" not in orchestration
+    assert "package='wvcsc_mission_manager', executable='mission_manager'" not in orchestration
+    assert "self._relay(\n                self._wide_channel, True" in manager
+    assert "self._relay(\n                self._wide_channel, False" in manager
+    assert 'self._command_all_off()' in manager
+    assert 'ExecuteSpray.Result.OK' in manager
+    assert "'/field_route/cancel'" in manager
+    assert "MissionStatus.ARM_SPRAYING" in manager

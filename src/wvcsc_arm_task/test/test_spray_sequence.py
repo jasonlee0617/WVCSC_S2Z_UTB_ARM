@@ -130,21 +130,21 @@ def test_iou_is_zero_for_disjoint_targets():
     assert _target('a', 100.0, 100.0).iou(_target('b', 300.0, 300.0)) == 0.0
 
 
-def test_diseased_fruit_below_point_one_never_enters_the_queue():
+def test_diseased_target_below_point_one_never_enters_the_queue():
     def detection(score):
         return SimpleNamespace(
             id='fruit',
             results=[SimpleNamespace(hypothesis=SimpleNamespace(
-                class_id='diseased_fruit', score=score))],
+                class_id='diseased_target', score=score))],
             bbox=SimpleNamespace(
                 center=SimpleNamespace(position=SimpleNamespace(x=640.0, y=360.0)),
                 size_x=40.0, size_y=40.0),
         )
 
     assert detection_candidates(
-        SimpleNamespace(detections=[detection(0.099)]), 'diseased_fruit', 0.10) == []
+        SimpleNamespace(detections=[detection(0.099)]), 'diseased_target', 0.10) == []
     assert len(detection_candidates(
-        SimpleNamespace(detections=[detection(0.10)]), 'diseased_fruit', 0.10)) == 1
+        SimpleNamespace(detections=[detection(0.10)]), 'diseased_target', 0.10)) == 1
 
 
 class _FruitCollectionHarness:
@@ -216,6 +216,235 @@ def test_vision_failure_never_publishes_completed_feedback():
     assert not completion_feedback_allowed(code)
     assert completion_feedback_allowed(
         final_spray_outcome(1, 0, True, 'ok')[0])
+
+
+class _RecenterParameterHarness:
+    _target_recenter_parameters = SprayTask._target_recenter_parameters
+
+    @staticmethod
+    def get_parameter(name):
+        return SimpleNamespace(value={
+            'target_recenter_trigger_px': 48.0,
+            'target_recenter_workspace_px': 128.0,
+            'visual_servo_entry_max_error_px': 128.0,
+            'target_recenter_max_angle_deg': 45.0,
+            'target_recenter_max_total_angle_deg': 45.0,
+            'target_recenter_refine_goal_px': 8.0,
+            'target_recenter_max_iterations': 1,
+            'target_recenter_residual_candidates_px': [0.0],
+            'target_recenter_position_tolerance_m': 0.002,
+            'target_recenter_orientation_tolerance_rad': 0.002,
+            'target_post_recenter_stable_sec': 0.20,
+            'target_post_recenter_max_drift_px': 4.0,
+            'target_post_recenter_max_gap_sec': 0.20,
+            'target_post_recenter_min_confidence': 0.30,
+        }[name])
+
+
+def test_closed_loop_uses_a_servo_entry_window_at_least_as_large_as_recenter():
+    config = _RecenterParameterHarness()._target_recenter_parameters()
+
+    assert config['trigger_px'] == 48.0
+    assert config['workspace_px'] == 128.0
+    assert config['servo_entry_px'] == 128.0
+
+
+def test_closed_loop_rejects_a_workspace_wider_than_servo_entry():
+    class InvalidHarness(_RecenterParameterHarness):
+        @staticmethod
+        def get_parameter(name):
+            value = _RecenterParameterHarness.get_parameter(name).value
+            if name == 'visual_servo_entry_max_error_px':
+                value = 48.0
+            return SimpleNamespace(value=value)
+
+    try:
+        InvalidHarness()._target_recenter_parameters()
+    except ValueError as error:
+        assert str(error) == 'target recenter parameters are invalid'
+    else:
+        raise AssertionError('closed-loop configuration unexpectedly passed')
+
+
+class _ClosedLoopSequenceHarness:
+    _run_sequence = SprayTask._run_sequence
+    _queue = SprayTask._queue
+    _remember_targets = SprayTask._remember_targets
+    _replace_known_target = SprayTask._replace_known_target
+    _pending_targets = SprayTask._pending_targets
+    _attempt_for = SprayTask._attempt_for
+    _same_target = SprayTask._same_target
+    _mark_unresolved = SprayTask._mark_unresolved
+
+    def __init__(self, *, alignment_ok=True, fallback_enabled=True,
+                 recenter_ok=True):
+        self._active_mission = ''
+        self._active_tree = ''
+        self._spray_on_alignment_failure = fallback_enabled
+        self._observation_mode = 'joint_presets'
+        self._observation_candidate_index = 0
+        self._observation_distance = 1.0
+        self._vision_timeout = 30.0
+        self._active_aim = (640.0, 388.0, 1280, 720, 1.0)
+        self._tree_in_base = (0.0, 1.6, 0.0)
+        self._observed_target = _target('target-1', 200.0, 200.0)
+        self._fruit_calls = 0
+        self._alignment_ok = alignment_ok
+        self._recenter_ok = recenter_ok
+        self.calls = []
+
+    def get_parameter(self, name):
+        return SimpleNamespace(value={
+            'tree_confidence': 0.25,
+            'detection_timeout_sec': 2.0,
+            'confirmation_frames': 3,
+            'max_alignment_attempts': 2,
+            'completion_scan_empty_limit': 0,
+            'processed_iou_threshold': 0.30,
+            'processed_center_distance_px': 40.0,
+            'image_width': 1280,
+            'image_height': 720,
+        }[name])
+
+    @staticmethod
+    def get_logger():
+        return SimpleNamespace(
+            debug=lambda *_args: None,
+            info=lambda *_args: None,
+            warn=lambda *_args: None,
+            error=lambda *_args: None)
+
+    @staticmethod
+    def _aborted(_cancel_requested):
+        return False
+
+    def _reset_vision(self):
+        self.calls.append('reset_vision')
+
+    def _set_inference_mode(self, mode):
+        self.calls.append(f'mode:{mode}')
+
+    def _move_to_observation(self, _hint):
+        return True
+
+    @staticmethod
+    def _scan_for_tree(_cancel_requested):
+        return True
+
+    def _wait_for_fruits(self, _cancel_requested):
+        self._fruit_calls += 1
+        return [self._observed_target] if self._fruit_calls == 1 else []
+
+    def _request_spray_aim(self, _cancel_requested):
+        self.calls.append('request_aim')
+        return True, ''
+
+    def _lock_target(self, target_id, _cancel_requested):
+        self.calls.append(f'lock:{target_id}')
+        return self._observed_target
+
+    def _recenter_target(self, target, _attempt, _cancel_requested):
+        self.calls.append(f'recenter:{target.target_id}')
+        return (
+            self._recenter_ok,
+            '' if self._recenter_ok else 'target recenter rejected: joint_limit_margin')
+
+    def _align_target(self, _mission, _tree, target_id, _aim, _cancel_requested):
+        self.calls.append(f'servo:{target_id}')
+        return (
+            self._alignment_ok,
+            False,
+            (AlignTarget.Result.OK if self._alignment_ok
+             else AlignTarget.Result.TIMEOUT),
+            'alignment timeout' if not self._alignment_ok else '')
+
+    def _alignment_fallback_target(self, target, _cancel_requested):
+        self.calls.append(f'fallback:{target.target_id}')
+        if not self._spray_on_alignment_failure:
+            return None, 'alignment fallback is disabled'
+        return target, ''
+
+    _alignment_code_allows_fallback = staticmethod(
+        SprayTask._alignment_code_allows_fallback)
+    _is_recoverable_alignment_code = staticmethod(
+        SprayTask._is_recoverable_alignment_code)
+
+    @staticmethod
+    def _alignment_retry_allowed(_count):
+        return False
+
+    def _spray_target(self, _mission, _tree, _duration, _cancel_requested):
+        self.calls.append('spray')
+        return True, False, ''
+
+    def _alignment_recovery_failure(self, message, _cancel_requested):
+        self.calls.append(f'failure:{message}')
+        return ExecuteSpray.Result.VISION_FAILED, message
+
+    @staticmethod
+    def _return_to_observation():
+        return True
+
+    @staticmethod
+    def _return_home(_cancel_requested):
+        return True
+
+    @staticmethod
+    def _reset_fruit_tracking():
+        pass
+
+    @staticmethod
+    def _select_target(_target_id):
+        pass
+
+
+def test_joint_preset_sequence_uses_recenter_then_visual_servo_before_spraying():
+    task = _ClosedLoopSequenceHarness()
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, _message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.OK
+    assert task.calls.count('spray') == 1
+    assert 'request_aim' in task.calls
+    assert 'lock:target-1' in task.calls
+    assert 'recenter:target-1' in task.calls
+    assert 'servo:target-1' in task.calls
+    assert not any(call.startswith('fallback:') for call in task.calls)
+
+
+def test_real_alignment_timeout_reconfirms_safe_pose_then_sprays():
+    task = _ClosedLoopSequenceHarness(alignment_ok=False, fallback_enabled=True)
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, _message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.OK
+    assert 'servo:target-1' in task.calls
+    assert 'fallback:target-1' in task.calls
+    assert task.calls.count('spray') == 1
+
+
+def test_real_joint_limit_recenter_rejection_falls_back_to_safe_pose_spray():
+    task = _ClosedLoopSequenceHarness(recenter_ok=False, fallback_enabled=True)
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, _message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.OK
+    assert 'recenter:target-1' in task.calls
+    assert 'fallback:target-1' in task.calls
+    assert not any(call.startswith('servo:') for call in task.calls)
+    assert task.calls.count('spray') == 1
 
 
 class _ObservationHarness:
@@ -454,6 +683,103 @@ def test_servo_safety_stop_is_not_recoverable_alignment_code():
         AlignTarget.Result.SERVO_SAFETY_STOP)
 
 
+class _AlignmentFallbackHarness:
+    _alignment_fallback_target = SprayTask._alignment_fallback_target
+
+    def __init__(self, *, enabled=True, locked=False, return_ok=True,
+                 preflight_ok=True, confirmed=True):
+        self._spray_on_alignment_failure = enabled
+        self.state = SimpleNamespace(locked=locked)
+        self._state_mutex = threading.Lock()
+        self._joint_state_sequence = 4
+        self.return_ok = return_ok
+        self.preflight_ok = preflight_ok
+        self.confirmed = confirmed
+        self.calls = []
+        self.target = _target('target-1', 640.0, 360.0)
+
+    @staticmethod
+    def _aborted(_cancel_requested):
+        return False
+
+    def _return_to_observation(self):
+        self.calls.append('return_to_observation')
+        return self.return_ok
+
+    def _wait_for_joint_state(self, *, after_sequence):
+        self.calls.append(f'fresh_joint_state:{after_sequence}')
+        return (0.0,) * 6
+
+    def _motion_preflight(self, target, joints, **kwargs):
+        self.calls.append(f'preflight:{target.target_id}:{len(joints)}')
+        assert kwargs['stage'] == 'FALLBACK'
+        return self.preflight_ok, 'joint_limit_margin' if not self.preflight_ok else ''
+
+    def _reset_target_confirmation(self, target_id):
+        self.calls.append(f'reset:{target_id}')
+
+    def _select_target(self, target_id):
+        self.calls.append(f'select:{target_id}')
+
+    def _set_inference_mode(self, mode):
+        self.calls.append(f'mode:{mode}')
+
+    def _wait_for_target_confirmation(
+            self, target_id, _cancel_requested, *, require_workspace):
+        self.calls.append(f'confirm:{target_id}:{require_workspace}')
+        return self.confirmed
+
+    def _latest_target(self):
+        return self.target
+
+
+def test_alignment_fallback_requires_safe_observation_and_fresh_target():
+    task = _AlignmentFallbackHarness()
+
+    target, reason = task._alignment_fallback_target(
+        task.target, lambda: False)
+
+    assert reason == ''
+    assert target == task.target
+    assert task.calls == [
+        'return_to_observation', 'fresh_joint_state:4',
+        'preflight:target-1:6', 'reset:target-1', 'select:target-1',
+        'mode:target', 'confirm:target-1:False',
+    ]
+
+
+def test_alignment_fallback_never_sprays_when_locked_or_preflight_fails():
+    disabled = _AlignmentFallbackHarness(enabled=False)
+    target, reason = disabled._alignment_fallback_target(
+        disabled.target, lambda: False)
+    assert target is None
+    assert reason == 'alignment fallback is disabled'
+    assert disabled.calls == []
+
+    locked = _AlignmentFallbackHarness(locked=True)
+    target, reason = locked._alignment_fallback_target(
+        locked.target, lambda: False)
+    assert target is None
+    assert reason == 'motion is canceled or locked'
+    assert locked.calls == []
+
+    unsafe = _AlignmentFallbackHarness(preflight_ok=False)
+    target, reason = unsafe._alignment_fallback_target(
+        unsafe.target, lambda: False)
+    assert target is None
+    assert reason == 'joint_limit_margin'
+    assert not any(call.startswith('confirm:') for call in unsafe.calls)
+
+
+def test_only_timeout_and_target_stale_can_use_alignment_fallback():
+    assert SprayTask._alignment_code_allows_fallback(AlignTarget.Result.TIMEOUT)
+    assert SprayTask._alignment_code_allows_fallback(AlignTarget.Result.TARGET_STALE)
+    assert not SprayTask._alignment_code_allows_fallback(
+        AlignTarget.Result.SERVO_SINGULARITY)
+    assert not SprayTask._alignment_code_allows_fallback(
+        AlignTarget.Result.SERVO_SAFETY_STOP)
+
+
 def test_target_recenter_uses_the_same_desired_spray_pixel_as_visual_servo():
     assert not target_requires_recenter(
         680.0, 388.0, 680.0, 388.0, 48.0)
@@ -676,13 +1002,21 @@ class _RecenterAttemptHarness:
     _recenter_target = SprayTask._recenter_target
     _move_recenter_step = SprayTask._move_recenter_step
     _active_aim_pixel = SprayTask._active_aim_pixel
+    _motion_preflight = SprayTask._motion_preflight
+    _servo_handoff_preflight = SprayTask._servo_handoff_preflight
+    _confirm_servo_handoff = SprayTask._confirm_servo_handoff
 
     def __init__(self):
         self._observation_candidate_index = 0
         self._observation_candidates = [SimpleNamespace(
             candidate_id='observe', distance_m=1.2, camera_height_m=1.5,
             azimuth_deg=0.0, camera_position=(1.0, 0.0, 1.0),
-            camera_quat=(0.0, 0.0, 0.0, 1.0))]
+            camera_quat=(0.0, 0.0, 0.0, 1.0),
+            tool_position=(1.0, 0.0, 1.0),
+            tool_quat=(0.0, 0.0, 0.0, 1.0),
+            observation_mode='ik', joint_positions=(), rejection_reason='')]
+        self._observation_optimizer = SimpleNamespace(
+            evaluate_ik=lambda candidate, *_args: candidate)
         self._camera_mount = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
         self._active_aim = (640.0, 388.0, 1280, 720, 1.30)
         self._recenter_config = {
@@ -784,7 +1118,7 @@ def test_recenter_residual_outside_strict_tolerance_is_not_sent_to_servo():
     assert task.debug_events == ['target_recenter_failed']
 
 
-def test_recenter_hands_a_safe_90px_residual_to_visual_servo_workspace():
+def test_bounded_servo_entry_skips_coarse_motion_for_a_safe_110px_residual():
     task = _PartialRecenterHarness()
     task._recenter_config.update({
         'trigger_px': 48.0,
@@ -792,25 +1126,59 @@ def test_recenter_hands_a_safe_90px_residual_to_visual_servo_workspace():
         'max_iterations': 1,
     })
     task._latest_target = lambda: _target('fruit-1', 730.0, 388.0)
-    attempt = TargetAttempt(_target('fruit-1', 740.0, 360.0))
+    attempt = TargetAttempt(_target('fruit-1', 750.0, 388.0))
 
     ok, message = task._recenter_target(
         attempt.target, attempt, lambda: False)
 
     assert ok
-    assert message == 'target reconfirmed after recenter'
-    assert task.debug_events == ['target_recenter_confirmed']
+    assert message == 'target reconfirmed for visual servo'
+    assert task.trials == []
+    assert task.debug_events == ['target_recenter_not_required']
+
+
+def test_bounded_servo_entry_rejects_current_joint_limit_margin():
+    task = _PartialRecenterHarness()
+    task._recenter_config['servo_entry_px'] = 128.0
+
+    def reject(candidate, *_args):
+        candidate.rejection_reason = 'joint_limit_margin'
+        return candidate
+
+    task._observation_optimizer = SimpleNamespace(evaluate_ik=reject)
+    attempt = TargetAttempt(_target('fruit-1', 750.0, 388.0))
+
+    ok, message = task._recenter_target(
+        attempt.target, attempt, lambda: False)
+
+    assert not ok
+    assert message == 'Servo preflight rejected: joint_limit_margin'
+    assert task.trials == []
+    assert task.debug_events == ['target_recenter_failed']
 
 
 class _NoRecenterDriftHarness:
     _recenter_target = SprayTask._recenter_target
     _active_aim_pixel = SprayTask._active_aim_pixel
+    _motion_preflight = SprayTask._motion_preflight
+    _servo_handoff_preflight = SprayTask._servo_handoff_preflight
+    _confirm_servo_handoff = SprayTask._confirm_servo_handoff
 
     def __init__(self):
         self._recenter_config = {
             'trigger_px': 48.0, 'workspace_px': 48.0,
         }
         self._active_aim = (640.0, 388.0, 1280, 720, 1.30)
+        self._observation_candidate_index = 0
+        self._observation_candidates = [SimpleNamespace(
+            candidate_id='observe', distance_m=1.2, camera_height_m=1.5,
+            azimuth_deg=0.0, camera_position=(1.0, 0.0, 1.0),
+            camera_quat=(0.0, 0.0, 0.0, 1.0),
+            tool_position=(1.0, 0.0, 1.0),
+            tool_quat=(0.0, 0.0, 0.0, 1.0),
+            observation_mode='ik', joint_positions=(), rejection_reason='')]
+        self._observation_optimizer = SimpleNamespace(
+            evaluate_ik=lambda candidate, *_args: candidate)
         self.debug_events = []
 
     @staticmethod
@@ -831,6 +1199,10 @@ class _NoRecenterDriftHarness:
     def _publish_observation_debug(self, event, *_args, **_kwargs):
         self.debug_events.append(event)
 
+    @staticmethod
+    def get_logger():
+        return SimpleNamespace(info=lambda *_args: None)
+
 
 def test_small_residual_inside_workspace_is_sent_to_visual_servo():
     task = _NoRecenterDriftHarness()
@@ -840,7 +1212,7 @@ def test_small_residual_inside_workspace_is_sent_to_visual_servo():
         attempt.target, attempt, lambda: False)
 
     assert ok
-    assert message == 'target already inside fine-servo workspace'
+    assert message == 'target reconfirmed for visual servo'
     assert task.debug_events == ['target_recenter_not_required']
 
 
@@ -853,7 +1225,7 @@ def test_large_residual_inside_workspace_is_sent_to_visual_servo():
         attempt.target, attempt, lambda: False)
 
     assert ok
-    assert message == 'target already inside fine-servo workspace'
+    assert message == 'target reconfirmed for visual servo'
     assert task.debug_events == ['target_recenter_not_required']
 
 
@@ -940,13 +1312,21 @@ class _PostRecenterHarness:
     _recenter_target = SprayTask._recenter_target
     _move_recenter_step = SprayTask._move_recenter_step
     _active_aim_pixel = SprayTask._active_aim_pixel
+    _motion_preflight = SprayTask._motion_preflight
+    _servo_handoff_preflight = SprayTask._servo_handoff_preflight
+    _confirm_servo_handoff = SprayTask._confirm_servo_handoff
 
     def __init__(self):
         self._observation_candidate_index = 0
         self._observation_candidates = [SimpleNamespace(
             candidate_id='observe', distance_m=1.2, camera_height_m=1.5,
             azimuth_deg=0.0, camera_position=(1.0, 0.0, 1.0),
-            camera_quat=(0.0, 0.0, 0.0, 1.0))]
+            camera_quat=(0.0, 0.0, 0.0, 1.0),
+            tool_position=(1.0, 0.0, 1.0),
+            tool_quat=(0.0, 0.0, 0.0, 1.0),
+            observation_mode='ik', joint_positions=(), rejection_reason='')]
+        self._observation_optimizer = SimpleNamespace(
+            evaluate_ik=lambda candidate, *_args: candidate)
         self._camera_mount = (
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
         self._active_aim = (640.0, 388.0, 1280, 720, 1.30)

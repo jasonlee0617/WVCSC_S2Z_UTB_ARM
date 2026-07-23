@@ -1,0 +1,34 @@
+from glob import glob
+
+from setuptools import find_packages, setup
+
+
+package_name = 'controller_pkg'
+
+setup(
+    name=package_name,
+    version='0.0.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        (
+            'share/ament_index/resource_index/packages',
+            ['resource/' + package_name],
+        ),
+        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/config', ['resource/fault.ini']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='Your Name',
+    maintainer_email='you@example.com',
+    description='ROS 2 Python package for relay control',
+    license='Apache-2.0',
+    tests_require=['pytest'],
+    entry_points={
+        'console_scripts': [
+            'relay_controller = controller_pkg.relay_controller:main',
+            'relay_client_demo = controller_pkg.relay_client_demo:main',
+        ],
+    },
+)

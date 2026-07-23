@@ -39,11 +39,6 @@ mission_manager:
     arm_base_forward_offset_m: -0.40
     arm_base_left_offset_m: 0.0
 
-    # 在手动模式(如 Manual Mission)下，推算树根位置时的前后距离。
-    manual_tree_standoff: 1.5
-    # 手动模式下树根的 Z 轴高度。
-    manual_tree_base_z: 0.0
-
     # 实机逐树实测任务启用；仿真保持 false，避免依赖 AMCL。
     require_docking_quality: false
     localization_pose_topic: /amcl_pose

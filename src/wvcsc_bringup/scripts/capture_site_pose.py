@@ -26,8 +26,15 @@ from wvcsc_bringup.site_mission import (
     map_hashes,
     new_site_document,
     pose_sample_statistics,
-    tree_hint_from_offset,
     validate_site_document,
+)
+from wvcsc_bringup.field_route import (
+    ARM_SPRAY_DURATION_SEC,
+    INSPECT_POINT_IDS,
+    ROUTE_POINT_IDS,
+    load_field_route_document,
+    new_field_route_document,
+    validate_field_route_document,
 )
 
 
@@ -318,9 +325,13 @@ def _arguments(argv):
     operation = parser.add_mutually_exclusive_group(required=True)
     operation.add_argument('--capture-home', action='store_true')
     operation.add_argument('--target-id')
-    parser.add_argument('--tree-forward-m', type=float)
-    parser.add_argument('--tree-left-m', type=float)
+    operation.add_argument('--route-point', choices=ROUTE_POINT_IDS)
+    parser.add_argument('--tree-x-m', type=float)
+    parser.add_argument('--tree-y-m', type=float)
+    parser.add_argument('--tree-id')
     parser.add_argument('--spray-duration', type=float, default=5.0)
+    parser.add_argument('--arm-spray-duration', type=float,
+                        default=ARM_SPRAY_DURATION_SEC)
     parser.add_argument('--site-id', default='corn_site')
     parser.add_argument('--mission-id', default='corn_measured_001')
     parser.add_argument('--timeout-sec', type=float, default=30.0)
@@ -334,11 +345,14 @@ def _arguments(argv):
 def _document(args):
     path = Path(args.file).expanduser()
     if path.exists():
-        document = load_site_document(path)
+        document = (load_field_route_document(path) if args.route_point
+                    else load_site_document(path))
         if document.get('map') != map_hashes(args.map):
             raise ValueError('existing site file is bound to a different map')
         return document
-    return new_site_document(args.site_id, args.mission_id, args.map)
+    return (new_field_route_document(args.site_id, args.mission_id, args.map)
+            if args.route_point
+            else new_site_document(args.site_id, args.mission_id, args.map))
 
 
 def main():
@@ -349,8 +363,22 @@ def main():
     if not math.isfinite(args.timeout_sec) or args.timeout_sec <= 0.0:
         raise SystemExit('--timeout-sec must be finite and positive')
     if args.target_id and (
-            args.tree_forward_m is None or args.tree_left_m is None):
-        raise SystemExit('target capture requires --tree-forward-m and --tree-left-m')
+            args.tree_x_m is None or args.tree_y_m is None):
+        raise SystemExit('target capture requires --tree-x-m and --tree-y-m')
+    if args.route_point:
+        inspecting = args.route_point in INSPECT_POINT_IDS
+        if inspecting and (not str(args.tree_id or '').strip()
+                           or args.tree_x_m is None or args.tree_y_m is None):
+            raise SystemExit(
+                'point_2 and point_3 require --tree-id --tree-x-m --tree-y-m')
+        if not inspecting and any(value is not None for value in (
+                args.tree_id, args.tree_x_m, args.tree_y_m)):
+            raise SystemExit(
+                'only point_2 and point_3 accept tree offset arguments')
+        if not math.isclose(
+                args.arm_spray_duration, ARM_SPRAY_DURATION_SEC, abs_tol=1e-9):
+            raise SystemExit(
+                f'--arm-spray-duration must be {ARM_SPRAY_DURATION_SEC:.1f}')
 
     try:
         document = _document(args)
@@ -362,50 +390,69 @@ def main():
     try:
         pose, quality = node.capture(
             args.timeout_sec, force_capture=args.force_capture)
-        mission = document['mission']
         pose_mapping = {'x': pose[0], 'y': pose[1], 'yaw': pose[2]}
-        if args.capture_home:
-            mission['home_pose'] = pose_mapping
-            mission['home_capture_quality'] = quality
-        else:
-            target_id = str(args.target_id).strip()
-            if not target_id:
-                raise ValueError('target_id must be non-empty')
-            targets = mission.setdefault('targets', [])
-            existing = next(
-                (item for item in targets if item.get('target_id') == target_id),
-                None)
-            if existing is not None and not args.update:
+        if args.route_point:
+            route_steps = document['mission']['route_steps']
+            step = next(item for item in route_steps
+                        if item['point_id'] == args.route_point)
+            if step.get('navigation_pose') is not None and not args.update:
                 raise ValueError(
-                    f'{target_id} already exists; pass --update to replace it')
-            hint = tree_hint_from_offset(
-                pose, args.tree_forward_m, args.tree_left_m, 0.0,
-                document['arm_base_mount']['forward_m'],
-                document['arm_base_mount']['left_m'])
-            target = {
-                'target_id': target_id,
-                'docking_pose': pose_mapping,
-                'tree_hint': {'x': hint[0], 'y': hint[1], 'z': hint[2]},
-                'measured_tree_offset': {
-                    'reference': 'arm_base_vehicle_axes',
-                    'forward_m': float(args.tree_forward_m),
-                    'left_m': float(args.tree_left_m),
-                },
-                'spray_side': 'left' if args.tree_left_m > 0.0 else 'right',
-                'spray_duration': float(args.spray_duration),
-                'capture_quality': quality,
-            }
-            if existing is None:
-                targets.append(target)
+                    f'{args.route_point} already exists; pass --update to replace it')
+            step['navigation_pose'] = pose_mapping
+            step['capture_quality'] = quality
+            if args.route_point in INSPECT_POINT_IDS:
+                step['tree_id'] = str(args.tree_id).strip()
+                step['tree_offset_arm_base_m'] = [
+                    float(args.tree_x_m), float(args.tree_y_m)]
+                step['tree_base_z_m'] = 0.0
+                step['arm_spray_duration'] = ARM_SPRAY_DURATION_SEC
+            complete = all(item.get('navigation_pose') is not None
+                           for item in route_steps)
+            if complete:
+                validate_field_route_document(
+                    document, args.map,
+                    require_capture_quality=not args.force_capture,
+                    require_free_space=not args.force_capture)
+        else:
+            mission = document['mission']
+            if args.capture_home:
+                mission['home_pose'] = pose_mapping
+                mission['home_capture_quality'] = quality
             else:
-                targets[targets.index(existing)] = target
-            validate_site_document(
-                document, args.map,
-                require_capture_quality=not args.force_capture,
-                require_free_space=not args.force_capture)
+                target_id = str(args.target_id).strip()
+                if not target_id:
+                    raise ValueError('target_id must be non-empty')
+                targets = mission.setdefault('targets', [])
+                existing = next(
+                    (item for item in targets if item.get('target_id') == target_id),
+                    None)
+                if existing is not None and not args.update:
+                    raise ValueError(
+                        f'{target_id} already exists; pass --update to replace it')
+                target = {
+                    'target_id': target_id,
+                    'docking_pose': pose_mapping,
+                    'tree_offset_arm_base_m': {
+                        'reference': 'alicia_base_link_xy',
+                        'x_m': float(args.tree_x_m),
+                        'y_m': float(args.tree_y_m),
+                    },
+                    'tree_base_z_m': 0.0,
+                    'spray_duration': float(args.spray_duration),
+                    'capture_quality': quality,
+                }
+                if existing is None:
+                    targets.append(target)
+                else:
+                    targets[targets.index(existing)] = target
+                validate_site_document(
+                    document, args.map,
+                    require_capture_quality=not args.force_capture,
+                    require_free_space=not args.force_capture)
         atomic_write_site(args.file, document, backup=Path(args.file).expanduser().exists())
         node.get_logger().info(
-            f'[SITE] captured {"HOME" if args.capture_home else args.target_id} '
+            f'[SITE] captured '
+            f'{args.route_point or ("HOME" if args.capture_home else args.target_id)} '
             f'pose=({pose[0]:.3f},{pose[1]:.3f},{pose[2]:.3f}) '
             f'file={Path(args.file).expanduser()}')
         return 0

@@ -82,23 +82,33 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "'--require-nozzle-calibration', 'true'" in source
     assert "'nozzle_mount_xyz'" in source
     assert "'aim_fixed_range_m'" in source
+    assert "'relay_config_file'" in source
+    assert "'--relay-config', relay_config" in source
+    assert "'--operation', 'field_route'" in source
 
 
-def test_real_orchestration_uses_real_leaf_and_measured_mission_contracts():
+def test_real_orchestration_uses_real_leaf_and_five_point_route_contract():
     source = _source('real_orchestration.launch.py')
     vision = (PACKAGE.parent / 'wvcsc_rgb_vision' / 'config' /
               'vision_real.yaml').read_text(encoding='utf-8')
 
-    assert "executable='load_site_mission.py'" in source
+    assert "executable='field_route_manager.py'" in source
+    assert "package='wvcsc_mission_manager', executable='mission_manager'" not in source
+    assert "executable='load_site_mission.py'" not in source
     assert 'mission_source' not in source
     assert 'wvcsc_uav_gateway' not in source
-    assert "'require_docking_quality': True" in source
+    assert "'map_file': LaunchConfiguration('map')" in source
+    assert "'wide_relay_channel': 1" in source
+    assert "'arm_relay_channel': 2" in source
     assert 'vision_real.yaml' in source
     assert 'yolov8s_real.pt' in vision
     assert 'yolov8s_seg_real.pt' in vision
-    assert 'target_class_name: disease_leaf' in vision
-    assert 'target_id_prefix: leaf' in vision
+    assert 'target_class_name: diseased_target' in vision
+    assert 'target_id_prefix: target' in vision
     assert 'strict_model_classes: true' in vision
+    assert "get_package_share_directory('controller_pkg')" in source
+    assert 'spray_actuator_real.yaml' in source
+    assert "'relay_config_file'" in source
 
 
 def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
@@ -114,16 +124,78 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     assert 'yesense_std_ros2' not in source
     assert "'publish_robot_state': 'true'" in source
     assert "_load_calibrated_mount(handeye_path)" in source
-    assert "_load_nozzle_calibration(nozzle_path)" in source
+    assert "'aim_nozzle_frame': 'tool0'" in source
+    assert 'nozzle_calibration' not in source
+    assert 'wvcsc_c10.calib' in source
+    assert 'nozzle_xyz = (0.0, 0.0, 0.0)' in source
     assert 'c10_camera.launch.py' in source
     assert 'vision_real.yaml' in source
     assert "executable='spray_task'" in source
-    assert "executable='spray_simulator'" in source
+    assert "executable='spray_actuator'" in source
+    assert 'spray_actuator_real.yaml' in source
+    assert "get_package_share_directory('controller_pkg')" in source
+    assert "'relay_config_file'" in source
 
     assert 'MissionStatus.ARM_SPRAYING' in script
     assert "default='alicia_base_link'" in script
     assert 'tree_hint.header.frame_id = self.args.frame_id' in script
     assert 'ActionClient(self, ExecuteSpray, \'/arm/execute_spray\')' in script
+
+
+def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
+    real_config = yaml.safe_load((PACKAGE / 'config' / 'real' /
+                                  'arm_task_real.yaml').read_text(
+                                      encoding='utf-8'))
+    parameters = real_config['wvcsc_spray_task']['ros__parameters']
+    assert parameters['observation_mode'] == 'joint_presets'
+    assert parameters['spray_on_alignment_failure'] is True
+    assert parameters['target_recenter_workspace_px'] == 128.0
+    assert parameters['visual_servo_entry_max_error_px'] == 128.0
+    assert parameters['target_recenter_max_angle_deg'] == 45.0
+    assert parameters['target_recenter_max_total_angle_deg'] == 45.0
+    assert parameters['joint_preset_center_deg'] == [
+        95.3, -136.9, -71.0, 7.7, 57.3, -4.4]
+    assert parameters['joint_preset_fan_left_deg'] == [
+        52.2, -131.7, -55.4, -58.9, 76.5, 18.2]
+    assert parameters['joint_preset_fan_right_deg'] == [
+        118.5, -129.4, -55.8, 47.6, 66.2, -17.1]
+
+    for launch_name in (
+            'real_arm_spray_test.launch.py', 'real_orchestration.launch.py',
+            'real_system_mission.launch.py'):
+        source = _source(launch_name)
+        assert "'observation_mode', default_value='joint_presets'" in source
+        assert "LaunchConfiguration('observation_mode')" in source
+    for launch_name in ('real_arm_spray_test.launch.py',
+                        'real_orchestration.launch.py'):
+        source = _source(launch_name)
+        assert "os.path.join(real_config, 'arm_task_real.yaml')" in source
+
+    simulation_config = (PACKAGE.parent / 'wvcsc_arm_task' / 'config' /
+                         'arm_task.yaml').read_text(encoding='utf-8')
+    assert 'joint_preset_center_deg' not in simulation_config
+    assert 'spray_on_alignment_failure' not in simulation_config
+    task_source = (PACKAGE.parent / 'wvcsc_arm_task' / 'wvcsc_arm_task' /
+                   'spray_task.py').read_text(encoding='utf-8')
+    assert "'spray_on_alignment_failure': False" in task_source
+    assert 'SINGLE_SHOT_OPEN_LOOP_ALIGN' not in task_source
+
+
+def test_real_spray_actuator_uses_the_physical_relay_service():
+    """The real arm entry point must never silently use the timer simulator."""
+    config = yaml.safe_load((PACKAGE / 'config' / 'real' /
+                             'spray_actuator_real.yaml').read_text(
+                                 encoding='utf-8'))
+    parameters = config['wvcsc_spray_actuator']['ros__parameters']
+    assert parameters['spray_mode'] == 'service'
+    assert parameters['relay_service_name'] == '/relay/set'
+    assert parameters['relay_channel'] == 2
+    assert parameters['relay_service_timeout_sec'] > 0.0
+
+    source = _source('real_arm_spray_test.launch.py')
+    assert "executable='spray_actuator'" in source
+    assert 'spray_actuator_real.yaml' in source
+    assert "config_file': LaunchConfiguration('relay_config_file')" in source
 
 
 def test_real_sensor_stack_has_one_unified_robot_state_publisher():
@@ -195,6 +267,18 @@ def test_handeye_session_enables_standalone_robot_tf():
     assert '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/' in collector
 
 
+def test_arm_only_bringup_does_not_require_unpublished_wheel_states():
+    arm = _source('real_arm.launch.py')
+    spray = _source('real_arm_spray_test.launch.py')
+    car_xacro = (PACKAGE.parent / 'wtb_car_driver' / 'urdf' /
+                 'wtb_car.xacro').read_text(encoding='utf-8')
+
+    assert "DeclareLaunchArgument('enable_ackermann', default_value='false')" in arm
+    assert "LaunchConfiguration('enable_ackermann')" in arm
+    assert 'enable_ackermann:=false' in spray
+    assert '<xacro:if value="$(arg enable_ackermann)">' in car_xacro
+
+
 def test_real_mission_uses_portable_handeye_and_c10_calibration_paths():
     source = _source('real_system_mission.launch.py')
     assert 'def _expand_path(path):' in source
@@ -252,6 +336,28 @@ def test_nozzle_calibration_contract_is_strict(tmp_path):
         module._load_nozzle_calibration(path)
 
 
+def test_handeye_loader_accepts_raw_easy_handeye_calibration(tmp_path):
+    module = _launch_module('real_system_mission.launch.py')
+    path = tmp_path / 'wvcsc_c10.calib'
+    path.write_text(yaml.safe_dump({
+        'parameters': {
+            'calibration_type': 'eye_in_hand',
+            'robot_base_frame': 'alicia_base_link',
+            'robot_effector_frame': 'tool0',
+            'tracking_base_frame': 'camera_color_optical_frame',
+        },
+        'transform': {
+            'translation': {'x': 0.008, 'y': -0.021, 'z': -0.103},
+            'rotation': {
+                'x': -0.00145, 'y': -0.02123,
+                'z': -0.57547, 'w': 0.81755,
+            },
+        },
+    }), encoding='utf-8')
+    xyz, rpy = module._load_calibrated_mount(path)
+    assert xyz == pytest.approx((0.008, -0.021, -0.103))
+    assert all(abs(value) < 3.2 for value in rpy)
+
 def test_preflight_checks_every_direct_runtime_boundary():
     source = (PACKAGE / 'scripts' / 'preflight_check.py').read_text(
         encoding='utf-8')
@@ -290,10 +396,19 @@ def test_real_arm_keeps_camera_clearance_and_servo_collision_checks():
     servo_parameters = yaml.safe_load((
         PACKAGE / 'config' / 'real' / 'moveit_servo_real.yaml'
     ).read_text(encoding='utf-8'))
+    visual_parameters = yaml.safe_load((
+        PACKAGE / 'config' / 'real' / 'visual_servo_real.yaml'
+    ).read_text(encoding='utf-8'))['wvcsc_visual_servo']['ros__parameters']
 
-    assert arm_parameters['camera_height_min_m'] == pytest.approx(0.20)
-    assert arm_parameters['camera_height_max_m'] == pytest.approx(0.40)
+    assert arm_parameters['camera_height_min_m'] == pytest.approx(0.15)
+    assert arm_parameters['camera_height_max_m'] == pytest.approx(0.30)
     assert arm_parameters['camera_height_step_m'] == pytest.approx(0.10)
     assert 'observation_min_camera_z_in_base_m' not in arm_parameters
     assert servo_parameters['use_gazebo'] is False
     assert servo_parameters['check_collisions'] is True
+    assert servo_parameters['publish_joint_velocities'] is True
+    assert visual_parameters['angular_u_sign'] == pytest.approx(-1.0)
+    assert visual_parameters['angular_v_sign'] == pytest.approx(1.0)
+    assert visual_parameters['direction_guard_enabled'] is True
+    assert visual_parameters['fine_tolerance_px'] == pytest.approx(8.0)
+    assert visual_parameters['control_resume_tolerance_px'] == pytest.approx(8.0)

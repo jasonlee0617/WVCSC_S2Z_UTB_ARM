@@ -3,7 +3,7 @@
 喷洒执行器的核心运动锁互锁模块 (Spray Interlock)。
 
 本模块定义了喷洒泵/阀控制器的状态锁（State Lock）和机械臂运动锁仲裁。
-它不直接执行硬件动作，而是作为 Spray Action Server (spray_simulator.py)
+它不直接执行硬件动作，而是作为 Spray Action Server (spray_actuator.py)
 和未来真机驱动的一个纯逻辑状态层，保证在并发环境下，喷洒动作具有明确的
 独占性、安全性和防误触机制。
 

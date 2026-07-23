@@ -2,10 +2,19 @@ wvcsc_visual_servo:
   ros__parameters:
     control_rate_hz: 30.0
     command_mode: angular_xy
-    default_timeout_sec: 8.0
+    # The recorded C10 real-arm trial showed the U-axis error increasing under
+    # the nominal mapping.  Keep V unchanged and reverse only U.
+    angular_u_sign: -1.0
+    angular_v_sign: 1.0
+    direction_guard_enabled: true
+    direction_guard_window_sec: 1.0
+    direction_guard_min_error_px: 20.0
+    direction_guard_max_growth_px: 10.0
+    direction_guard_min_confidence: 0.60
+    default_timeout_sec: 16.0
     require_camera_info: true
     target_stale_timeout_sec: 0.50
-    min_confidence: 0.25
+    min_confidence: 0.4
     aim_compensation_enabled: true
     aim_range_source: fixed
     aim_fixed_range_m: 1.0
@@ -19,12 +28,14 @@ wvcsc_visual_servo:
     # Conservative initial real-arm limits.  Tune only from recorded data.
     max_angular_speed: 0.15
     max_angular_acceleration: 1.00
-    max_linear_speed: 0.02
+    max_linear_speed: 0.1
     max_linear_acceleration: 0.15
-    pid_kp_xy: 4.00
+    pid_kp_xy: 5.00
     pid_ki_xy: 0.0
     pid_kd_xy: 0.005
-    fine_tolerance_px: 1.5
-    control_resume_tolerance_px: 2.0
+    # Segmentation noise was measured around 6.4 px; require a stable 8 px
+    # nozzle-aim residual instead of an unachievable 1.5 px real-arm gate.
+    fine_tolerance_px: 8.0
+    control_resume_tolerance_px: 8.0
     stable_duration_sec: 0.50
     zero_command_count: 8

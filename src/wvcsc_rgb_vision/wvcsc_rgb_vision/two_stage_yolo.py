@@ -37,6 +37,8 @@ from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithP
 from wvcsc_interfaces.msg import MissionStatus, Target2D
 
 from .model_utils import (
+    DISEASED_TARGET_CLASS_ALIASES,
+    DISEASED_TARGET_CLASS_NAMES,
     canonical_class_name,
     resolve_yolo_model_path,
     validate_yolo_model,
@@ -56,8 +58,8 @@ class Instance:
     通过 `cv2.distanceTransform` 计算掩膜内部距离边界最远的点，确保伺服瞄准的是
     果实的最核心区域，而非边缘。
     """
-    target_id: str          # 感知层内部分配的跟踪 ID (如 fruit-1)
-    class_name: str         # 类别名称 (tree / diseased_fruit)
+    target_id: str          # 感知层内部分配的跟踪 ID (如 target-1)
+    class_name: str         # 类别名称 (tree / diseased_target)
     confidence: float       # YOLO 推理置信度
     left: float             # 检测框左边界
     top: float              # 检测框上边界
@@ -65,6 +67,15 @@ class Instance:
     bottom: float           # 检测框下边界
     aim_u: float            # 安全瞄准点的图像 U 坐标 (列)
     aim_v: float            # 安全瞄准点的图像 V 坐标 (行)
+
+    def __post_init__(self):
+        """Normalize native model labels at the perception data boundary."""
+        object.__setattr__(
+            self,
+            'class_name',
+            DISEASED_TARGET_CLASS_ALIASES.get(
+                str(self.class_name), str(self.class_name)),
+        )
 
     @property
     def center_u(self):
@@ -293,7 +304,7 @@ def track_matches(instances, tracks, iou_threshold, center_distance_px):
 def reassociation_candidate(
         reference, instances, iou_threshold, center_distance_px,
         iou_margin, distance_margin_px, equivalent_aim_distance_px,
-        target_class_name='diseased_fruit'):
+        target_class_name='diseased_target'):
     """
     当感知层 ID 漂移时，为选中的逻辑目标寻找物理层面的重关联候选。
     """
@@ -360,8 +371,10 @@ PERCEPTION_DEBUG_DEFAULTS = {
     'tree_found': False,
     'tree_confidence': 0.0,
     'tree_bbox_xyxy': None,
+    'tree_roi_xyxy': None,
     'fruit_count': 0,
     'diseased_count': 0,
+    'diseased_targets': [],
     'active_track_ids': [],
     'selected_target_id': '',
     'candidate_target_id': '',
@@ -433,6 +446,8 @@ class TwoStageYolo(Node):
     def __init__(self):
         super().__init__('wvcsc_two_stage_yolo')
         self._declare_parameters()
+        self._standalone_mode = bool(
+            self.get_parameter('standalone_mode').value)
         self._tree_class_names = {
             int(self.get_parameter('tree_class_id').value):
             str(self.get_parameter('tree_class_name').value).strip()}
@@ -447,12 +462,12 @@ class TwoStageYolo(Node):
                 min(self._tree_class_names) < 0 or min(self._target_class_names) < 0):
             raise ValueError('YOLO class names/prefix must be non-empty and IDs non-negative')
         self._bridge = CvBridge()
-        self._mission_id = ''
-        self._tree_id = ''
+        self._mission_id = 'standalone' if self._standalone_mode else ''
+        self._tree_id = 'standalone' if self._standalone_mode else ''
         self._selected_target_id = ''
         self._selected_target_reference = None
         self._selected_target_template = None
-        self._inference_mode = 'idle'
+        self._inference_mode = str(self.get_parameter('inference_mode').value)
         self._next_target_number = 1
         self._tracks = []
         self._locked_tree = None
@@ -479,51 +494,72 @@ class TwoStageYolo(Node):
         self._tree_pub = self.create_publisher(
             Detection2DArray, str(self.get_parameter('tree_detections_topic').value), 10)
         self._fruit_pub = self.create_publisher(
-            Detection2DArray, str(self.get_parameter('fruit_detections_topic').value), 10)
+            Detection2DArray, str(self.get_parameter(
+                'diseased_target_detections_topic').value), 10)
         self._target_pub = self.create_publisher(
             Target2D, str(self.get_parameter('target_topic').value), 10)
         self._tree_visualization_pub = self.create_publisher(
-            Image, str(self.get_parameter('tree_visualization_topic').value), 2)
+            Image, str(self.get_parameter('tree_visualization_topic').value),
+            qos_profile_sensor_data)
         self._fruit_visualization_pub = self.create_publisher(
-            Image, str(self.get_parameter('fruit_visualization_topic').value), 2)
+            Image, str(self.get_parameter(
+                'diseased_target_visualization_topic').value),
+            qos_profile_sensor_data)
         self._perception_debug_pub = self.create_publisher(
             String, str(self.get_parameter('perception_debug_topic').value), 10)
+        self.get_logger().info(
+            f'[YOLO][READY] standalone={self._standalone_mode} '
+            f'mode={self._inference_mode} '
+            f'tree_model={self.get_parameter("tree_model_path").value} '
+            f'diseased_target_model={self.get_parameter("fruit_model_path").value}')
 
     @property
     def _configured_target_name(self):
-        """Return the configured target class, including legacy test defaults."""
-        return getattr(self, '_target_class_name', 'diseased_fruit')
+        """Return the canonical configured target class."""
+        configured = str(getattr(
+            self, '_target_class_name', 'diseased_target')).strip()
+        return DISEASED_TARGET_CLASS_ALIASES.get(configured, configured)
 
     @property
     def _configured_target_names(self):
         """Return the class-id contract used by the segmentation model."""
-        return getattr(
-            self, '_target_class_names', {1: self._configured_target_name})
+        configured = getattr(self, '_target_class_names', None)
+        if configured is None:
+            return {0: self._configured_target_name}
+        return {
+            int(class_id): DISEASED_TARGET_CLASS_ALIASES.get(
+                str(class_name).strip(), str(class_name).strip())
+            for class_id, class_name in configured.items()
+        }
 
     @property
     def _configured_target_prefix(self):
         """Return the configured logical target prefix."""
-        return getattr(self, '_target_id_prefix', 'fruit')
+        return getattr(self, '_target_id_prefix', 'target')
 
     def _declare_parameters(self):
         """声明并加载配置参数，与 `vision_sim.yaml` 对应。"""
         values = {
+            'standalone_mode': False,
+            'inference_mode': 'idle',
             'image_topic': '/camera/color/image_raw',
             'selected_target_topic': '/vision/selected_target_id',
             'tree_detections_topic': '/vision/tree_detections',
-            'fruit_detections_topic': '/vision/fruit_detections',
+            'diseased_target_detections_topic': (
+                '/vision/diseased_target_detections'),
             'target_topic': '/vision/target',
             'tree_visualization_topic': '/vision/tree_debug_image',
-            'fruit_visualization_topic': '/vision/fruit_debug_image',
+            'diseased_target_visualization_topic': (
+                '/vision/diseased_target_debug_image'),
             'perception_debug_topic': '/vision/perception_debug',
             'perception_debug_rate_hz': 5.0,
             'tree_model_path': 'yolov8s_sim.pt',
             'fruit_model_path': 'yolov8s_seg_sim.pt',
             'tree_class_id': 0,
             'tree_class_name': 'tree',
-            'target_class_id': 1,
-            'target_class_name': 'diseased_fruit',
-            'target_id_prefix': 'fruit',
+            'target_class_id': 0,
+            'target_class_name': 'diseased_target',
+            'target_id_prefix': 'target',
             'strict_model_classes': False,
             'inference_mode_topic': '/vision/inference_mode',
             'tree_confidence': 0.10,
@@ -574,11 +610,14 @@ class TwoStageYolo(Node):
         validate_yolo_model(
             tree_model, 'detect', self._tree_class_names, exact_names=strict)
         validate_yolo_model(
-            fruit_model, 'segment', self._target_class_names, exact_names=strict)
+            fruit_model, 'segment', DISEASED_TARGET_CLASS_NAMES,
+            exact_names=strict)
         return tree_model, fruit_model
 
     def _on_status(self, message):
         """监听任务状态，当任务切换时重置所有视觉跟踪状态。"""
+        if self._standalone_mode:
+            return
         active = message.state == MissionStatus.ARM_SPRAYING
         mission_id = message.mission_id if active else ''
         tree_id = message.current_tree_id if active else ''
@@ -617,7 +656,8 @@ class TwoStageYolo(Node):
 
     def _on_image(self, message):
         """主推理循环：根据当前模式执行最小化的推理链条。"""
-        if not self._tree_id or self._inference_mode == 'idle':
+        if ((not self._tree_id and not self._standalone_mode) or
+                self._inference_mode == 'idle'):
             return
         try:
             image = self._bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
@@ -634,7 +674,7 @@ class TwoStageYolo(Node):
             fruits = self._assign_track_ids(
                 self._fruit_instances(image, tree) if ran_fruit_inference else [])
             self._fruit_pub.publish(self._array(message, fruits))
-            if ran_fruit_inference and bool(self.get_parameter('publish_visualization').value):
+            if bool(self.get_parameter('publish_visualization').value):
                 self._publish_fruit_visualization(message, image, fruits)
         target = None
         invalid_reason = 'not_target_mode'
@@ -985,6 +1025,25 @@ class TwoStageYolo(Node):
         if stamp_sec > 0.0:
             frame_latency = max(
                 0.0, self.get_clock().now().nanoseconds * 1e-9 - stamp_sec)
+        image_width = int(image.width)
+        image_height = int(image.height)
+        tree_roi = None
+        if tree is not None:
+            tree_roi = list(expanded_roi(
+                tree.left, tree.top, tree.right, tree.bottom,
+                image_width, image_height,
+                float(self.get_parameter('roi_padding').value)))
+        diseased_targets = [
+            {
+                'id': item.target_id,
+                'bbox_xyxy': [
+                    round(item.left), round(item.top),
+                    round(item.right), round(item.bottom)],
+                'aim_uv': [round(item.aim_u), round(item.aim_v)],
+            }
+            for item in fruits
+            if item.class_name == self._configured_target_name
+        ]
         self._perception_debug_pub.publish(String(data=perception_debug_json(
             event=event,
             mission_id=self._mission_id,
@@ -994,9 +1053,11 @@ class TwoStageYolo(Node):
             tree_confidence=0.0 if tree is None else tree.confidence,
             tree_bbox_xyxy=None if tree is None else [
                 round(tree.left), round(tree.top), round(tree.right), round(tree.bottom)],
+            tree_roi_xyxy=tree_roi,
             fruit_count=len(fruits),
             diseased_count=sum(
                 item.class_name == self._configured_target_name for item in fruits),
+            diseased_targets=diseased_targets,
             active_track_ids=sorted(
                 track.instance.target_id for track in self._tracks),
             selected_target_id=self._selected_target_id,
@@ -1018,7 +1079,7 @@ class TwoStageYolo(Node):
     @staticmethod
     def _annotated_image(
             image, instances, *, draw_diseased_aim_point=False,
-            selected_target_id='', target_class_name='diseased_fruit'):
+            selected_target_id='', target_class_name='diseased_target'):
         annotated = image.copy()
         for instance in instances:
             selected = bool(

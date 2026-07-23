@@ -7,9 +7,10 @@ from wvcsc_bringup.site_mission import (
     circular_mean,
     load_site_document,
     map_hashes,
+    migrate_site_document,
     new_site_document,
     pose_sample_statistics,
-    tree_hint_from_offset,
+    tree_hint_from_arm_base_offset,
     validate_site_document,
 )
 
@@ -28,18 +29,15 @@ def _map(tmp_path):
 def _document(map_yaml):
     document = new_site_document('corn_site', 'corn_measured_001', map_yaml)
     document['mission']['home_pose'] = {'x': -2.0, 'y': -2.0, 'yaw': 0.0}
-    docking = (0.0, 0.0, 0.0)
-    hint = tree_hint_from_offset(docking, 0.0, 1.2)
     document['mission']['targets'].append({
         'target_id': 'corn_01',
         'docking_pose': {'x': 0.0, 'y': 0.0, 'yaw': 0.0},
-        'tree_hint': {'x': hint[0], 'y': hint[1], 'z': hint[2]},
-        'measured_tree_offset': {
-            'reference': 'arm_base_vehicle_axes',
-            'forward_m': 0.0,
-            'left_m': 1.2,
+        'tree_offset_arm_base_m': {
+            'reference': 'alicia_base_link_xy',
+            'x_m': 0.0,
+            'y_m': 1.2,
         },
-        'spray_side': 'left',
+        'tree_base_z_m': 0.0,
         'spray_duration': 5.0,
         'capture_quality': {
             'samples': 30,
@@ -52,8 +50,9 @@ def _document(map_yaml):
     return document
 
 
-def test_tree_offset_transform_uses_arm_base_origin_and_vehicle_axes():
-    x, y, z = tree_hint_from_offset((2.0, 3.0, math.pi / 2.0), 1.0, 2.0)
+def test_tree_offset_transform_uses_arm_base_origin_and_signed_xy():
+    x, y, z = tree_hint_from_arm_base_offset(
+        (2.0, 3.0, math.pi / 2.0), 1.0, 2.0)
     assert x == pytest.approx(0.0)
     assert y == pytest.approx(3.6)
     assert z == 0.0
@@ -82,21 +81,16 @@ def test_site_document_is_bound_to_map_and_requires_capture_quality(tmp_path):
         validate_site_document(document, map_yaml)
 
 
-def test_side_hint_and_quality_mismatches_are_rejected(tmp_path):
+def test_tree_offset_and_quality_mismatches_are_rejected(tmp_path):
     map_yaml, _image = _map(tmp_path)
-    document = _document(map_yaml)
-    document['mission']['targets'][0]['spray_side'] = 'right'
-    with pytest.raises(ValueError, match='spray_side conflicts'):
-        validate_site_document(document, map_yaml)
-
     document = _document(map_yaml)
     document['mission']['targets'][0]['capture_quality']['samples'] = 29
     with pytest.raises(ValueError, match='at least 30'):
         validate_site_document(document, map_yaml)
 
     document = _document(map_yaml)
-    document['mission']['targets'][0]['measured_tree_offset']['forward_m'] = 0.21
-    with pytest.raises(ValueError, match='arm-base forward error'):
+    document['mission']['targets'][0]['tree_offset_arm_base_m']['x_m'] = 0.21
+    with pytest.raises(ValueError, match='arm-base X error'):
         validate_site_document(document, map_yaml)
 
 
@@ -104,8 +98,32 @@ def test_schema_v1_is_rejected_instead_of_silently_reinterpreted(tmp_path):
     path = tmp_path / 'site.yaml'
     path.write_text('schema_version: 1\nsite_id: old\n', encoding='utf-8')
 
-    with pytest.raises(ValueError, match='schema_version must be 2'):
+    with pytest.raises(ValueError, match='schema_version must be 3'):
         load_site_document(path)
+
+
+def test_schema_v2_is_migrated_only_from_recorded_numeric_offsets(tmp_path):
+    map_yaml, _image = _map(tmp_path)
+    document = _document(map_yaml)
+    document['schema_version'] = 2
+    document['arm_base_mount'] = {'forward_m': -0.40, 'left_m': 0.0}
+    target = document['mission']['targets'][0]
+    hint = tree_hint_from_arm_base_offset((0.0, 0.0, 0.0), 0.0, 1.2)
+    target['tree_hint'] = {'x': hint[0], 'y': hint[1], 'z': hint[2]}
+    target['measured_tree_offset'] = {
+        'reference': 'arm_base_vehicle_axes',
+        'forward_m': 0.0,
+        'left_m': 1.2,
+    }
+    target['spray_side'] = 'left'
+    target.pop('tree_offset_arm_base_m')
+    target.pop('tree_base_z_m')
+
+    converted = migrate_site_document(document, map_yaml)
+    assert converted['schema_version'] == 3
+    assert converted['mission']['targets'][0]['tree_offset_arm_base_m'] == {
+        'reference': 'alicia_base_link_xy', 'x_m': 0.0, 'y_m': 1.2}
+    assert 'spray_side' not in converted['mission']['targets'][0]
 
 
 def test_atomic_site_write_round_trips_and_keeps_backup(tmp_path):

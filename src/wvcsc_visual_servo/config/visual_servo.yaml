@@ -170,6 +170,21 @@ wvcsc_visual_servo:
     # 本节点不控制深度，仅通过微小的俯仰/偏航旋转，将病果“拉”回图像中心。
     command_mode: angular_xy
 
+    # Image-axis direction defaults.  The simulation/nominal camera mounting
+    # uses the optical-frame convention directly; real hardware may override
+    # either sign after an observed low-speed response check.
+    angular_u_sign: 1.0
+    angular_v_sign: 1.0
+
+    # Disabled by default so simulation behavior remains unchanged.  The
+    # real profile enables this one-shot guard to stop instead of spraying if
+    # a locked target moves farther from the nozzle aim after control begins.
+    direction_guard_enabled: false
+    direction_guard_window_sec: 1.0
+    direction_guard_min_error_px: 20.0
+    direction_guard_max_growth_px: 10.0
+    direction_guard_min_confidence: 0.60
+
     # 角速度/角加速度限制。
     max_angular_speed: 0.45          # 最大角速度 0.45 rad/s
     max_angular_acceleration: 3.00   # 最大角加速度 3.00 rad/s²

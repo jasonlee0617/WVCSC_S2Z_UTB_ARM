@@ -17,9 +17,12 @@ install(PROGRAMS
   DESTINATION share/${PROJECT_NAME}/scripts)
 install(PROGRAMS
   scripts/capture_site_pose.py
+  scripts/migrate_site_mission.py
   scripts/arm_spray_once.py
+  scripts/field_route_manager.py
   scripts/load_site_mission.py
   scripts/nav_validate_sites.py
+  scripts/validate_field_route.py
   scripts/validate_site_mission.py
   DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS scripts/capture_site_pose.py
@@ -28,6 +31,9 @@ install(PROGRAMS scripts/capture_site_pose.py
 install(PROGRAMS scripts/arm_spray_once.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME arm_spray_once)
+install(PROGRAMS scripts/migrate_site_mission.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME migrate_site_mission)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
@@ -39,6 +45,8 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_capture_site_pose test/test_capture_site_pose.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
   ament_add_pytest_test(test_site_mission test/test_site_mission.py
+    ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+  ament_add_pytest_test(test_field_route test/test_field_route.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 endif()
 

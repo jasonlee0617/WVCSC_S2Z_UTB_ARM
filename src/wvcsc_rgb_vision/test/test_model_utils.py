@@ -5,7 +5,7 @@ from std_msgs.msg import Header
 from types import SimpleNamespace
 
 from wvcsc_rgb_vision.model_utils import (
-    FRUIT_CLASS_NAMES,
+    DISEASED_TARGET_CLASS_NAMES,
     TREE_CLASS_NAMES,
     canonical_class_name,
     validate_yolo_model,
@@ -28,9 +28,9 @@ from wvcsc_rgb_vision.two_stage_yolo import (
 
 def test_two_models_keep_independent_class_contracts():
     assert TREE_CLASS_NAMES == {0: 'tree'}
-    assert FRUIT_CLASS_NAMES == {0: 'diseased_fruit'}
+    assert DISEASED_TARGET_CLASS_NAMES == {0: 'diseased_target'}
     assert canonical_class_name(0, TREE_CLASS_NAMES) == 'tree'
-    assert canonical_class_name(0, FRUIT_CLASS_NAMES) == 'diseased_fruit'
+    assert canonical_class_name(0, DISEASED_TARGET_CLASS_NAMES) == 'diseased_target'
 
 
 def test_deployment_weight_must_match_task_and_classes():
@@ -38,10 +38,10 @@ def test_deployment_weight_must_match_task_and_classes():
         'task': 'segment',
         'names': {0: 'diseased_fruit'},
     })()
-    validate_yolo_model(model, 'segment', FRUIT_CLASS_NAMES)
+    validate_yolo_model(model, 'segment', DISEASED_TARGET_CLASS_NAMES)
     model.names[0] = 'wrong_class'
     with pytest.raises(ValueError, match='contract mismatch'):
-        validate_yolo_model(model, 'segment', FRUIT_CLASS_NAMES)
+        validate_yolo_model(model, 'segment', DISEASED_TARGET_CLASS_NAMES)
 
 
 def test_real_deployment_rejects_additional_model_classes():
@@ -50,10 +50,32 @@ def test_real_deployment_rejects_additional_model_classes():
         'names': {0: 'disease_leaf', 1: 'healthy_leaf'},
     })()
 
-    validate_yolo_model(model, 'segment', {0: 'disease_leaf'})
+    validate_yolo_model(model, 'segment', DISEASED_TARGET_CLASS_NAMES)
     with pytest.raises(ValueError, match='contract mismatch'):
         validate_yolo_model(
-            model, 'segment', {0: 'disease_leaf'}, exact_names=True)
+            model, 'segment', DISEASED_TARGET_CLASS_NAMES, exact_names=True)
+
+    canonical_checkpoint = type('Model', (), {
+        'task': 'segment',
+        'names': {0: 'diseased_target'},
+    })()
+    with pytest.raises(ValueError, match='contract mismatch'):
+        validate_yolo_model(
+            canonical_checkpoint, 'segment', DISEASED_TARGET_CLASS_NAMES,
+            exact_names=True)
+
+
+def test_native_real_and_sim_names_map_to_shared_target_name():
+    assert canonical_class_name(0, {0: 'diseased_fruit'}) == 'diseased_target'
+    assert canonical_class_name(0, {0: 'disease_leaf'}) == 'diseased_target'
+
+
+def test_detection_message_exposes_only_shared_target_class():
+    instance = Instance(
+        'target-1', 'disease_leaf', 0.8,
+        10.0, 20.0, 30.0, 40.0, 20.0, 30.0)
+    detection = TwoStageYolo._detection(Header(), instance)
+    assert detection.results[0].hypothesis.class_id == 'diseased_target'
 
 
 def test_fruit_tracks_survive_a_short_detector_dropout():
@@ -415,12 +437,17 @@ def test_track_matching_is_one_to_one_when_detector_order_changes():
 def test_perception_debug_payload_has_the_stable_schema_and_rate_limit():
     payload = json.loads(perception_debug_json(
         event='target_valid', target_valid=True, selected_target_id='fruit-1',
-        candidate_target_id='fruit-9'))
+        candidate_target_id='fruit-9', tree_roi_xyxy=[10, 20, 100, 120],
+        diseased_targets=[{
+            'id': 'fruit-9', 'bbox_xyxy': [20, 30, 40, 50],
+            'aim_uv': [30, 40]}]))
 
     assert set(payload) == set(PERCEPTION_DEBUG_DEFAULTS)
     assert payload['event'] == 'target_valid'
     assert payload['target_valid'] is True
     assert payload['candidate_target_id'] == 'fruit-9'
+    assert payload['tree_roi_xyxy'] == [10, 20, 100, 120]
+    assert payload['diseased_targets'][0]['aim_uv'] == [30, 40]
     assert perception_debug_due(None, 1.0, 5.0)
     assert not perception_debug_due(1.0, 1.19, 5.0)
     assert perception_debug_due(1.0, 1.20, 5.0)
@@ -487,10 +514,10 @@ def test_fruit_inference_uses_stricter_nms_before_custom_deduplication():
 
 def test_visualization_labels_include_id_class_and_confidence():
     instance = Instance(
-        'fruit-7', 'diseased_fruit', 0.937,
+        'target-7', 'diseased_target', 0.937,
         10.4, 20.6, 30.4, 40.6, 20.0, 30.0)
     assert TwoStageYolo._label(instance) == (
-        'fruit-7 diseased_fruit 0.94')
+        'target-7 diseased_target 0.94')
 
 
 def test_fruit_visualization_draws_diseased_box_label_and_aim_point(monkeypatch):
@@ -502,7 +529,7 @@ def test_fruit_visualization_draws_diseased_box_label_and_aim_point(monkeypatch)
     monkeypatch.setattr('wvcsc_rgb_vision.two_stage_yolo.cv2.circle',
                         lambda *_args: calls['circles'].append(_args[1:]))
     diseased = Instance(
-        'fruit-2', 'diseased_fruit', 0.8, 20, 21, 40, 41, 30, 31)
+        'target-2', 'diseased_target', 0.8, 20, 21, 40, 41, 30, 31)
 
     rendered = TwoStageYolo._annotated_image(
         np.zeros((64, 64, 3), dtype=np.uint8), [diseased],
@@ -512,7 +539,7 @@ def test_fruit_visualization_draws_diseased_box_label_and_aim_point(monkeypatch)
     assert [entry[0:2] for entry in calls['rectangles']] == [
         ((20, 21), (40, 41))]
     assert [entry[0] for entry in calls['labels']] == [
-        'fruit-2 diseased_fruit 0.80',
+        'target-2 diseased_target 0.80',
     ]
     assert [entry[0] for entry in calls['circles']] == [(30, 31)]
 
@@ -530,11 +557,11 @@ def test_selected_target_has_a_separate_visual_highlight(monkeypatch):
         'wvcsc_rgb_vision.two_stage_yolo.cv2.circle',
         lambda *_args: circles.append(_args[1:]))
     selected = Instance(
-        'fruit-2', 'diseased_fruit', 0.8, 20, 21, 40, 41, 30, 31)
+        'target-2', 'diseased_target', 0.8, 20, 21, 40, 41, 30, 31)
 
     TwoStageYolo._annotated_image(
         np.zeros((64, 64, 3), dtype=np.uint8), [selected],
-        draw_diseased_aim_point=True, selected_target_id='fruit-2')
+        draw_diseased_aim_point=True, selected_target_id='target-2')
 
     assert rectangles[0][-1] == 4
     assert circles[0][1] == 5
@@ -571,7 +598,7 @@ def test_stage_visualizations_follow_the_inference_mode():
             self.messages.append(message)
 
     tree = Instance('', 'tree', 0.9, 1, 2, 31, 42, 16, 22)
-    fruit = Instance('fruit-1', 'diseased_fruit', 0.8, 10, 12, 20, 24, 15, 18)
+    fruit = Instance('target-1', 'diseased_target', 0.8, 10, 12, 20, 24, 15, 18)
     node = object.__new__(TwoStageYolo)
     node._tree_id = 'tree_01'
     node._bridge = SimpleNamespace(
@@ -601,5 +628,5 @@ def test_stage_visualizations_follow_the_inference_mode():
 
     node._best_tree = lambda _image: None
     node._on_image(SimpleNamespace())
-    assert published == ['tree', 'tree', 'fruit', 'tree']
+    assert published == ['tree', 'tree', 'fruit', 'tree', 'fruit']
     assert len(node._fruit_pub.messages) == 2

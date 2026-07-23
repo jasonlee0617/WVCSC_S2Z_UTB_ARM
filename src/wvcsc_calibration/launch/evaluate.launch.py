@@ -1,10 +1,16 @@
-"""Alicia-M + C10 eye-in-hand verification (loads saved calibration)."""
+"""Alicia-M + C10 eye-in-hand verification (loads saved calibration).
+
+The arm model reuses the Alicia-M native URDF (no vehicle chassis).
+handeye_publisher publishes the calibrated tool0→camera_color_optical_frame
+transform from the saved calibration result, allowing RViz visual verification.
+"""
 
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -12,18 +18,27 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     calibration_share = get_package_share_directory('wvcsc_calibration')
-    bringup_share = get_package_share_directory('wvcsc_bringup')
+    alicia_bringup_share = get_package_share_directory('alicia_m_bringup')
     c10_share = get_package_share_directory('wvcsc_c10_camera')
 
     return LaunchDescription([
         # ── C10 camera ──────────────────────────────────────────
         DeclareLaunchArgument(
             'video_device',
-            default_value='/dev/v4l/by-id/usb-Synria_C10-video-index0'),
+            default_value='/dev/video0'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(
                 'package://wvcsc_c10_camera/config/c10_intrinsics.yaml')),
+        DeclareLaunchArgument(
+            'initial_pose_enabled', default_value='true',
+            description=(
+                'Move once to the configured calibration start pose. '
+                'Disable explicitly for a no-motion evaluation session.')),
+        DeclareLaunchArgument(
+            'initial_pose_config',
+            default_value=os.path.join(
+                calibration_share, 'config', 'initial_calibration_pose.yaml')),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 c10_share, 'launch', 'c10_camera.launch.py')),
@@ -32,16 +47,32 @@ def generate_launch_description():
                 'camera_info_url': LaunchConfiguration('camera_info_url'),
             }.items()),
 
-        # ── Alicia-M arm (real hardware + MoveIt + RViz) ────────
+        # ── Identity TF alias: base_link → alicia_base_link ─────
+        # moveit_hardware.launch.py uses Alicia URDF root frame "base_link",
+        # but easy_handeye2 and downstream tasks use "alicia_base_link".
+        Node(
+            package='tf2_ros', executable='static_transform_publisher',
+            arguments=['0', '0', '0', '0', '0', '0',
+                       'base_link', 'alicia_base_link']),
+
+        # ── Alicia-M arm (MoveIt + ros2_control, arm-only URDF) ──
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
-                bringup_share, 'launch', 'real_arm.launch.py')),
+                alicia_bringup_share, 'launch', 'moveit_hardware.launch.py')),
             launch_arguments={
                 'serial_port': LaunchConfiguration('serial_port'),
                 'use_rviz': 'true',
-                'publish_robot_state': 'true',
             }.items()),
+
+        # ── Initial pose move (enabled by default for evaluation) ──
+        Node(
+            package='wvcsc_calibration',
+            executable='initial_calibration_pose',
+            name='initial_calibration_pose',
+            parameters=[LaunchConfiguration('initial_pose_config')],
+            condition=IfCondition(LaunchConfiguration('initial_pose_enabled')),
+            output='both'),
 
         # ── ArUco detection ─────────────────────────────────────
         Node(
@@ -76,7 +107,8 @@ def generate_launch_description():
             }],
             output='both'),
 
-        # ── Hand-eye TF publisher (loads saved calibration) ─────
+        # ── Hand-eye TF publisher (loads saved calibration,
+        #     publishes calibrated tool0→camera_color_optical_frame) ──
         Node(
             package='easy_handeye2', executable='handeye_publisher',
             name='handeye_publisher',

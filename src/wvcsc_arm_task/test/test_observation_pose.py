@@ -122,3 +122,18 @@ def test_recenter_rejects_a_rotation_larger_than_the_safety_limit():
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0),
             (500.0, 500.0, 640.0, 360.0, 1280, 720),
             900.0, 360.0, 640.0, 388.0, 18.0)
+
+
+def test_full_recenter_between_twenty_and_forty_five_degrees_is_allowed():
+    camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
+    with pytest.raises(
+            ValueError, match=r'required_angle=.*limit=20.0deg'):
+        recenter_camera_pose(
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), camera,
+            900.0, 360.0, 640.0, 388.0, 20.0)
+
+    _position, _quat, angle = recenter_camera_pose(
+        (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), camera,
+        900.0, 360.0, 640.0, 388.0, 45.0)
+
+    assert 20.0 < angle < 45.0

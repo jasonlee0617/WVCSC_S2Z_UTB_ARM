@@ -101,6 +101,22 @@ def test_camera_height_is_measured_from_the_arm_base():
         pytest.approx([0.2, 0.3, 0.4])
 
 
+@pytest.mark.parametrize('tree_y', (-1.0, 1.0))
+def test_observation_grid_requires_room_between_base_and_tree(tree_y):
+    optimizer = _optimizer(
+        distance_min_m=1.0,
+        distance_max_m=1.0,
+    )
+
+    candidates = optimizer.generate(
+        (0.0, tree_y, 0.0),
+        ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+        (600.0, 600.0, 640.0, 360.0, 1280, 720),
+    )
+
+    assert candidates == []
+
+
 def test_tree_scan_orders_center_then_same_view_left_and_right_fan():
     optimizer = _optimizer(
         distance_min_m=1.3,

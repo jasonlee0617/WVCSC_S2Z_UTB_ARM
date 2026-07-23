@@ -1,0 +1,24 @@
+initial_calibration_pose:
+  ros__parameters:
+    use_sim_time: false
+    base_frame: alicia_base_link
+    tool_link: tool0
+    group_name: arm
+
+    # Set these two absolute positions for the actual arm/marker layout before
+    # enabling the node.  The node rotates tool0 so its local +Z points from
+    # tool_position_base_m to marker_position_base_m.
+    tool_position_base_m: [0.0, 0.25, 0.20]
+    marker_position_base_m: [0.0, 0.25, 0.0]
+    joint_state_topic: /joint_states
+
+    position_tolerance_m: 0.003
+    orientation_tolerance_rad: 0.02
+    startup_timeout_sec: 20.0
+
+    velocity_scaling: 0.10
+    acceleration_scaling: 0.10
+    planning_time: 5.0
+    execution_timeout: 90.0
+    planning_pipeline_id: ompl
+    planner_id: RRTConnectFast

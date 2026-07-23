@@ -16,7 +16,6 @@ from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
@@ -95,33 +94,27 @@ def pose_from_json(data):
     return pose
 
 
-def inferred_side(pose, road_center_y=0.0, road_yaw=0.0):
-    lateral = (-math.sin(road_yaw) * pose.position.x
-               + math.cos(road_yaw) * (pose.position.y - road_center_y))
-    return 'left' if lateral >= 0.0 else 'right'
-
-
 @dataclass
 class WorkPoint:
     pose: Pose
-    spray_side: str
+    tree_x_m: float = 0.0
+    tree_y_m: float = 0.0
+    tree_base_z_m: float = 0.0
 
 
 class MissionEditor:
-    schema_version = 2
+    schema_version = 3
 
-    def __init__(self, road_center_y=0.0, road_yaw=0.0):
-        self.road_center_y = float(road_center_y)
-        self.road_yaw = float(road_yaw)
+    def __init__(self):
         self.start_pose = None
         self.points = []
         self.spray_duration = 2.0
         self.return_home_after_finish = False
 
-    def add_point(self, pose, spray_side=None):
-        side = spray_side or inferred_side(
-            pose, self.road_center_y, self.road_yaw)
-        self.points.append(WorkPoint(copy_pose(pose), side))
+    def add_point(self, pose, tree_x_m=0.0, tree_y_m=0.0, tree_base_z_m=0.0):
+        self.points.append(WorkPoint(
+            copy_pose(pose), float(tree_x_m), float(tree_y_m),
+            float(tree_base_z_m)))
 
     def save(self, path):
         data = {
@@ -132,7 +125,9 @@ class MissionEditor:
             'return_home_after_finish': self.return_home_after_finish,
             'targets': [
                 {'pose': pose_to_json(point.pose),
-                 'spray_side': point.spray_side}
+                 'tree_x_m': point.tree_x_m,
+                 'tree_y_m': point.tree_y_m,
+                 'tree_base_z_m': point.tree_base_z_m}
                 for point in self.points
             ],
         }
@@ -142,28 +137,24 @@ class MissionEditor:
     def load(self, path):
         with open(path, encoding='utf-8') as stream:
             data = json.load(stream)
-        if data.get('schema_version') == self.schema_version:
-            self.start_pose = (
-                pose_from_json(data['start_pose'])
-                if data.get('start_pose') else None)
-            self.spray_duration = float(data.get('spray_duration', 2.0))
-            self.return_home_after_finish = bool(
-                data.get('return_home_after_finish', False))
-            self.points = [
-                WorkPoint(
-                    pose_from_json(item['pose']),
-                    item.get('spray_side') or inferred_side(
-                        pose_from_json(item['pose']), self.road_center_y,
-                        self.road_yaw),
-                )
-                for item in data.get('targets', [])
-            ]
-            return
+        if data.get('schema_version') != self.schema_version:
+            raise ValueError(
+                'legacy navigation file has no measured tree X/Y; re-record it')
         self.start_pose = (
-            pose_from_json(data['point1']) if data.get('point1') else None)
-        self.points = []
-        if data.get('point2'):
-            self.add_point(pose_from_json(data['point2']))
+            pose_from_json(data['start_pose'])
+            if data.get('start_pose') else None)
+        self.spray_duration = float(data.get('spray_duration', 2.0))
+        self.return_home_after_finish = bool(
+            data.get('return_home_after_finish', False))
+        self.points = [
+            WorkPoint(
+                pose_from_json(item['pose']),
+                float(item['tree_x_m']),
+                float(item['tree_y_m']),
+                float(item.get('tree_base_z_m', 0.0)),
+            )
+            for item in data.get('targets', [])
+        ]
 
 
 class Nav2QtNode(Node):
@@ -174,12 +165,8 @@ class Nav2QtNode(Node):
         self.declare_parameter('initial_pose_topic', '/initialpose')
         self.declare_parameter('goal_pose_topic', '/manual_goal_pose')
         self.declare_parameter('marker_topic', '/waypoints')
-        self.declare_parameter('road_center_y', 0.0)
-        self.declare_parameter('road_yaw', 0.0)
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
-        self.road_center_y = float(self.get_parameter('road_center_y').value)
-        self.road_yaw = float(self.get_parameter('road_yaw').value)
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.latest_initial_pose = None
@@ -264,7 +251,10 @@ class Nav2QtNode(Node):
             target = ManualMissionTarget()
             target.target_id = f'{prefix}_{index:02d}'
             target.docking_pose = copy_pose(point.pose)
-            target.spray_side = point.spray_side
+            target.tree_x_m = point.tree_x_m
+            target.tree_y_m = point.tree_y_m
+            target.tree_base_z_m = point.tree_base_z_m
+            target.use_tree_offset_from_arm_base = True
             target.spray_duration = float(spray_duration)
             target.confidence = 1.0
             target.evidence_uri = 'manual://rviz'
@@ -341,7 +331,7 @@ class Nav2Gui(QWidget):
     def __init__(self, node):
         super().__init__()
         self.node = node
-        self.editor = MissionEditor(node.road_center_y, node.road_yaw)
+        self.editor = MissionEditor()
         self.save_path = DEFAULT_SAVE_PATH
         self.candidate = None
         self.candidate_sequence = 0
@@ -383,9 +373,10 @@ class Nav2Gui(QWidget):
         layout.addWidget(self.start_label)
         layout.addWidget(self.return_home_checkbox)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ['序号', 'x (m)', 'y (m)', 'yaw (rad)', '喷洒侧别'])
+            ['序号', '停靠 X (m)', '停靠 Y (m)', 'yaw (rad)',
+             '树相对基座 X (m)', '树相对基座 Y (m)'])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -458,13 +449,11 @@ class Nav2Gui(QWidget):
             self.candidate_sequence = self.node.goal_sequence
             self.candidate = self.node.latest_goal_pose
             if self.candidate is not None:
-                side = inferred_side(
-                    self.candidate, self.node.road_center_y, self.node.road_yaw)
                 self.candidate_label.setText(
                     '最新RViz终点: '
                     f'x={self.candidate.position.x:.2f}, '
                     f'y={self.candidate.position.y:.2f}, '
-                    f'yaw={pose_yaw(self.candidate):.2f}, 自动侧别={side}')
+                    f'yaw={pose_yaw(self.candidate):.2f}')
             self._publish_markers()
         state = self.node.status.state if self.node.status else None
         state_text = self.node.status.state_text if self.node.status else '等待任务管理器'
@@ -524,10 +513,12 @@ class Nav2Gui(QWidget):
             return
         point = self.editor.points[0]
         self._submit_manual(
-            [WorkPoint(copy_pose(point.pose), point.spray_side)], 'single')
+            [WorkPoint(copy_pose(point.pose), point.tree_x_m,
+                       point.tree_y_m, point.tree_base_z_m)], 'single')
 
     def _start_multi(self):
-        points = [WorkPoint(copy_pose(point.pose), point.spray_side)
+        points = [WorkPoint(copy_pose(point.pose), point.tree_x_m,
+                            point.tree_y_m, point.tree_base_z_m)
                   for point in self.editor.points]
         self._submit_manual(points, 'multi')
 
@@ -604,12 +595,21 @@ class Nav2Gui(QWidget):
             self.table.setItem(row, 1, QTableWidgetItem(f'{point.pose.position.x:.3f}'))
             self.table.setItem(row, 2, QTableWidgetItem(f'{point.pose.position.y:.3f}'))
             self.table.setItem(row, 3, QTableWidgetItem(f'{pose_yaw(point.pose):.3f}'))
-            combo = QComboBox()
-            combo.addItems(['left', 'right'])
-            combo.setCurrentText(point.spray_side)
-            combo.currentTextChanged.connect(
-                lambda side, target=point: setattr(target, 'spray_side', side))
-            self.table.setCellWidget(row, 4, combo)
+            self.table.setCellWidget(
+                row, 4, self._offset_spin(point.tree_x_m, point, 'tree_x_m'))
+            self.table.setCellWidget(
+                row, 5, self._offset_spin(point.tree_y_m, point, 'tree_y_m'))
+
+    @staticmethod
+    def _offset_spin(value, target, attribute):
+        spin = QDoubleSpinBox()
+        spin.setRange(-10.0, 10.0)
+        spin.setDecimals(3)
+        spin.setSingleStep(0.05)
+        spin.setValue(value)
+        spin.valueChanged.connect(
+            lambda current: setattr(target, attribute, float(current)))
+        return spin
 
     def _delete_point(self):
         row = self.table.currentRow()

@@ -1,0 +1,6 @@
+uint8 channel
+bool enabled
+float32 duration
+---
+bool success
+string message

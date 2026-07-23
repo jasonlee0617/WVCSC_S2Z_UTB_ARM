@@ -41,7 +41,7 @@ wvcsc_spray_task:
     # ----------------------------------------------------------------------
     # 视觉感知节点发布的检测结果话题。
     tree_detection_topic: "/vision/tree_detections"      # YOLO 树检测话题
-    fruit_detection_topic: "/vision/fruit_detections"    # YOLO 果实分割话题
+    diseased_target_detection_topic: "/vision/diseased_target_detections"
     vision_target_topic: "/vision/target"                # 视觉伺服锁定的目标实体
 
     # 对外控制话题。
@@ -71,9 +71,9 @@ wvcsc_spray_task:
     # YOLO 置信度阈值。
     tree_confidence: 0.10    # 树检测置信度阈值
     fruit_confidence: 0.20   # 病果分割置信度阈值
-    target_class_name: diseased_fruit
+    target_class_name: diseased_target
+    # 仅用于喷嘴轴线在图像中的标定投影，不作为实际喷洒距离门控。
     spray_working_distance_m: 1.30
-    spray_working_distance_tolerance_m: 0.20
 
     # 视觉确认帧数：连续 3 帧满足条件，才认为目标有效，防止单帧误检。
     confirmation_frames: 3
@@ -89,10 +89,11 @@ wvcsc_spray_task:
     # ----------------------------------------------------------------------
     # 7. 目标重心修正 (Recenter) 与 IBVS 视觉伺服配置
     # ----------------------------------------------------------------------
-    # Gazebo 的 Servo 执行链只负责最终小角度微调。大于 16px 的误差必须先由
-    # MoveIt 碰撞安全粗对准消除，避免把 90~190px 大误差直接交给速度链后超时。
+    # 16px 内无需 MoveIt 粗对准。更大的误差在 128px 内可通过当前姿态
+    # 的关节余量/Jacobian 预检后交给 Servo；超过 128px 仍必须安全粗对准。
     target_recenter_trigger_px: 16.0
-    target_recenter_workspace_px: 16.0
+    target_recenter_workspace_px: 128.0
+    visual_servo_entry_max_error_px: 128.0
 
     # 单步重心的最大旋转角度，防止大角度规划导致机械臂撞击或奇异点。
     target_recenter_max_angle_deg: 20.0
@@ -158,7 +159,7 @@ wvcsc_spray_task:
     observation_distance_min_m: 1.0
     observation_distance_max_m: 1.50
     observation_distance_step_m: 0.1
-    # 相机光心相对 alicia_base_link 的 Z 高度；0.20 m 为确认的最小车顶净空。
+    # 相机光心相对 alicia_base_link 的 Z 高度；0.15 m 为确认的最小车顶净空。
     camera_height_min_m: 0.15
     camera_height_max_m: 0.40
     camera_height_step_m: 0.10

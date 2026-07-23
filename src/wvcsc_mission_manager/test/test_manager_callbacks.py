@@ -61,7 +61,7 @@ class _NavClient:
 
 class _Harness:
     def __init__(self, state=MissionState.NAVIGATING):
-        target = Target('tree_1', 3.0, 2.0, 0.0, 0.9, 'left', 2.0)
+        target = Target('tree_1', 3.0, 2.0, 0.0, 0.9, 2.0)
         self.core = MissionCore()
         self.core.load('demo', [target])
         self.core.state = state
@@ -147,12 +147,15 @@ def _manual_request(frame='map', x=3.0, count=1):
     targets = [SimpleNamespace(
         target_id=f'manual_{index}',
         docking_pose=_pose(x + index, 0.5, yaw=0.2 + index),
-        spray_side='left',
         spray_duration=2.0,
         confidence=1.0,
         evidence_uri='manual://test',
         tree_hint=SimpleNamespace(x=0.0, y=0.0, z=0.0),
         use_explicit_tree_hint=False,
+        tree_x_m=0.0,
+        tree_y_m=1.5,
+        tree_base_z_m=0.0,
+        use_tree_offset_from_arm_base=True,
         compute_docking_pose=False,
     ) for index in range(count)]
     return SimpleNamespace(
@@ -359,6 +362,7 @@ def test_mock_style_manual_target_uses_mission_manager_docking_geometry():
     target = request.targets[0]
     target.tree_hint = SimpleNamespace(x=3.0, y=2.0, z=0.0)
     target.use_explicit_tree_hint = True
+    target.use_tree_offset_from_arm_base = False
     target.compute_docking_pose = True
     target.confidence = 0.95
     target.evidence_uri = 'mock://tree_01'
@@ -375,6 +379,7 @@ def test_manual_target_can_supply_explicit_measured_tree_hint():
     request = _manual_request()
     request.targets[0].tree_hint = SimpleNamespace(x=3.2, y=1.7, z=0.0)
     request.targets[0].use_explicit_tree_hint = True
+    request.targets[0].use_tree_offset_from_arm_base = False
     request.targets[0].evidence_uri = ''
 
     targets, _home = MissionManager._validate_manual_request(validator, request)

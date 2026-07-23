@@ -113,8 +113,16 @@ AMCL 更新，不会因约 1 Hz 发布抖动直接中断采点。
 2. 在 RViz 中确认 `map → base_footprint` TF 正常，AMCL 粒子云已经收敛；
 3. 确认车体停稳后执行：
 
-旧`schema_version: 1`站点以`base_footprint`为测量原点，不能直接复用。
-升级前先执行：
+旧`schema_version: 1`站点以`base_footprint`为测量原点，不能直接复用，必须重新采集。
+旧`schema_version: 2`站点已保存带符号的实测偏移，可先迁移为当前格式：
+
+```bash
+ros2 run wvcsc_bringup migrate_site_mission -- \
+  --file "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml" \
+  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
+```
+
+`schema_version: 1` 升级前先执行：
 
 ```bash
 mv "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml" \
@@ -144,25 +152,25 @@ ros2 run wvcsc_bringup capture_site_pose \
 ```
 俯视图：
 
-        ←── 卷尺横向距离 (tree-left-m) ──→
+        ←── 卷尺横向距离 (tree-y-m) ──→
    ┌──────────────────────────────────────●  ← 玉米树根部 (tree_hint)
    │
    │
    ↑
    ◎ ← 机械臂基座物理原点（坐标轴与车体平行）
    │
-   └── 卷尺纵向距离 (tree-forward-m)，车头方向
+   └── 卷尺纵向距离 (tree-x-m)，车头方向
 ```
 
 | 参数 | 测量基准点 | 测量方向 | 工具 | 示例值 |
 |------|-----------|---------|------|--------|
-| `--tree-forward-m` | 机械臂基座原点 | **车头朝向**（车体 +X） | 卷尺 | `0.0`（树在正侧方） |
-| `--tree-left-m` | 机械臂基座原点 | **小车左侧**（+Y，右侧填**负数**） | 卷尺 | `1.50`（树在左侧 1.5m） |
+| `--tree-x-m` | 机械臂基座原点 | **车头朝向**（车体 +X） | 卷尺 | `0.0`（树在正侧方） |
+| `--tree-y-m` | 机械臂基座原点 | **小车左侧**（+Y，右侧填**负数**） | 卷尺 | `1.50`（树在左侧 1.5m） |
 
 **实测方法**：
-1. 从机械臂基座物理原点沿车头方向测量树根的纵向偏差，作为`tree-forward-m`。
-2. 从同一原点沿车体左侧测量`tree-left-m`；右侧填负数。
-3. 调整小车使树处于机械臂基座正侧方，`tree-forward-m`尽量为`0.0`，且必须在`±0.20 m`内。
+1. 从机械臂基座物理原点沿车头方向测量树根的纵向偏差，作为`tree-x-m`。
+2. 从同一原点沿车体左侧测量`tree-y-m`；右侧填负数。
+3. 调整小车使树处于机械臂基座正侧方，`tree-x-m`尽量为`0.0`，且必须在`±0.20 m`内。
 
 ### 2.7 执行采点
 
@@ -170,15 +178,15 @@ ros2 run wvcsc_bringup capture_site_pose \
 ros2 run wvcsc_bringup capture_site_pose \
   --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
   --target-id tree_01 \
-  --tree-forward-m 0.0 \
-  --tree-left-m 1.50 \
+  --tree-x-m 0.0 \
+  --tree-y-m 1.50 \
   --force-capture
 ```
 
 脚本执行流程：
 1. 普通模式下自行调用 AMCL 的 `/request_nomotion_update`，等待 IMU、AMCL 定位稳定 + EKF 停稳 1 秒
 2. 连续采集 30 个样本（0.1 秒/次），当前执行优先阶段位置散布 ≤ 1.00 m、偏航散布 ≤ 1.00 rad
-3. 调用 `tree_hint_from_offset()` 自动计算树根 map 坐标
+3. 使用记录的带符号机械臂基座 X/Y 坐标计算树根 map 坐标
 4. 写入 `~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml`（自动创建或追加）
 
 采点前必须确认 `/dev/yesense_IMU` 存在且 `ros2 topic hz /imu` 有持续输出；
@@ -238,22 +246,22 @@ source install/setup.bash
 # tree_01 (左侧)
 ros2 run wvcsc_bringup capture_site_pose \
   --map .../orchard.yaml --target-id tree_01 \
-  --tree-forward-m 0.0 --tree-left-m 1.50
+  --tree-x-m 0.0 --tree-y-m 1.50
 
 # tree_02 (右侧)
 ros2 run wvcsc_bringup capture_site_pose \
   --map .../orchard.yaml --target-id tree_02 \
-  --tree-forward-m 0.1 --tree-left-m -1.55
+  --tree-x-m 0.1 --tree-y-m -1.55
 
 # tree_03 (左侧)
 ros2 run wvcsc_bringup capture_site_pose \
   --map .../orchard.yaml --target-id tree_03 \
-  --tree-forward-m -0.1 --tree-left-m 1.48
+  --tree-x-m -0.1 --tree-y-m 1.48
 
 # tree_04 (右侧)
 ros2 run wvcsc_bringup capture_site_pose \
   --map .../orchard.yaml --target-id tree_04 \
-  --tree-forward-m 0.0 --tree-left-m -1.52
+  --tree-x-m 0.0 --tree-y-m -1.52
 ```
 
 ### 2.10 验证 YAML
@@ -265,11 +273,11 @@ cat ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
 预期格式：
 
 ```yaml
-schema_version: 2
+schema_version: 3
 site_id: corn_site
 arm_base_mount:
-  forward_m: -0.40
-  left_m: 0.0
+  x_m: -0.40
+  y_m: 0.0
 map:
   frame_id: map
   yaml_sha256: abc123...
@@ -281,12 +289,11 @@ mission:
   targets:
     - target_id: tree_01
       docking_pose: {x: 3.002, y: 0.498, yaw: 0.003}
-      tree_hint: {x: 2.602, y: 1.998, z: 0.0}
-      measured_tree_offset:
-        reference: arm_base_vehicle_axes
-        forward_m: 0.0
-        left_m: 1.5
-      spray_side: left
+      tree_offset_arm_base_m:
+        reference: alicia_base_link_xy
+        x_m: 0.0
+        y_m: 1.5
+      tree_base_z_m: 0.0
       spray_duration: 5.0
       capture_quality: {samples: 30, position_spread_m: 0.012, ...}
     - target_id: tree_02

@@ -20,7 +20,6 @@ def _document():
                 'tree_id': 'tree_01',
                 'confidence': 0.9,
                 'position': {'x': 3.0, 'y': 2.0, 'z': 0.0},
-                'spray_side': 'left',
                 'spray_duration': 2.0,
                 'evidence_uri': 'mock://tree_01',
             }],

@@ -46,9 +46,9 @@ def test_validation_accepts_only_raw_images_and_matching_manifest(tmp_path):
 
 def test_fruit_seg_capture_is_ready_for_manual_annotation(tmp_path):
     train = write_fruit_seg_sample(
-        tmp_path, _image(), 'train_tree', 'train', {'tree_id': 'left_tree_01'})
+        tmp_path, _image(), 'train_tree', 'train', {'tree_id': 'tree_01'})
     val = write_fruit_seg_sample(
-        tmp_path, _image(), 'val_tree', 'val', {'tree_id': 'right_tree_01'})
+        tmp_path, _image(), 'val_tree', 'val', {'tree_id': 'tree_02'})
     assert train['image'] == 'images/train/train_tree.png'
     assert val['annotation_status'] == 'pending'
     assert validate_fruit_seg_dataset(
@@ -63,9 +63,9 @@ def test_tree_dataset_copies_the_exact_unlabelled_fruit_frame(tmp_path):
     fruit_root = tmp_path / 'fruit'
     tree_root = tmp_path / 'tree'
     train = write_fruit_seg_sample(
-        fruit_root, _image(), 'train_tree', 'train', {'tree_id': 'left_tree_01'})
+        fruit_root, _image(), 'train_tree', 'train', {'tree_id': 'tree_01'})
     val = write_fruit_seg_sample(
-        fruit_root, _image(), 'val_tree', 'val', {'tree_id': 'right_tree_01'})
+        fruit_root, _image(), 'val_tree', 'val', {'tree_id': 'tree_02'})
     copy_tree_detect_sample(tree_root, fruit_root, train)
     copy_tree_detect_sample(tree_root, fruit_root, val)
     assert validate_tree_detect_dataset(

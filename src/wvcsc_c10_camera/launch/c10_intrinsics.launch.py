@@ -15,7 +15,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'video_device',
-            default_value='/dev/v4l/by-id/usb-Synria_C10-video-index0'),
+            default_value='/dev/video0'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 share, 'launch', 'c10_camera.launch.py')),

@@ -30,6 +30,8 @@ DEBUG_DEFAULTS = {
     # Preserve the original linear fields for bag compatibility and add the
     # angular command actually sent by the eye-in-hand profile.
     'command_mode': 'linear_xy',
+    'angular_u_sign': 1.0,
+    'angular_v_sign': 1.0,
     'command_x_mps': 0.0,
     'command_y_mps': 0.0,
     'command_angular_x_rps': 0.0,
@@ -43,6 +45,9 @@ DEBUG_DEFAULTS = {
     'joint_positions': [],
     'servo_output_count': 0,
     'servo_output_points': 0,
+    'servo_output_velocity_count': 0,
+    'servo_output_rate_hz': 0.0,
+    'direction_guard_checked': False,
     'max_commanded_joint_delta_rad': 0.0,
     'max_joint_delta_rad': 0.0,
     'result_code': -1,

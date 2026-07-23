@@ -6,7 +6,7 @@
 # 节点职责：
 # 1. 订阅 C10 相机图像，根据 `inference_mode` (idle/tree/fruits/target)
 #    执行轻量级推理。
-# 2. 输出 `/vision/tree_detections` 和 `/vision/fruit_detections`。
+# 2. 输出 `/vision/tree_detections` 和 `/vision/diseased_target_detections`。
 # 3. 在目标锁定模式下，对特定病果的掩膜进行深度处理，获取安全喷洒点
 #    (`aim_u/v`)，并发布给视觉伺服节点。
 #
@@ -26,13 +26,13 @@ wvcsc_two_stage_yolo:
     # 输出话题：第一阶段的树检测结果 (检测框)
     tree_detections_topic: /vision/tree_detections
     # 输出话题：第二阶段的果实实例分割结果 (分割掩膜)
-    fruit_detections_topic: /vision/fruit_detections
+    diseased_target_detections_topic: /vision/diseased_target_detections
     # 输出话题：最终发送给视觉伺服的 Target2D 目标 (包含用于喷洒的安全像素点)
     target_topic: /vision/target
 
     # 调试可视化话题 (发布带标注的 OpenCV 图像)
     tree_visualization_topic: /vision/tree_debug_image
-    fruit_visualization_topic: /vision/fruit_debug_image
+    diseased_target_visualization_topic: /vision/diseased_target_debug_image
     # 调试 JSON 话题：包含 `aim_u/v` 和每个目标的 ID，用于 PlotJuggler 性能分析
     perception_debug_topic: /vision/perception_debug
     perception_debug_rate_hz: 5.0
@@ -50,9 +50,9 @@ wvcsc_two_stage_yolo:
     tree_class_id: 0
     tree_class_name: tree
     target_class_id: 0
-    target_class_name: diseased_fruit
-    target_id_prefix: fruit
-    # 仿真分割权重必须严格为 segment:{0: diseased_fruit}。
+    target_class_name: diseased_target
+    target_id_prefix: target
+    # 仿真权重原生为 segment:{0: diseased_fruit}，ROS 输出统一为 diseased_target。
     strict_model_classes: true
 
     # ----------------------------------------------------------------------

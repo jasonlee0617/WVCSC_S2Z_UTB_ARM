@@ -24,12 +24,12 @@ def main():
         f"targets={len(mission['targets'])} file={Path(args.file).expanduser()}")
     for target in mission['targets']:
         docking = target['docking_pose']
-        hint = target['tree_hint']
+        offset = target['tree_offset_arm_base_m']
         print(
             f"  {target['target_id']}: dock=({docking['x']:.3f},"
             f"{docking['y']:.3f},{docking['yaw']:.3f}) "
-            f"tree=({hint['x']:.3f},{hint['y']:.3f},{hint['z']:.3f}) "
-            f"side={target['spray_side']}")
+            f"tree_base_xy=({offset['x_m']:.3f},{offset['y_m']:.3f}) "
+            f"tree_z={target['tree_base_z_m']:.3f}")
     return 0
 
 

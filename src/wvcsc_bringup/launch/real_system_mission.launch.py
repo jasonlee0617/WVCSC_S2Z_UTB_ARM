@@ -84,7 +84,35 @@ def _matrix_rpy(matrix):
 
 def _load_calibrated_mount(path):
     with open(_expand_path(path), encoding='utf-8') as stream:
-        calibration = (yaml.safe_load(stream) or {}).get('calibration', {})
+        data = yaml.safe_load(stream) or {}
+    # Accept both easy_handeye2's raw ``parameters``/``transform`` file and
+    # the validated deployment file with a top-level ``calibration`` mapping.
+    # Keep this small parser local: wvcsc_calibration already depends on
+    # wvcsc_bringup for its calibration launch, so importing it here would
+    # create a colcon dependency cycle.
+    if 'calibration' in data:
+        calibration = data.get('calibration')
+        if not isinstance(calibration, dict):
+            raise RuntimeError('hand-eye calibration must be a YAML mapping')
+        if calibration.get('type') != 'eye_in_hand':
+            raise RuntimeError('hand-eye calibration type must be eye_in_hand')
+    else:
+        parameters = data.get('parameters', {})
+        if (parameters.get('calibration_type') != 'eye_in_hand' or
+                parameters.get('robot_base_frame') != 'alicia_base_link' or
+                parameters.get('robot_effector_frame') != 'tool0' or
+                parameters.get('tracking_base_frame') !=
+                'camera_color_optical_frame'):
+            raise RuntimeError(
+                'raw hand-eye calibration must describe alicia_base_link, '
+                'tool0 and camera_color_optical_frame')
+        transform = data.get('transform', {})
+        calibration = {
+            'parent_frame': 'tool0',
+            'child_frame': 'camera_color_optical_frame',
+            'translation': transform.get('translation', {}),
+            'rotation': transform.get('rotation', {}),
+        }
     if (calibration.get('parent_frame') != 'tool0' or
             calibration.get('child_frame') != 'camera_color_optical_frame'):
         raise RuntimeError(
@@ -195,11 +223,13 @@ def _resolve_calibrations(context, *, launch_dir):
         ])
 
     # --- preflight ---
+    relay_config = _expand_path(
+        LaunchConfiguration('relay_config_file').perform(context))
     preflight = ExecuteProcess(
         cmd=[
             LaunchConfiguration('preflight_script').perform(context),
             '--mode', 'localization',
-            '--operation', 'mission',
+            '--operation', 'field_route',
             '--mission-file', LaunchConfiguration('mission_file').perform(context),
             '--camera-device', LaunchConfiguration('c10_device').perform(context),
             '--arm-device', LaunchConfiguration('serial_port').perform(context),
@@ -210,6 +240,7 @@ def _resolve_calibrations(context, *, launch_dir):
             '--handeye-calibration', calibration_path,
             '--nozzle-calibration', nozzle_path,
             '--require-nozzle-calibration', 'true',
+            '--relay-config', relay_config,
         ],
         output='screen',
     )
@@ -249,11 +280,13 @@ def _resolve_calibrations(context, *, launch_dir):
                 'arm_velocity_scaling'),
             'arm_acceleration_scaling': LaunchConfiguration(
                 'arm_acceleration_scaling'),
+            'observation_mode': LaunchConfiguration('observation_mode'),
             'aim_fixed_range_m': LaunchConfiguration('aim_fixed_range_m'),
             'aim_range_tolerance_m': LaunchConfiguration(
                 'aim_range_tolerance_m'),
             'aim_trim_u_px': LaunchConfiguration('aim_trim_u_px'),
             'aim_trim_v_px': LaunchConfiguration('aim_trim_v_px'),
+            'relay_config_file': LaunchConfiguration('relay_config_file'),
         }),
     ]
 
@@ -279,12 +312,13 @@ def _resolve_calibrations(context, *, launch_dir):
 def generate_launch_description():
     bringup_share = get_package_share_directory('wvcsc_bringup')
     c10_share = get_package_share_directory('wvcsc_c10_camera')
+    controller_share = get_package_share_directory('controller_pkg')
     launch_dir = os.path.join(bringup_share, 'launch')
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'mission_file', default_value=os.path.expanduser(
-                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml')),
+                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/field_route_corn.yaml')),
         DeclareLaunchArgument(
             'map', default_value=os.path.join(
                 os.path.expanduser('~/WVCSC_S2Z_UTB_ARM/src'),
@@ -294,7 +328,7 @@ def generate_launch_description():
                 bringup_share, 'scripts', 'preflight_check.py')),
         DeclareLaunchArgument(
             'c10_device',
-            default_value='/dev/v4l/by-id/usb-Synria_C10-video-index0'),
+            default_value='/dev/video0'),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('control_mode', default_value='pv'),
@@ -313,6 +347,10 @@ def generate_launch_description():
             'nozzle_calibration',
             default_value=os.path.expanduser(
                 '~/.ros/wvcsc_calibration/nozzle.yaml')),
+        DeclareLaunchArgument(
+            'relay_config_file',
+            default_value=os.path.join(
+                controller_share, 'config', 'fault.ini')),
         DeclareLaunchArgument('aim_fixed_range_m', default_value='1.0'),
         DeclareLaunchArgument('aim_range_tolerance_m', default_value='0.05'),
         DeclareLaunchArgument('aim_trim_u_px', default_value='0.0'),
@@ -328,6 +366,7 @@ def generate_launch_description():
                 'c10_intrinsics.yaml')),
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.20'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
+        DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
         DeclareLaunchArgument(
             'yolo_python_executable',
             default_value=os.path.expanduser(
