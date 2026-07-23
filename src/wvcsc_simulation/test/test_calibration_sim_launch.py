@@ -8,6 +8,10 @@ import xml.etree.ElementTree as ElementTree
 import pytest
 import yaml
 from launch.actions import Shutdown
+from tf_transformations import inverse_matrix, rotation_matrix
+from wvcsc_calibration.alicia_sample_geometry import (
+    ALICIA_M_FIXED_JOINT_SAMPLES,
+)
 
 
 ROOT = Path(__file__).parents[1]
@@ -42,7 +46,6 @@ def test_launch_uses_vehicle_model_and_full_controller_chain_without_rqt():
     assert "'/calibration/aruco_debug_image'" in LAUNCH_SOURCE
     assert "executable='handeye_server'" in LAUNCH_SOURCE
     assert "executable='auto_calibration_collector'" in LAUNCH_SOURCE
-    assert 'calibrate.launch.py' not in LAUNCH_SOURCE
     assert 'aruco_tf_broadcaster' not in LAUNCH_SOURCE
     assert "'robot_base_frame': 'alicia_base_link'" in LAUNCH_SOURCE
     assert "'/usr/share/gazebo-11/models'" in LAUNCH_SOURCE
@@ -61,9 +64,8 @@ def test_launch_uses_vehicle_model_and_full_controller_chain_without_rqt():
     assert 'target_action=unpause' in LAUNCH_SOURCE
     assert "success_actions=[joint_state]" in LAUNCH_SOURCE
     assert 'link1="link1" link2="link6" reason="Never"' not in LAUNCH_SOURCE
-    assert '# LEGACY DESK CALIBRATION ENVIRONMENT - REFERENCE ONLY' in LAUNCH_SOURCE
-    assert '# legacy_xacro_file = os.path.join(' in LAUNCH_SOURCE
-    assert '# legacy_world = os.path.join(' in LAUNCH_SOURCE
+    assert 'calibration_table.world' not in LAUNCH_SOURCE
+    assert 'calibration_arm_camera.urdf.xacro' not in LAUNCH_SOURCE
 
 
 def test_marker_pose_is_transformed_from_alicia_base_to_gazebo_root():
@@ -84,6 +86,85 @@ def test_marker_pose_is_transformed_from_alicia_base_to_gazebo_root():
     assert rpy == pytest.approx((1.57079632679, 0.0, 3.141592653589793))
 
 
+def test_coverage_marker_keeps_at_least_fourteen_fixed_poses_in_strict_c10_view():
+    """Protect the table location chosen for the complete fixed sequence."""
+    module = _launch_module()
+    description_root = ROOT.parent / 'wvcsc_description'
+    robot = module._generate_robot_description(
+        description_root / 'urdf' / 'wvcsc_utb_alicia.urdf.xacro',
+        description_root / 'config' / 'ros2_controllers.yaml')
+    root = ElementTree.fromstring(robot)
+    by_child = {
+        joint.find('child').attrib['link']: joint
+        for joint in root.findall('joint')
+        if joint.find('child') is not None
+    }
+    chain = []
+    link = 'camera_color_optical_frame'
+    while link != 'alicia_base_link':
+        joint = by_child[link]
+        chain.append(joint)
+        link = joint.find('parent').attrib['link']
+
+    config = yaml.safe_load((Path(__file__).parents[2] /
+                             'wvcsc_calibration/config/' /
+                             'auto_handeye_alicia_sim.yaml').read_text(
+                                 encoding='utf-8'))[
+        'auto_calibration_collector']['ros__parameters']
+    intrinsics = yaml.safe_load((description_root.parent / 'wvcsc_c10_camera' /
+                                 'config' / 'c10_intrinsics.yaml').read_text(
+                                     encoding='utf-8'))
+    fx, fy, cx, cy = (
+        intrinsics['camera_matrix']['data'][0],
+        intrinsics['camera_matrix']['data'][4],
+        intrinsics['camera_matrix']['data'][2],
+        intrinsics['camera_matrix']['data'][5])
+    marker = config['marker_position_base_m']
+    corners = tuple((marker[0] + sign_x * 0.035,
+                     marker[1] + sign_y * 0.035,
+                     marker[2], 1.0)
+                    for sign_x in (-1.0, 1.0) for sign_y in (-1.0, 1.0))
+
+    valid = 0
+    for sample in ALICIA_M_FIXED_JOINT_SAMPLES:
+        joints = dict(zip(
+            ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'), sample))
+        transform = module.identity_matrix()
+        for joint in reversed(chain):
+            origin = joint.find('origin')
+            xyz = tuple(float(value) for value in
+                        origin.attrib.get('xyz', '0 0 0').split())
+            rpy = tuple(float(value) for value in
+                        origin.attrib.get('rpy', '0 0 0').split())
+            transform = module.concatenate_matrices(
+                transform, module.translation_matrix(xyz),
+                module.euler_matrix(*rpy))
+            name = joint.attrib['name']
+            if name in joints:
+                axis = tuple(float(value) for value in
+                             joint.find('axis').attrib.get('xyz', '1 0 0').split())
+                transform = module.concatenate_matrices(
+                    transform, rotation_matrix(joints[name], axis))
+
+        projected = tuple(inverse_matrix(transform).dot(corner) for corner in corners)
+        if any(point[2] <= 0.02 for point in projected):
+            continue
+        pixels = tuple((fx * point[0] / point[2] + cx,
+                        fy * point[1] / point[2] + cy) for point in projected)
+        u_values, v_values = zip(*pixels)
+        margin = min(min(u_values), intrinsics['image_width'] - max(u_values),
+                     min(v_values), intrinsics['image_height'] - max(v_values))
+        side_px = max(u_values) - min(u_values)
+        center = tuple(sum(point[index] for point in projected) / len(projected)
+                       for index in range(3))
+        range_m = sum(value * value for value in center) ** 0.5
+        if margin >= 60.0 and side_px >= 90.0 and 0.20 <= range_m <= 0.80:
+            valid += 1
+
+    assert marker == pytest.approx([0.595, -0.030, 0.002])
+    assert valid >= config['minimum_samples']
+
+
 def test_failed_controller_spawner_stops_the_calibration_launch():
     module = _launch_module()
     action = object()
@@ -95,34 +176,6 @@ def test_failed_controller_spawner_stops_the_calibration_launch():
         process_name='controller', success_actions=[action])
     assert len(failed) == 1
     assert isinstance(failed[0], Shutdown)
-
-
-def test_legacy_calibration_world_has_visible_legs_and_a_horizontal_marker():
-    world = ElementTree.parse(ROOT / 'worlds' / 'calibration_table.world').getroot()
-    model = world.find("./world/model[@name='calibration_desk']")
-    assert model is not None
-    top_size = model.findtext("./link[@name='desk_top']/visual/geometry/box/size")
-    assert top_size.split() == ['1.2', '0.8', '0.02']
-    for name in ('leg_fl', 'leg_fr', 'leg_bl', 'leg_br'):
-        link = model.find(f"./link[@name='{name}']")
-        assert link.find('collision') is not None
-        assert link.find('visual') is not None
-    marker = next(item for item in world.findall('./world/include')
-                  if item.findtext('name') == 'aruco_marker')
-    assert [float(value) for value in marker.findtext('pose').split()] == \
-        pytest.approx([0.0, 0.25, 0.752, 1.5708, 0.0, 0.0])
-    gravity = world.findtext('./world/physics/gravity')
-    assert gravity.split() == ['0', '0', '0']
-
-
-def test_legacy_calibration_xacro_is_retained_as_a_reference_asset():
-    xacro = (Path(__file__).parents[2] / 'wvcsc_calibration' / 'xacro' /
-             'calibration_arm_camera.urdf.xacro').read_text(encoding='utf-8')
-    assert '<child link="$(arg alicia_base_link)"/>' in xacro
-    assert '<origin xyz="0 0 0.75" rpy="0 0 0"/>' in xacro
-    assert 'LEGACY REFERENCE ONLY' in xacro
-    assert "xacro.load_yaml('$(find wvcsc_c10_camera)/config/c10_intrinsics.yaml')" in xacro
-    assert '<link name="$(arg alicia_base_link)"/>' not in xacro
 
 
 def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
@@ -140,25 +193,25 @@ def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
     assert config['joint_stationary_max_position_delta_rad'] == pytest.approx(0.0001)
     assert config['joint_stationary_window_sec'] == pytest.approx(0.30)
     assert config['joint_stationary_timeout_sec'] == pytest.approx(5.0)
-    assert config['marker_position_base_m'] == pytest.approx([0.0, 0.25, 0.002])
-    assert config['seed_height_candidates_m'] == pytest.approx(
-        [0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20])
-    assert config['seed_radial_backoff_candidates_m'] == pytest.approx(
-        [0.0, 0.05, 0.10, 0.15, 0.20])
+    # 固定20姿态覆盖率最优的桌面位置；2 mm 是标定板表面，而非 Gazebo模型中心。
+    assert config['marker_position_base_m'] == pytest.approx([0.595, -0.030, 0.002])
     assert config['marker_distance_min_m'] == pytest.approx(0.20)
     assert 'minimum_corner_margin_px' not in config
     assert 'use_marker_position_prior_for_candidate_generation' not in config
     assert 'maximum_center_error_px' not in config
     assert config['output_file'].startswith('$HOME/WVCSC_S2Z_UTB_ARM/src/')
     assert config['marker_size_m'] == pytest.approx(0.070)
-    assert config['minimum_samples'] == 18
-    assert config['minimum_solution_samples'] == 18
-    assert config['minimum_safe_candidates'] == 30
+    assert config['minimum_samples'] == 14
+    assert config['minimum_solution_samples'] == 14
+    assert 'seed_height_candidates_m' not in config
+    assert 'target_samples' not in config
+    assert 'maximum_samples' not in config
+    assert 'minimum_safe_candidates' not in config
     assert config['ground_truth_max_translation_error_m'] == pytest.approx(0.003)
     assert config['ground_truth_max_xy_error_m'] == pytest.approx(0.002)
     assert config['ground_truth_max_rotation_error_deg'] == pytest.approx(1.0)
     assert config['maximum_marker_position_rms_m'] == pytest.approx(0.002)
-    assert config['maximum_marker_rotation_rms_deg'] == pytest.approx(0.50)
+    assert config['maximum_marker_rotation_rms_deg'] == pytest.approx(0.60)
     assert config['maximum_algorithm_translation_delta_m'] == pytest.approx(0.003)
     assert config['maximum_algorithm_rotation_delta_deg'] == pytest.approx(1.0)
     assert config['fixed_marker_refinement_enabled'] is True

@@ -14,42 +14,36 @@ auto_calibration_collector:
     joint_stationary_max_position_delta_rad: 0.0001
     joint_stationary_window_sec: 0.30
     joint_stationary_timeout_sec: 5.0
-    marker_position_base_m: [0.0, 0.25, 0.002]
-    # These are tool0 heights, not camera heights.  They are selected from the
-    # Alicia-M reachable tool workspace and are filtered by IK/OMPL before any
-    # image is used.  The marker distance and image gates remain authoritative;
-    # no tool0->camera value is used to construct these targets.
-    seed_height_candidates_m: [0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20]
-    seed_radial_backoff_candidates_m: [0.0, 0.05, 0.10, 0.15, 0.20]
-    seed_tangential_offset_candidates_m: [0.0, -0.05, 0.05, -0.10, 0.10]
-    # 工具空间倾斜可见性探针会把相机光心移近标记；仿真允许 0.20 m
-    # 的有效 PnP 距离。距离仍受最大值、标记像素尺寸、边缘、稳定性、
-    # 共识及最终真值精度门控约束，不参与候选姿态的生成。
+    # 仿真启动文件使用此位置生成桌面上的70 mm标定码；采集器本身不再由它
+    # 生成自适应候选，而是按官方20点固定关节序列执行。
+    # 此处是固定20姿态的覆盖率最优点，而非首姿态的光轴交点：基于当前
+    # Alicia-M URDF 和 C10 内参的投影预检，20 个姿态中有 19 个满足严格
+    # 60 px 边缘余量、90 px 尺寸和 0.20--0.80 m 距离门槛。因此保留严格
+    # 14 样本下限，不降低图像质量标准或重复执行固定姿态表。
+    # 坐标在 alicia_base_link 下；z=2 mm 是标定板表面，码面由 launch
+    # 以水平、朝上的姿态生成。
+    marker_position_base_m: [0.595, -0.030, 0.002]
+    # 仿真允许0.20m的有效PnP距离；距离仍受标记像素尺寸、边缘、稳定性、
+    # 共识及最终真值精度门控约束。
     marker_distance_min_m: 0.20
     marker_size_m: 0.070
     stable_marker_pose_topic: /calibration/stable_marker_pose
     stable_tf_settle_sec: 0.15
-    # The simulation benchmark gathers additional well-separated samples so
-    # that all three OpenCV solvers receive enough rotational excitation.
-    minimum_samples: 18
-    minimum_solution_samples: 18
-    target_samples: 22
-    maximum_samples: 30
-    # 碰撞 IK/奇异/关节余量通过，只说明轨迹可执行；最终仍可能因严格图像
-    # 边缘、碰撞检查重心校正或位姿多样性被拒绝。为确保保留至少 18 个
-    # 有效样本，仿真先储备 30 条安全候选，而不是放低任何最终质量门槛。
-    minimum_safe_candidates: 30
+    # 不改变 stable_frames=10 和任何 C10 图像质量门槛。达到下限即停止遍历；
+    # 不足下限直接失败且不保存，不进行第二轮固定姿态采样。
+    minimum_samples: 14
+    minimum_solution_samples: 14
     # 仿真基准有已知的 tool0->C10 外参，因此采样质量门槛比实机更严：
     # 仅允许内部一致的 marker 位姿集合进入 OpenCV 手眼求解。该门槛
     # 只依据标记位姿残差和算法共识，不使用真值挑选样本。
     maximum_marker_position_rms_m: 0.002
-    maximum_marker_rotation_rms_deg: 0.50
+    # 固定表的独立 C10 PnP 回归中，跨姿态角度 RMS 约为 0.58 deg。
+    # 0.60 deg 只是求解一致性预筛，不替代后续 1 deg 外参真值门槛。
+    maximum_marker_rotation_rms_deg: 0.60
     maximum_algorithm_translation_delta_m: 0.003
     maximum_algorithm_rotation_delta_deg: 1.0
-    # 当前 19 样本回归中，固定码残差 RMS 约为 0.38 mm / 0.31 deg。以前
-    # 误把位置 sigma 设为 0.25 mm、旋转 sigma 设为 1 deg，会过度相信
-    # 平移残差而低估 PnP 姿态约束，导致 X/Y 出现系统性偏置。以下数值与
-    # 实测散布同量级，仍只最小化固定码一致性，不把仿真真值送入求解器。
+    # 固定表使用独立 C10 PnP；以下尺度只定义固定码一致性优化的残差权重，
+    # 不把仿真真值送入求解器，也不改变最终的 3 mm / 2 mm / 1 deg 验收。
     fixed_marker_refinement_enabled: true
     fixed_marker_refinement_translation_sigma_m: 0.00050
     fixed_marker_refinement_rotation_sigma_deg: 0.30

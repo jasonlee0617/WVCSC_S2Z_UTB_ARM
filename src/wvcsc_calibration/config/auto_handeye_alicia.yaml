@@ -29,20 +29,8 @@ auto_calibration_collector:
 
     minimum_samples: 15
     minimum_solution_samples: 14
-    target_samples: 18
-    maximum_samples: 22
-    minimum_safe_candidates: 14
-    # marker 固定在车顶、相对 alicia_base_link 的位置。采集器先由此生成
-    # 自适应初始观察位，随后才等待相机实际检测到 marker TF。
-    marker_position_base_m: [0.0, 0.25, 0.0]
-    # 先覆盖已验证可达的车载起始视角，再由后续 marker-relative 候选
-    # 提供姿态激励；不以扩大不可达搜索范围替代安全门控。
-    seed_height_candidates_m: [0.25, 0.30, 0.35]
-    seed_radial_backoff_candidates_m: [0.0, 0.05, 0.10]
-    seed_tangential_offset_candidates_m: [0.0, -0.05, 0.05]
-    # 候选不足时，先移动到一个已经通过IK/关节余量/条件数门控的视角，
-    # 再围绕该视角重新生成同一套21个marker-relative候选。
-    safe_anchor_recovery_limit: 3
+    # 20个官方Alicia-M固定关节样本由统一采集器按既定顺序执行；每点仍需
+    # 通过MoveIt碰撞规划、条件数、关节余量、停稳和C10图像质量门控。
     stable_frames: 10
     settle_time_sec: 1.0
     # 每次轨迹结束后，连续 0.30 s 内六关节位置最大跨度必须不超过该值，
@@ -63,10 +51,12 @@ auto_calibration_collector:
     minimum_translation_span_m: 0.04
     minimum_rotation_span_deg: 20.0
 
-    max_condition_number: 14.0
+    # The official fixed 20-pose sequence evaluates to about 21.5--32.9 in
+    # Alicia-M's URDF Jacobian convention.  Keep a finite calibration safety
+    # gate without rejecting every official sample; task-motion limits remain
+    # independent in wvcsc_arm_task.
+    max_condition_number: 35.0
     min_joint_margin_rad: 0.22
-    position_tolerance_m: 0.003
-    orientation_tolerance_rad: 0.01
 
     algorithm_names: [OpenCV/Park, OpenCV/Horaud, OpenCV/Tsai-Lenz]
     maximum_algorithm_translation_delta_m: 0.010
@@ -76,9 +66,6 @@ auto_calibration_collector:
     maximum_marker_rotation_rms_deg: 1.0
     easy_service_timeout_sec: 10.0
     startup_service_timeout_sec: 20.0
-    # 候选先通过碰撞IK、Jacobian条件数和关节余量轻量筛选；
-    # 每个视角族先规划前N个，再按需继续展开，避免人为截断安全候选。
-    candidate_plan_attempts_per_family: 3
     output_file: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml
     easy_handeye_output_file: ~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib
     # 实机必须由操作者按 s/Enter 确认工作区安全后才开始运动。

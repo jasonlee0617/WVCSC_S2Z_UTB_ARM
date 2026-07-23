@@ -1,10 +1,14 @@
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
-import pytest
 import cv2
 import numpy as np
+import pytest
 
+from wvcsc_calibration.auto_calibration_collector import (
+    AutoCalibrationCollector,
+    estimate_refined_aruco_pose,
+)
 from wvcsc_calibration.calibration_quality import (
     MarkerObservation,
     calibration_consensus,
@@ -15,10 +19,12 @@ from wvcsc_calibration.calibration_quality import (
     stable_marker_window,
     transform_error,
 )
-from wvcsc_calibration.auto_calibration_collector import (
-    balanced_candidate_order,
-    estimate_refined_aruco_pose,
-)
+
+
+COLLECTOR_SOURCE = (
+    Path(__file__).parents[1] / 'wvcsc_calibration' /
+    'auto_calibration_collector.py'
+).read_text(encoding='utf-8')
 
 
 def _observation(index=0, margin=100.0):
@@ -84,17 +90,6 @@ def test_marker_window_reports_observed_distance_range():
     assert 'required=[0.250, 0.800]m' in message
 
 
-def test_candidate_order_interleaves_view_families():
-    candidates = [
-        SimpleNamespace(candidate_id='roll_-14'),
-        SimpleNamespace(candidate_id='roll_-8'),
-        SimpleNamespace(candidate_id='horizontal_-10'),
-        SimpleNamespace(candidate_id='horizontal_+10'),
-    ]
-    assert [candidate.candidate_id for candidate in balanced_candidate_order(candidates)] == [
-        'roll_-14', 'horizontal_-10', 'roll_-8', 'horizontal_+10']
-
-
 def test_pose_diversity_and_coverage_use_translation_or_rotation():
     identity = (0.0, 0.0, 0.0, 1.0)
     accepted = [((0.0, 0.0, 0.0), identity)]
@@ -138,213 +133,99 @@ def test_transform_error_reports_translation_and_rotation_in_public_units():
     assert rotation == pytest.approx(0.0)
 
 
-def test_collector_waits_for_marker_only_after_the_adaptive_anchor_move():
-    """The initial operator pose need not see the vehicle-mounted marker."""
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    guarded = source.split('    def _run_session_guarded(self):', 1)[1].split(
-        '    def _parameter_string(', 1)[0]
-    assert 'self._wait_robot_inputs()' in guarded
-    assert 'self._wait_inputs()' not in guarded
-    run_session = source.split('    def _run_session(self):', 1)[1].split(
+def test_fixed_joint_sampler_executes_the_official_order_without_an_anchor_move():
+    run_session = COLLECTOR_SOURCE.split('    def _run_session(self):', 1)[1].split(
         '    def _verify_simulation_ground_truth(', 1)[0]
-    assert run_session.index('self._move_to_initial_anchor(') < \
-        run_session.index('self._wait_inputs()')
-    assert run_session.index('self._wait_inputs()') < \
-        run_session.index('self._wait_easy_services()')
-    assert run_session.index('self._wait_easy_services()') < \
-        run_session.index('self._clear_easy_samples()')
-
-
-def test_collector_waits_for_moveit_before_anchor_search():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    assert "'startup_service_timeout_sec': 20.0" in source
-    assert "self._compute_ik_client = self.create_client(" in source
-    assert "self._plan_path_client = self.create_client(" in source
-    assert "self._execute_trajectory_client = ActionClient(" in source
-    run_session = source.split('    def _run_session(self):', 1)[1].split(
-        '    def _solve', 1)[0]
     assert run_session.index('self._wait_moveit_services()') < \
-        run_session.index('self._move_to_initial_anchor(')
+        run_session.index('fixed_samples = fixed_joint_samples()')
+    assert 'fixed_samples = fixed_joint_samples()' in run_session
+    assert 'for index, joints in enumerate(fixed_samples, start=1):' in run_session
+    assert run_session.index('self._fixed_joint_safety(') < \
+        run_session.index('self._arm.move_joints(joints)')
+    assert run_session.index('self._arm.move_joints(joints)') < \
+        run_session.index('self._wait_easy_services()') < \
+        run_session.index('self._clear_easy_samples()') < \
+        run_session.index("self._call('take', TakeSample.Request())")
+    assert 'if sample_count >= minimum_samples:' in run_session
+    assert '_wait_inputs()' not in run_session
+    assert 'FollowJointTrajectory' not in COLLECTOR_SOURCE
 
 
-def test_collector_does_not_overwrite_rclpy_node_client_storage():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    assert 'self._easy_clients = self._create_easy_clients()' in source
-    assert 'self._clients = self._create_easy_clients()' not in source
+def test_fixed_joint_safety_rejects_condition_and_margin_before_moveit():
+    class FakeCollector:
+        def get_parameter(self, name):
+            values = {
+                'joint_names': ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'],
+                'max_condition_number': 14.0,
+                'min_joint_margin_rad': 0.22,
+            }
+            return SimpleNamespace(value=values[name])
+
+    class FakeOptimizer:
+        def __init__(self, condition, margin):
+            self._condition = condition
+            self._margin = margin
+
+        def condition_number(self, _joints):
+            return self._condition
+
+        def minimum_joint_margin(self, _joints):
+            return self._margin
+
+    collector = FakeCollector()
+    valid = AutoCalibrationCollector._fixed_joint_safety(
+        collector, (0.0,) * 6, FakeOptimizer(10.0, 0.30))
+    assert valid == (True, 'accepted', 10.0, 0.30)
+    assert AutoCalibrationCollector._fixed_joint_safety(
+        collector, (0.0,) * 6, FakeOptimizer(14.0, 0.30))[1] == 'near_singularity'
+    assert AutoCalibrationCollector._fixed_joint_safety(
+        collector, (0.0,) * 6, FakeOptimizer(10.0, 0.21))[1] == 'joint_limit_margin'
 
 
-def test_collector_uses_best_effort_qos_for_camera_streams():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    assert 'reliability=ReliabilityPolicy.BEST_EFFORT' in source
-    assert 'self._on_camera_info, sensor_qos' in source
-    assert 'self._on_image, sensor_qos' in source
+def test_adaptive_candidate_and_bootstrap_paths_are_absent():
+    forbidden = (
+        'generate_alicia_candidates', 'generate_camera_centered_candidates',
+        'generate_initial_anchor_candidates', '_move_to_initial_anchor',
+        '_provisional_camera_model', '_screen_candidate_plans',
+        'safe_anchor_recovery_limit', 'target_samples', 'maximum_samples',
+        'minimum_safe_candidates', 'candidate_plan_attempts_per_family',
+        'seed_height_candidates_m', 'seed_radial_backoff_candidates_m',
+        'seed_tangential_offset_candidates_m', '_BOOTSTRAP_',
+    )
+    assert all(name not in COLLECTOR_SOURCE for name in forbidden)
 
 
-def test_collector_waits_for_a_fresh_position_convergence_window_before_pnp_sampling():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    assert "'joint_stationary_max_position_delta_rad': 0.0005" in source
-    assert 'self._joint_position_history = deque(maxlen=200)' in source
-    assert 'self._joint_speed_history = deque(maxlen=200)' in source
-    stationary = source.split('    def _wait_for_joint_stationary(self):', 1)[1].split(
-        '    def _on_camera_info(', 1)[0]
-    assert 'waiting for a fresh joint position window' in stationary
-    assert 'position_span={position_span:.6f}rad' in stationary
-    assert 'reported_max_speed={speed_text}' in stationary
-    run_session = source.split('    def _run_session(self):', 1)[1].split(
-        '    def _solve', 1)[0]
-    assert run_session.index('stationary, reason = self._wait_for_joint_stationary()') < \
-        run_session.index('frames, reason = self._stable_observation(')
+def test_collector_keeps_c10_qos_cancel_and_stationary_safety_contracts():
+    assert 'reliability=ReliabilityPolicy.BEST_EFFORT' in COLLECTOR_SOURCE
+    assert 'self._on_camera_info, sensor_qos' in COLLECTOR_SOURCE
+    assert 'self._on_image, sensor_qos' in COLLECTOR_SOURCE
+    assert 'self._easy_clients = self._create_easy_clients()' in COLLECTOR_SOURCE
+    assert 'self._clients = self._create_easy_clients()' not in COLLECTOR_SOURCE
+    assert 'self._joint_position_history = deque(maxlen=200)' in COLLECTOR_SOURCE
+    assert 'waiting for a fresh joint position window' in COLLECTOR_SOURCE
+    assert 'self._arm.cancel()' in COLLECTOR_SOURCE
 
 
-def test_collector_uses_only_measured_bootstrap_mount_for_camera_centred_views():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    run_session = source.split('    def _run_session(self):', 1)[1].split(
-        '    def _verify_simulation_ground_truth(', 1)[0]
-    assert '_BOOTSTRAP_MINIMUM_SAMPLES = 6' in source
-    assert '_BOOTSTRAP_TARGET_SAMPLES = 8' in source
-    assert 'generate_camera_centered_candidates(' in run_session
-    assert 'self._provisional_camera_model()' in run_session
-    assert 'tool_camera_prior=bootstrap' in run_session
-    assert '[CALIBRATION][BOOTSTRAP]' in run_session
-    assert 'frames, reason = self._stable_observation()' in run_session
-    assert '_recenter_marker_if_needed' not in run_session
-    provisional = source.split('    def _provisional_camera_model(self):', 1)[1].split(
-        '    def _run_session(self):', 1)[0]
-    assert 'source=measured_samples' in provisional
-    assert 'self._compute_consensus_solution()' in provisional
-    assert 'ground_truth' not in provisional
-    assert 'ground_truth_translation_m' not in run_session
-
-
-def test_simulation_config_keeps_marker_position_and_final_truth_gate_only():
+def test_simulation_config_keeps_coverage_marker_and_fixed_minimum():
     config = (Path(__file__).parents[1] / 'config' /
               'auto_handeye_alicia_sim.yaml').read_text(encoding='utf-8')
-    assert 'marker_position_base_m: [0.0, 0.25, 0.002]' in config
-    assert 'minimum_corner_margin_px' not in config
+    assert 'marker_position_base_m: [0.595, -0.030, 0.002]' in config
+    assert 'minimum_samples: 14' in config
+    assert 'minimum_solution_samples: 14' in config
     assert 'ground_truth_max_translation_error_m: 0.003' in config
     assert 'ground_truth_max_xy_error_m: 0.002' in config
     assert 'ground_truth_max_rotation_error_deg: 1.0' in config
-
-
-def test_collector_shutdown_keeps_motion_cancel_best_effort():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    method = source.split('    def _request_session_stop(self, reason):', 1)[1].split(
-        '    def _run_session_guarded(', 1)[0]
-    assert 'try:' in method
-    assert 'self._arm.cancel()' in method
-    assert 'except Exception:' in method
-    assert "reason not in {'Ctrl+C', 'node shutdown'}" in method
-
-
-def test_collector_recovers_from_a_visible_but_near_singular_seed():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    run_session = source.split('    def _run_session(self):', 1)[1].split(
-        '    def _solve', 1)[0]
-    assert 'safe_anchor_recovery_limit' in run_session
-    assert "candidate.candidate_id != 'seed'" in run_session
-    assert 'include_fine=True' in run_session
-    assert 'required_safe = max(minimum_safe, minimum_samples)' in run_session
-    assert 'reachability precondition' in run_session
-    assert 'candidates, optimizer, required_safe)' not in run_session
-    assert run_session.count('candidates, optimizer)') >= 1
-    assert 'sample_plan_pool.extend(safe_plans)' in run_session
-    assert 'safe_plans = tuple(sample_plan_pool)' in run_session
-    assert 'safe-anchor={anchor.candidate_id}' in run_session
-    assert 'self._wait_inputs()' in run_session
-    assert 'self._screen_candidate_plans(' in run_session
-
-
-def test_collector_uses_remaining_safe_plans_after_image_quality_rejections():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    run_session = source.split('    def _run_session(self):', 1)[1].split(
-        '    def _solve', 1)[0]
-    assert 'for plan in safe_plans:' in run_session
-    assert 'for plan in safe_plans[:maximum_samples]:' not in run_session
-    assert 'limits recorded samples, not motion attempts' in run_session
-    assert 'if sample_count >= maximum_samples:' in run_session
-
-
-def test_collector_screens_ik_before_incremental_ompl_planning():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    assert "'candidate_plan_attempts_per_family': 3" in source
-    screening = source.split('    def _screen_candidate_plans(', 1)[1].split(
-        '    def _execute_candidate_plan(', 1)[0]
-    assert 'self._candidate_ik_details(' in screening
-    assert 'required_count=None' in screening
-    assert 'ranked_families' in screening
-    assert 'rank + 1 >= attempts_per_family' in screening
-    assert 'len(plans) >= plan_limit' in screening
-    assert 'self._checked_candidate_plan(' in screening
-    assert "'ik_safe': 0" in screening
-    assert "'planned_ok': 0" in screening
-    assert "'rejected_condition': 0" in screening
-
-
-def test_collector_reuses_plans_only_when_start_joints_still_match():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    execution = source.split('    def _execute_candidate_plan(', 1)[1].split(
-        '    def _move_to_initial_anchor(', 1)[0]
-    assert 'plan.start_joints' in execution
-    assert '<= 0.01' in execution
-    assert 'self._safe_plan(plan.candidate, optimizer)' in execution
-
-
-def test_collector_uses_marker_prior_for_the_first_safe_anchor():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    assert "'marker_position_base_m': [0.0, 0.25, 0.0]" in source
-    anchor = source.split('    def _move_to_initial_anchor(', 1)[1].split(
-        '    def _install_calibration_surface(', 1)[0]
-    assert 'generate_initial_anchor_candidates(' in anchor
-    assert 'self._candidate_ik_details(' in anchor
-    assert 'self._checked_candidate_plan(' in anchor
-    assert "'no collision-safe initial anchor" in anchor
-
-
-def test_collector_initial_anchor_scores_condition_before_joint_margin():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    anchor = source.split('    def _move_to_initial_anchor(', 1)[1].split(
-        '    def _install_calibration_surface(', 1)[0]
-    assert 'seed_height_candidates_m' in anchor
-    assert 'seed_radial_backoff_candidates_m' in anchor
-    assert 'seed_tangential_offset_candidates_m' in anchor
-    assert 'item.condition' in anchor
-    assert '-item.margin' in anchor
-    assert anchor.index('item.condition') < anchor.index('-item.margin')
-    assert 'joint_margin={selected.margin:.2f}rad' in anchor
+    real_config = (Path(__file__).parents[1] / 'config' /
+                   'auto_handeye_alicia.yaml').read_text(encoding='utf-8')
+    assert 'max_condition_number: 35.0' in real_config
+    assert 'seed_height_candidates_m' not in config
+    assert 'target_samples' not in config
 
 
 def test_simulation_truth_gate_uses_3mm_total_translation_and_2mm_xy_limits():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    verification = source.split('    def _verify_simulation_ground_truth(', 1)[1].split(
-        '    def _solve_and_export(', 1)[0]
+    verification = COLLECTOR_SOURCE.split(
+        '    def _verify_simulation_ground_truth(', 1)[1].split(
+            '    def _solve_and_export(', 1)[0]
     assert 'translation_error <= translation_limit' in verification
     assert 'abs(deltas[0]) <= xy_limit' in verification
     assert 'abs(deltas[1]) <= xy_limit' in verification
@@ -359,31 +240,8 @@ def test_aruco_overlay_does_not_overwrite_rclpy_parameter_storage():
     assert 'self._parameters =' not in source
 
 
-def test_collector_bootstraps_in_tool_space_before_camera_centred_sampling():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    run_session = source.split('    def _run_session(self):', 1)[1].split(
-        '    def _solve', 1)[0]
-    assert 'current_tool_position' in run_session
-    assert 'current_tool_quaternion' in run_session
-    assert 'generate_alicia_candidates(' in run_session
-    assert 'tool_camera_prior=false' in run_session
-    assert 'generate_camera_centered_candidates(' in run_session
-    assert run_session.index('generate_alicia_candidates(') < \
-        run_session.index('generate_camera_centered_candidates(')
-    anchor = source.split('    def _move_to_initial_anchor(', 1)[1].split(
-        '    def _install_calibration_surface(', 1)[0]
-    assert 'tool_z_down=true' in anchor
-    assert 'tool_camera[0]' not in anchor
-    assert 'tool_camera[1]' not in anchor
-
-
 def test_collector_uses_wvcsc_opencv_transform_conversion_not_server_solver():
-    source = (
-        Path(__file__).parents[1] / 'wvcsc_calibration' /
-        'auto_calibration_collector.py').read_text(encoding='utf-8')
-    solver = source.split('    def _compute_consensus_solution(self):', 1)[1].split(
+    solver = COLLECTOR_SOURCE.split('    def _compute_consensus_solution(self):', 1)[1].split(
         '    def destroy_node(self):', 1)[0]
     assert 'solve_handeye(' in solver
     assert 'refine_handeye_fixed_marker(' in solver
@@ -438,10 +296,8 @@ def test_refined_square_pnp_recovers_a_synthetic_marker_pose():
     expected_tvec = np.asarray((0.03, -0.02, 0.46), dtype=float).reshape(3, 1)
     corners, _jacobian = cv2.projectPoints(
         object_points, expected_rvec, expected_tvec, camera, np.zeros(5))
-
     rvec, tvec = estimate_refined_aruco_pose(
         corners.reshape(4, 2), size, camera, np.zeros(5))
-
     assert tuple(tvec) == pytest.approx(tuple(expected_tvec.reshape(3)), abs=1.0e-6)
     assert tuple(rvec.reshape(3)) == pytest.approx(
         tuple(expected_rvec.reshape(3)), abs=1.0e-6)

@@ -4,7 +4,6 @@ from pathlib import Path
 
 
 PACKAGE_ROOT = Path(__file__).parents[1]
-SOURCE_ROOT = PACKAGE_ROOT.parent
 LAUNCH_SOURCE = (PACKAGE_ROOT / 'launch' / 'auto_handeye.launch.py').read_text(
     encoding='utf-8')
 COLLECTOR_SOURCE = (
@@ -45,8 +44,7 @@ def test_real_collector_requires_operator_confirmation_and_exports_both_paths():
     assert 'FollowJointTrajectory' not in COLLECTOR_SOURCE
 
 
-def test_legacy_alicia_m_calibration_package_is_no_longer_discoverable():
-    legacy = SOURCE_ROOT / 'Alicia-M-ROS2' / 'alicia_m_calibration'
-    assert not (legacy / 'package.xml').exists()
-    assert not (legacy / 'CMakeLists.txt').exists()
+def test_collector_copies_the_legacy_sequence_without_a_runtime_dependency():
+    assert 'fixed_joint_samples' in COLLECTOR_SOURCE
+    assert 'alicia_m_calibration' not in COLLECTOR_SOURCE
     assert not (PACKAGE_ROOT / 'wvcsc_calibration' / 'auto_handeye.py').exists()

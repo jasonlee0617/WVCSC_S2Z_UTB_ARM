@@ -343,29 +343,6 @@ def generate_launch_description():
         ],
         output='both')
 
-    # -----------------------------------------------------------------------
-    # LEGACY DESK CALIBRATION ENVIRONMENT - REFERENCE ONLY
-    #
-    # The original desk + standalone-arm setup remains in the repository for
-    # historical comparison and manual rollback.  It is intentionally not an
-    # active launch branch: it omits the vehicle roof mount and chassis
-    # collision geometry, so its safe poses cannot be migrated one-to-one to
-    # the vehicle.  To restore it manually, replace the active xacro/world and
-    # spawn path below as one set.  Never start both sets of state publishers,
-    # controller managers, MoveIt nodes, or Gazebo entities together.
-    #
-    # legacy_xacro_file = os.path.join(
-    #     calibration_share, 'xacro', 'calibration_arm_camera.urdf.xacro')
-    # legacy_urdf = _generate_robot_description(legacy_xacro_file, controllers_file)
-    # legacy_world = os.path.join(
-    #     simulation_share, 'worlds', 'calibration_table.world')
-    # legacy_spawn = Node(
-    #     package='gazebo_ros', executable='spawn_entity.py',
-    #     arguments=['-topic', '/robot_description', '-entity',
-    #                'alicia_calibration', '-x', '0', '-y', '0', '-z', '0'],
-    #     output='screen')
-    # -----------------------------------------------------------------------
-
     # Gazebo starts paused to make both vehicle and marker spawn deterministic.
     # The calibration world has zero gravity, so unpausing before controllers
     # activate is safe and gives ros2_control an update cycle.
