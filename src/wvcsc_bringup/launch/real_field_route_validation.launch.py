@@ -60,6 +60,9 @@ def generate_launch_description():
             # AMCL initial pose in RViz.  This also prevents relay activation
             # while localization is still uninitialized.
             'wait_for_initial_pose': True,
+            # The action server can be discoverable while Nav2 is still
+            # configuring.  Do not send point_1 until bt_navigator is active.
+            'wait_for_nav_active': True,
             'wide_relay_channel': 1,
             'arm_relay_channel': 2,
         }],

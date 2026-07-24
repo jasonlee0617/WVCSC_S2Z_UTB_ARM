@@ -131,6 +131,8 @@ def generate_launch_description():
                 'mission_file': LaunchConfiguration('mission_file'),
                 'map_file': LaunchConfiguration('map'),
                 'auto_start': True,
+                'wait_for_initial_pose': True,
+                'wait_for_nav_active': True,
                 'wide_relay_channel': 1,
                 'arm_relay_channel': 2,
             },

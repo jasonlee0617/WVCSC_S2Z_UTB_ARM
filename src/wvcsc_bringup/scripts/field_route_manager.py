@@ -14,9 +14,10 @@ import time
 
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped
+from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PoseWithCovarianceStamped
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
@@ -78,6 +79,10 @@ class FieldRouteManager(Node):
         self._arm_deadline = 0.0
         self._relay_deadline = 0.0
         self._relay_request_id = 0
+        self._initial_pose_received = False
+        self._nav_stack_active = False
+        self._nav_state_request_active = False
+        self._last_nav_state_log = 0.0
         self._stop_detector = StopDetector(
             linear_threshold=float(self.get_parameter('linear_stop_threshold').value),
             angular_threshold=float(self.get_parameter('angular_stop_threshold').value),
@@ -90,13 +95,14 @@ class FieldRouteManager(Node):
         self._nav_client = ActionClient(
             self, NavigateToPose,
             str(self.get_parameter('nav_action_name').value))
+        self._nav_state_client = self.create_client(
+            GetState, '/bt_navigator/get_state')
         self._arm_client = ActionClient(
             self, ExecuteSpray,
             str(self.get_parameter('arm_action_name').value))
         self._relay_client = self.create_client(
             SetRelay, str(self.get_parameter('relay_service_name').value))
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
-        self._initial_pose_received = False
         self.create_subscription(
             PoseWithCovarianceStamped, '/amcl_pose',
             self._on_initial_pose, 10)
@@ -116,6 +122,7 @@ class FieldRouteManager(Node):
             'arm_relay_channel': 2,
             'auto_start': True,
             'wait_for_initial_pose': False,
+            'wait_for_nav_active': False,
             'relay_service_timeout_sec': 2.0,
             'nav_goal_timeout_sec': 120.0,
             'arm_goal_timeout_sec': 180.0,
@@ -147,6 +154,43 @@ class FieldRouteManager(Node):
 
     def _on_initial_pose(self, _message):
         self._initial_pose_received = True
+
+    def _poll_nav_state(self, now):
+        """Wait until bt_navigator is ACTIVE, not merely discoverable."""
+        if self._nav_stack_active:
+            return True
+        if not self._nav_state_client.service_is_ready():
+            if now - self._last_nav_state_log >= 5.0:
+                self.get_logger().info(
+                    '[FIELD_ROUTE] waiting for active Nav2 lifecycle state')
+                self._last_nav_state_log = now
+            return False
+        if self._nav_state_request_active:
+            return False
+        self._nav_state_request_active = True
+        try:
+            future = self._nav_state_client.call_async(GetState.Request())
+        except Exception as error:
+            self._nav_state_request_active = False
+            self.get_logger().warning(
+                f'[FIELD_ROUTE] Nav2 lifecycle query failed: {error}')
+            return False
+
+        def done(result_future):
+            self._nav_state_request_active = False
+            try:
+                response = result_future.result()
+                active = response.current_state.id == 3  # PRIMARY_STATE_ACTIVE
+                if active and not self._nav_stack_active:
+                    self.get_logger().info(
+                        '[FIELD_ROUTE] Nav2 lifecycle is ACTIVE')
+                self._nav_stack_active = active
+            except Exception as error:
+                self.get_logger().warning(
+                    f'[FIELD_ROUTE] Nav2 lifecycle response failed: {error}')
+
+        future.add_done_callback(done)
+        return False
 
     def _on_cancel(self, _request, response):
         if self._state in (self.COMPLETED, self.FAILED):
@@ -189,6 +233,9 @@ class FieldRouteManager(Node):
                     self.get_logger().info(
                         '[FIELD_ROUTE] waiting for RViz initial pose on /amcl_pose')
                     self._ready_logged = True
+                return
+            if (bool(self.get_parameter('wait_for_nav_active').value)
+                    and not self._poll_nav_state(now)):
                 return
             if not self._clients_ready():
                 if not self._ready_logged:

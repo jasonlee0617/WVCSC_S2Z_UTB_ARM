@@ -119,6 +119,7 @@ def test_route_validation_launch_uses_real_navigation_and_fake_arm_only():
     assert 'real_navigation.launch.py' in source
     assert "controller.launch.py" in source
     assert "'wait_for_initial_pose': True" in source
+    assert "'wait_for_nav_active': True" in source
     assert "executable='fake_arm_spray_action.py'" in source
     assert "executable='field_route_manager.py'" in source
     for forbidden in (
