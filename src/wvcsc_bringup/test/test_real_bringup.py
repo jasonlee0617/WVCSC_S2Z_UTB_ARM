@@ -247,6 +247,16 @@ def test_real_sensor_stack_has_one_unified_robot_state_publisher():
     assert "('/twist_cmd', '/wvcsc_bringup/disabled_twist_cmd')" in source
 
 
+def test_calibrated_xacro_vectors_are_quoted_for_negative_components():
+    for launch_name in ('real_sensors.launch.py',
+                        'real_orchestration.launch.py',
+                        'real_arm.launch.py'):
+        source = _source(launch_name)
+        for argument in ('c10_mount_xyz', 'c10_mount_rpy',
+                         'nozzle_mount_xyz', 'nozzle_mount_rpy'):
+            assert f' {argument}:="' in source
+
+
 def test_real_sensor_stack_uses_yesense_and_keeps_fdilink_only_for_rollback():
     for name in ('real_sensors.launch.py',):
         source = _source(name)

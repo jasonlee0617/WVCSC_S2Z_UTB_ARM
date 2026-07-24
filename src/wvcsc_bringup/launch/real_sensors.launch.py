@@ -43,10 +43,13 @@ def generate_launch_description():
             ' baudrate:=', LaunchConfiguration('baudrate'),
             ' control_mode:=', LaunchConfiguration('control_mode'),
             ' default_speed:=', LaunchConfiguration('default_speed'),
-            ' c10_mount_xyz:=', LaunchConfiguration('c10_mount_xyz'),
-            ' c10_mount_rpy:=', LaunchConfiguration('c10_mount_rpy'),
-            ' nozzle_mount_xyz:=', LaunchConfiguration('nozzle_mount_xyz'),
-            ' nozzle_mount_rpy:=', LaunchConfiguration('nozzle_mount_rpy'),
+            # Keep vector-valued xacro arguments as one quoted shell token.
+            # Calibrated values contain negative components; without quotes
+            # xacro interprets e.g. ``-0.021`` as a command-line option.
+            ' c10_mount_xyz:="', LaunchConfiguration('c10_mount_xyz'), '"',
+            ' c10_mount_rpy:="', LaunchConfiguration('c10_mount_rpy'), '"',
+            ' nozzle_mount_xyz:="', LaunchConfiguration('nozzle_mount_xyz'), '"',
+            ' nozzle_mount_rpy:="', LaunchConfiguration('nozzle_mount_rpy'), '"',
         ]), value_type=str),
     }
 
