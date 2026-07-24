@@ -1,0 +1,89 @@
+schema_version: 4
+site_id: corn_field
+map:
+  frame_id: map
+  yaml_sha256: d90ee7dc9b15f0d89f2fca73744e040e8ee945e2ae4d2ecc7f1fca50356a5137
+  image_sha256: 0e58f3a0143c2d0f7ad1095179993666971be0096ce40d74605bb08e68b715fb
+arm_base_mount:
+  x_m: -0.4
+  y_m: 0.0
+mission:
+  mission_id: corn_field_five_point_001
+  route_steps:
+  - point_id: point_1
+    role: wide_start
+    navigation_pose:
+      x: 2.8391987248080914
+      y: 0.26532571235025065
+      yaw: 0.09740590896037564
+    capture_quality:
+      samples: 30
+      position_spread_m: 0.007521537587692205
+      yaw_spread_rad: 0.00038016364706651434
+      max_position_stddev_m: 0.0891641998000815
+      max_yaw_stddev_rad: 0.025337701542494043
+      validation_bypassed: true
+  - point_id: point_2
+    role: inspect
+    navigation_pose:
+      x: 5.136572957052312
+      y: 0.44416373054534364
+      yaw: 0.0915864556701793
+    tree_id: corn_01
+    tree_offset_arm_base_m:
+    - 0.0
+    - 1.5
+    tree_base_z_m: 0.0
+    arm_spray_duration: 3.0
+    capture_quality:
+      samples: 30
+      position_spread_m: 0.011235548620737423
+      yaw_spread_rad: 0.002801622256691574
+      max_position_stddev_m: 0.09558088162206597
+      max_yaw_stddev_rad: 0.03144950779842758
+      validation_bypassed: true
+  - point_id: point_3
+    role: inspect
+    navigation_pose:
+      x: 7.438670572773367
+      y: 0.5946590674988469
+      yaw: 0.10810755199688891
+    tree_id: corn_02
+    tree_offset_arm_base_m:
+    - 0.0
+    - 1.5
+    tree_base_z_m: 0.0
+    arm_spray_duration: 3.0
+    capture_quality:
+      samples: 30
+      position_spread_m: 0.01670927174338799
+      yaw_spread_rad: 0.0030554411170519574
+      max_position_stddev_m: 0.099245583800677
+      max_yaw_stddev_rad: 0.037127903186840124
+      validation_bypassed: true
+  - point_id: point_4
+    role: wide_stop
+    navigation_pose:
+      x: 8.909974223746406
+      y: 0.6394806095234151
+      yaw: 0.05303098985667538
+    capture_quality:
+      samples: 30
+      position_spread_m: 0.008724024870853487
+      yaw_spread_rad: 0.0016424418343351233
+      max_position_stddev_m: 0.08984657618660857
+      max_yaw_stddev_rad: 0.033806269966182786
+      validation_bypassed: true
+  - point_id: point_5
+    role: finish
+    navigation_pose:
+      x: 10.245482364892599
+      y: 0.6826792066835243
+      yaw: 0.056250556007134384
+    capture_quality:
+      samples: 30
+      position_spread_m: 0.013692897274645165
+      yaw_spread_rad: 0.002330610659502408
+      max_position_stddev_m: 0.09307144071210811
+      max_yaw_stddev_rad: 0.04044902659587832
+      validation_bypassed: true
