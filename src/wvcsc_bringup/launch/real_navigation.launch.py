@@ -10,6 +10,8 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from wvcsc_bringup.path_defaults import latest_map_yaml
+
 
 def generate_launch_description():
     bringup_share = get_package_share_directory('wvcsc_bringup')
@@ -61,8 +63,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument(
             'map',
-            default_value=os.path.expanduser(
-                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml'),
+            default_value=latest_map_yaml(),
             description='Absolute map YAML used by map_server and AMCL.'),
         DeclareLaunchArgument(
             'params_file',

@@ -11,6 +11,8 @@ from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
+from wvcsc_bringup.path_defaults import latest_field_route, latest_map_yaml
+
 
 def generate_launch_description():
     bringup_share = get_package_share_directory('wvcsc_bringup')
@@ -152,9 +154,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_keyboard', default_value='false'),
         DeclareLaunchArgument(
             'mission_file',
-            default_value=os.path.expanduser(
-                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/field_route_corn.yaml')),
-        DeclareLaunchArgument('map'),
+            default_value=latest_field_route()),
+        DeclareLaunchArgument('map', default_value=latest_map_yaml()),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('control_mode', default_value='pv'),

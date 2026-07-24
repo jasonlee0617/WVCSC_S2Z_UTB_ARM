@@ -51,7 +51,8 @@ def test_navigation_matches_the_validated_single_command_stack():
     assert "'open_rviz': 'false'" in source
     assert source.count("package='rviz2'") == 1
     assert 'real_navigation.rviz' in source
-    assert 'wvcsc_bringup/maps/orchard.yaml' in source
+    assert 'latest_map_yaml' in source
+    assert 'orchard.yaml' not in source
     assert 'SetRemap' not in source
     assert 'bringup_launch.py' in source
 
@@ -333,6 +334,34 @@ def test_real_mission_uses_portable_handeye_and_c10_calibration_paths():
     assert "def _latest_handeye_calibration" in source
     assert "default_value='latest_real'" in source
     assert "c10_share, 'config', 'c10_intrinsics.yaml'" in source
+    assert 'latest_field_route' in source
+    assert 'latest_map_yaml' in source
+    assert 'wvcsc_calibration/config/' in source
+    assert 'nozzle.example.yaml' in source
+    assert '.ros/wvcsc_calibration/nozzle.yaml' not in source
+
+
+def test_real_launches_use_timestamped_defaults_not_legacy_paths():
+    for launch_name in (
+            'real_navigation.launch.py',
+            'real_field_route_validation.launch.py',
+            'real_orchestration.launch.py',
+            'real_system_mission.launch.py'):
+        source = _source(launch_name)
+        assert 'wvcsc_sites' not in source
+        assert 'maps/orchard.yaml' not in source
+    assert not (PACKAGE / 'maps' / 'orchard.yaml').exists()
+    assert not (PACKAGE / 'maps' / 'orchard.pgm').exists()
+    assert not (PACKAGE / 'config' / 'real' / 'field_route_corn.yaml').exists()
+
+
+def test_tool0_coincident_nozzle_example_is_valid():
+    data = yaml.safe_load((PACKAGE.parent / 'wvcsc_calibration' / 'config' /
+                           'nozzle.example.yaml').read_text(encoding='utf-8'))
+    assert data['parent_frame'] == 'tool0'
+    assert data['child_frame'] == 'spray_nozzle_link'
+    assert data['translation'] == {'x': 0.0, 'y': 0.0, 'z': 0.0}
+    assert data['rotation'] == {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}
 
 
 def test_nozzle_frame_and_compensated_aim_are_wired_through_real_stack():

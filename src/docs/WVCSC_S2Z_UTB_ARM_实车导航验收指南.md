@@ -53,8 +53,11 @@ bash "$(ros2 pkg prefix wvcsc_bringup)/share/wvcsc_bringup/scripts/save_corn_map
 地图文件示例：
 
 ```text
-~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml
+~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/map_YYYYMMDD_HHMMSS/orchard.yaml
 ```
+
+保存脚本会自动创建时间戳目录。导航启动时自动选择最新的
+`map_YYYYMMDD_HHMMSS/orchard.yaml`，不需要手动填写 `map:=...`。
 
 ## 3. 启动定位并初始化 AMCL
 
@@ -73,11 +76,13 @@ ros2 launch wvcsc_bringup real_navigation.launch.py
 
 ## 4. 创建并采集五点路线
 
-复制模板：
+复制模板到新的时间戳任务目录：
 
 ```bash
-ROUTE_FILE="$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/field_route_corn.yaml"
-MAP_FILE="$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
+MISSION_DIR="$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/mission_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$MISSION_DIR"
+ROUTE_FILE="$MISSION_DIR/field_route_corn.yaml"
+MAP_FILE="$(python3 -c 'from wvcsc_bringup.path_defaults import latest_map_yaml; print(latest_map_yaml())')"
 cp "$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/field_route_corn.example.yaml" "$ROUTE_FILE"
 ```
 
@@ -228,8 +233,6 @@ ros2 service call /relay/set \
 
 ```bash
 ros2 launch wvcsc_bringup real_field_route_validation.launch.py \
-  mission_file:="$ROUTE_FILE" \
-  map:="$MAP_FILE" \
   relay_config_file:="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini" \
   use_rviz:=true
 ```
@@ -297,8 +300,6 @@ wvcsc_interfaces/srv/SetRelay
 
 ```bash
 ros2 launch wvcsc_bringup real_system_mission.launch.py \
-  mission_file:="$ROUTE_FILE" \
-  map:="$MAP_FILE" \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python" \
   relay_config_file:="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini"
 ```
@@ -306,6 +307,17 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 不传 `relay_config_file` 时，使用安装包中的 `controller_pkg/config/fault.ini`。
 手眼标定默认自动选择 config 目录下最新的
 `c10_handeye_YYYYMMDD_HHMMSS.calib`。
+地图和任务文件也会自动选择各自最新的时间戳目录；只有测试旧版本时，才显式传入
+`mission_file:=...` 或 `map:=...` 覆盖默认值。
+
+喷嘴默认读取：
+
+```text
+$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/nozzle.example.yaml
+```
+
+该文件是临时 tool0 零偏置配置，`spray_nozzle_link` 与 `tool0` 平移为零、旋转为单位
+旋转，不代表真实喷嘴外参。
 
 ## 8. 五点任务行为
 

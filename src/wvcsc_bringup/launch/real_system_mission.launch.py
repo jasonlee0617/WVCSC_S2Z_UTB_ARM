@@ -25,6 +25,8 @@ from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
+from wvcsc_bringup.path_defaults import latest_field_route, latest_map_yaml
+
 
 def _include(launch_dir, filename, arguments=None):
     return IncludeLaunchDescription(
@@ -231,6 +233,10 @@ def _resolve_calibrations(context, *, launch_dir):
         SetLaunchConfiguration('aim_trim_u_px', str(trim_uv[0])),
         SetLaunchConfiguration('aim_trim_v_px', str(trim_uv[1])),
     ])
+    if Path(nozzle_path).name == 'nozzle.example.yaml':
+        initial_actions.append(LogInfo(
+            msg='[BRINGUP][WARN] temporary nozzle calibration: '
+                'spray_nozzle_link is coincident with tool0'))
 
     # --- C10 camera info ---
     camera_info = _expand_path(
@@ -346,12 +352,9 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            'mission_file', default_value=os.path.expanduser(
-                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/field_route_corn.yaml')),
+            'mission_file', default_value=latest_field_route()),
         DeclareLaunchArgument(
-            'map', default_value=os.path.join(
-                os.path.expanduser('~/WVCSC_S2Z_UTB_ARM/src'),
-                'wvcsc_bringup', 'maps', 'orchard.yaml')),
+            'map', default_value=latest_map_yaml()),
         DeclareLaunchArgument(
             'preflight_script', default_value=os.path.join(
                 bringup_share, 'scripts', 'preflight_check.py')),
@@ -373,7 +376,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'nozzle_calibration',
             default_value=os.path.expanduser(
-                '~/.ros/wvcsc_calibration/nozzle.yaml')),
+                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
+                'nozzle.example.yaml')),
         DeclareLaunchArgument(
             'relay_config_file',
             default_value=os.path.join(
