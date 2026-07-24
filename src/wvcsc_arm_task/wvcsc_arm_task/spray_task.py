@@ -263,7 +263,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'target_post_recenter_max_drift_px': 4.0,
             'target_post_recenter_max_gap_sec': 0.20,
             'target_post_recenter_min_confidence': 0.30,
-            'completion_scan_empty_limit': 2,
             'processed_iou_threshold': 0.30,
             'processed_center_distance_px': 40.0,
             'image_width': 640,
@@ -590,7 +589,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         exhausted = []
         known_targets = []
         attempts = []
-        surveyed_observation_indices = set()
         pending_attempt = None
         sprayed = 0
         saw_disease = False
@@ -598,7 +596,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         recenter_attempts = 0
         recenter_failures = 0
         alignment_attempts = 0
-        completion_scan_empty_count = 0
 
         # 阶段 3/4/5/6/7 循环：检测 - 排队 - 对准 - 喷洒 - 复检
         while True:
@@ -615,17 +612,11 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 return self._recover_failure(
                     ExecuteSpray.Result.VISION_FAILED,
                     'fruit detector did not provide frames', cancel_requested)
-            if self._observation_candidate_index >= 0:
-                surveyed_observation_indices.add(
-                    self._observation_candidate_index)
             saw_disease = saw_disease or bool(candidates)
 
             # 阶段 4: QUEUING (基于 IoU 和中心距离去重排序)
             feedback(ExecuteSpray.Feedback.QUEUING, 0.35, 'QUEUING')
             queue = self._queue(candidates, processed + exhausted)
-            if queue:
-                # 如果队列非空，重置清空计数器
-                completion_scan_empty_count = 0
             if pending_attempt is not None and queue:
                 target = min(
                     queue, key=lambda item: item.distance_to(pending_attempt.target))
@@ -665,27 +656,12 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                         'was not redetected after exhausting safe observation views; '
                         'marked unresolved')
                     pending_attempt = None
-                completion_scan_limit = int(self.get_parameter(
-                    'completion_scan_empty_limit').value)
-                if completion_scan_empty_count >= completion_scan_limit:
-                    self.get_logger().info(
-                        f'[ARM][{tree}] completion scan empty limit reached '
-                        f'({completion_scan_empty_count}/{completion_scan_limit})')
-                    break
                 for target in self._pending_targets(
                         known_targets, processed, exhausted):
                     self._mark_unresolved(target, exhausted)
                     self.get_logger().warn(
                         f'[ARM][QUEUE] target={target.target_id} disappeared '
                         'after exhausting safe observation views; marked unresolved')
-                recovered, moved = self._recover_for_completion_scan(
-                    surveyed_observation_indices, cancel_requested, feedback)
-                if recovered:
-                    completion_scan_empty_count += 1
-                    pending_attempt = None
-                    continue
-                if moved and self._aborted(cancel_requested):
-                    return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
                 self.get_logger().info(
                     f'[ARM][{tree}] DETECT queue empty '
                     f'(processed={len(processed)} exhausted={len(exhausted)}) → breaking loop')
@@ -1029,25 +1005,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 f'retrying detection at observation '
                 f'index={self._observation_candidate_index}')
         return attempt, recovered, moved
-
-    def _recover_for_completion_scan(self, surveyed_indices, cancel_requested, feedback):
-        if len(surveyed_indices) >= len(self._observation_candidates):
-            return False, False
-        current = self._observation_candidate_index
-        if (current + 1 >= len(self._observation_candidates) and
-                any(index not in surveyed_indices
-                    for index in range(len(self._observation_candidates)))):
-            self._observation_candidate_index = -1
-        self._select_target('')
-        self._set_inference_mode('idle')
-        recovered, moved = self._recover_to_next_observation(
-            cancel_requested, feedback, surveyed_indices)
-        if recovered:
-            self._reset_fruit_tracking()
-            self.get_logger().info(
-                f'[ARM][QUEUE] completion scan at unvisited observation '
-                f'index={self._observation_candidate_index}')
-        return recovered, moved
 
     def _recover_to_next_observation(self, cancel_requested, feedback, excluded_indices=None):
         moved = False

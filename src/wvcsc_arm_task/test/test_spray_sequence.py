@@ -299,7 +299,6 @@ class _ClosedLoopSequenceHarness:
             'detection_timeout_sec': 2.0,
             'confirmation_frames': 3,
             'max_alignment_attempts': 2,
-            'completion_scan_empty_limit': 0,
             'processed_iou_threshold': 0.30,
             'processed_center_distance_px': 40.0,
             'image_width': 1280,
@@ -381,12 +380,12 @@ class _ClosedLoopSequenceHarness:
         self.calls.append(f'failure:{message}')
         return ExecuteSpray.Result.VISION_FAILED, message
 
-    @staticmethod
-    def _return_to_observation():
+    def _return_to_observation(self):
+        self.calls.append('return_to_observation')
         return True
 
-    @staticmethod
-    def _return_home(_cancel_requested):
+    def _return_home(self, _cancel_requested):
+        self.calls.append('return_home')
         return True
 
     @staticmethod
@@ -414,6 +413,21 @@ def test_joint_preset_sequence_uses_recenter_then_visual_servo_before_spraying()
     assert 'recenter:target-1' in task.calls
     assert 'servo:target-1' in task.calls
     assert not any(call.startswith('fallback:') for call in task.calls)
+
+
+def test_completed_queue_returns_home_without_an_extra_observation_scan():
+    task = _ClosedLoopSequenceHarness()
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, _message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.OK
+    assert task.calls.count('spray') == 1
+    assert task.calls.count('return_to_observation') == 1
+    assert task.calls[-1] == 'return_home'
 
 
 def test_real_alignment_timeout_reconfirms_safe_pose_then_sprays():
@@ -1479,32 +1493,6 @@ def test_missing_target_searches_another_safe_view_before_unresolved():
     assert attempts == [attempt]
     assert attempt.target == target
     assert attempt.recentered_observation_indices == {0}
-    assert task._observation_candidate_index == 1
-    assert task.selected == ['']
-    assert task.modes == ['idle']
-    assert task.reset_count == 1
-
-
-class _CompletionScanHarness(_RecoveryScanHarness):
-    _recover_for_completion_scan = SprayTask._recover_for_completion_scan
-
-    def __init__(self):
-        super().__init__(candidate_index=2, candidate_count=3)
-
-    def _recover_to_next_observation(
-            self, _cancel_requested, _feedback, excluded_indices=None):
-        assert self._observation_candidate_index == -1
-        assert excluded_indices == {0, 2}
-        self._observation_candidate_index = 1
-        return True, True
-
-def test_completion_scan_wraps_once_to_an_unvisited_safe_view():
-    task = _CompletionScanHarness()
-
-    recovered, moved = task._recover_for_completion_scan(
-        {0, 2}, lambda: False, lambda *_args: None)
-
-    assert recovered and moved
     assert task._observation_candidate_index == 1
     assert task.selected == ['']
     assert task.modes == ['idle']
