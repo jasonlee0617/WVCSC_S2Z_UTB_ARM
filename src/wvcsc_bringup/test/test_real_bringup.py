@@ -77,7 +77,8 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "_include(launch_dir, 'real_sensors.launch.py'" in source
     assert "_include(launch_dir, 'real_navigation.launch.py'" in source
     assert "'start_vehicle_stack': 'false'" in source
-    assert "'real_arm.launch.py', shared_description_args" in source
+    assert "'real_arm.launch.py', {" in source
+    assert "'use_rviz': LaunchConfiguration('use_moveit_rviz')" in source
     assert "_include(launch_dir, 'real_orchestration.launch.py'" in source
     assert "'nozzle_calibration'" in source
     assert "'--require-nozzle-calibration', 'true'" in source
@@ -86,6 +87,18 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "'relay_config_file'" in source
     assert "'--relay-config', relay_config" in source
     assert "'--operation', 'field_route'" in source
+    assert "'use_nav_rviz', default_value='false'" in source
+    assert "'use_moveit_rviz', default_value='false'" in source
+
+
+def test_real_system_rviz_processes_have_separate_explicit_controls_and_names():
+    system = _source('real_system_mission.launch.py')
+    navigation = _source('real_navigation.launch.py')
+    arm = _source('real_arm.launch.py')
+
+    assert "'use_rviz': LaunchConfiguration('use_nav_rviz')" in system
+    assert "name='real_navigation_rviz'" in navigation
+    assert "name='moveit_rviz'" in arm
 
 
 def test_real_orchestration_uses_real_leaf_and_five_point_route_contract():

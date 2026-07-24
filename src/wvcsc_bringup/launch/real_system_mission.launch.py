@@ -303,7 +303,13 @@ def _resolve_calibrations(context, *, launch_dir):
             'start_vehicle_stack': 'false',
             'use_rviz': LaunchConfiguration('use_nav_rviz'),
         }),
-        _include(launch_dir, 'real_arm.launch.py', shared_description_args),
+        # Keep the two RViz applications independently controlled.  In a
+        # full mission the navigation display is useful for setting AMCL's
+        # initial pose; the MoveIt display is normally unnecessary.
+        _include(launch_dir, 'real_arm.launch.py', {
+            **shared_description_args,
+            'use_rviz': LaunchConfiguration('use_moveit_rviz'),
+        }),
         _include(launch_dir, 'real_orchestration.launch.py', {
             **shared_description_args,
             'map': LaunchConfiguration('map'),
@@ -402,7 +408,10 @@ def generate_launch_description():
             'yolo_python_executable',
             default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
-        DeclareLaunchArgument('use_nav_rviz', default_value='false'),
+        # Full missions start headless by default.  Enable only the display
+        # that is required for the current operation.
+        DeclareLaunchArgument('use_nav_rviz', default_value='true'),
+        DeclareLaunchArgument('use_moveit_rviz', default_value='false'),
         DeclareLaunchArgument('use_keyboard', default_value='false'),
         OpaqueFunction(function=partial(_resolve_calibrations, launch_dir=launch_dir)),
     ])

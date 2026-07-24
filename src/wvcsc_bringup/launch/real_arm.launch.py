@@ -221,6 +221,7 @@ def generate_launch_description():
 
     rviz = Node(
         package='rviz2', executable='rviz2',
+        name='moveit_rviz',
         arguments=['-d', os.path.join(moveit_share, 'config', 'moveit.rviz')],
         parameters=[
             robot_description,
