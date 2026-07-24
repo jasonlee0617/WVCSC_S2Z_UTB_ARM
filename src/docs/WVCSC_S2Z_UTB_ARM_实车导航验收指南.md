@@ -160,7 +160,106 @@ ros2 run wvcsc_bringup validate_field_route.py -- \
 
 基础结构、地图绑定、树距离、树 ID 和喷洒时长即使在宽松模式下仍然严格校验。
 
-## 6. 启动完整五点实车任务
+## 6. 先验证导航与继电器联调
+
+五点采集完成后，先验证真实小车导航和两个继电器的配合，不要立即启动真实机械臂、C10 和 YOLO。
+
+采点时启动的 `real_navigation.launch.py` 必须先停止。联调入口会重新启动 Nav2；同时运行两个 Nav2、AMCL 或 map server 会造成节点、TF 和导航 Action 冲突。
+
+### 6.1 单独验证继电器
+
+```bash
+ros2 service type /relay/set
+```
+
+应返回：
+
+```text
+wvcsc_interfaces/srv/SetRelay
+```
+
+首次测试必须断开喷头或关闭压力源。服务成功只表示 Modbus 写线圈成功，不代表水泵压力或药液已经喷出。
+
+测试第1路：
+
+```bash
+ros2 service call /relay/set \
+  wvcsc_interfaces/srv/SetRelay \
+  "{channel: 1, enabled: true, duration: 3.0}"
+```
+
+测试第2路：
+
+```bash
+ros2 service call /relay/set \
+  wvcsc_interfaces/srv/SetRelay \
+  "{channel: 2, enabled: true, duration: 3.0}"
+```
+
+确认继电器指示灯或触点动作，3 秒后控制器自动断开，并在 `relay_controller` 日志中看到自动断开记录。测试结束后显式关闭：
+
+```bash
+ros2 service call /relay/set \
+  wvcsc_interfaces/srv/SetRelay \
+  "{channel: 1, enabled: false, duration: 0.0}"
+ros2 service call /relay/set \
+  wvcsc_interfaces/srv/SetRelay \
+  "{channel: 2, enabled: false, duration: 0.0}"
+```
+
+### 6.2 五点导航与继电器联调
+
+启动独立联调入口：
+
+```bash
+ros2 launch wvcsc_bringup real_field_route_validation.launch.py \
+  mission_file:="$ROUTE_FILE" \
+  map:="$MAP_FILE" \
+  relay_config_file:="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini" \
+  use_rviz:=true
+```
+
+该入口启动真实底盘、LiDAR、IMU、EKF、Nav2、真实 `/relay/set` 和同一个 `field_route_manager`，但不启动真实机械臂、MoveIt、C10、YOLO 或 Visual Servo。`fake_arm_spray_action.py` 在 `point_2`、`point_3` 模拟机械臂完成，并真实驱动第2路各 3 秒。
+
+联调顺序：
+
+```text
+第1路开启 → 导航 point_1 → 继续导航 point_2
+point_2：第1路关闭 → 车辆停稳 → 模拟第2路喷洒3秒
+      → 第2路关闭 → 第1路重新开启 → 导航 point_3
+point_3：第1路关闭 → 车辆停稳 → 模拟第2路喷洒3秒
+      → 第2路关闭 → 第1路重新开启 → 导航 point_4
+point_4：第1路关闭 → 导航 point_5
+point_5：第1、2路关闭 → 车辆停稳 → 完成
+```
+
+预期日志至少包含：
+
+```text
+[FIELD_ROUTE] services ready; auto-starting mission=...
+[FIELD_ROUTE] arrived at point_1
+[FIELD_ROUTE] arrived at point_2
+[FAKE_ARM] inspect=1 ... channel=2 duration=3.0s
+[FIELD_ROUTE] arrived at point_3
+[FAKE_ARM] inspect=2 ... channel=2 duration=3.0s
+[FIELD_ROUTE] arrived at point_4
+[FIELD_ROUTE][SUCCESS] five-point route completed
+```
+
+监控命令：
+
+```bash
+ros2 topic echo /mission/status
+ros2 action list
+ros2 service type /relay/set
+```
+
+联调通过只证明导航、继电器和任务编排正确，不代表机械臂视觉喷洒已经通过。
+
+## 7. 启动完整五点实车任务
+
+联调入口验收完成后先按 `Ctrl-C` 停止
+`real_field_route_validation.launch.py`，确认第1、2路都已断开，再启动生产任务。
 
 确认继电器服务配置：
 
@@ -188,7 +287,7 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 手眼标定默认自动选择 config 目录下最新的
 `c10_handeye_YYYYMMDD_HHMMSS.calib`。
 
-## 7. 五点任务行为
+## 8. 五点任务行为
 
 ```text
 point_1:
@@ -200,10 +299,10 @@ point_2:
 
 point_3:
   第1路关闭 → 车辆停稳 → 机械臂识别病害并通过第2路喷洒3秒
-  → 继续导航
+  → 第1路重新开启 → 继续导航
 
 point_4:
-  第1路关闭 → 继续导航
+  到达后关闭第1路 → 继续导航
 
 point_5:
   第1、2路再次关闭 → 车辆停稳 → 任务完成
@@ -217,7 +316,7 @@ point_5:
 2. 请求第 1、2 路继电器断开；
 3. 发布 `FAILED` 状态并停止任务。
 
-## 8. 运行监控
+## 9. 运行监控
 
 ```bash
 ros2 topic echo /mission/status
@@ -238,7 +337,7 @@ ros2 service type /relay/set
 [FIELD_ROUTE][SUCCESS] five-point route completed
 ```
 
-## 9. 取消与急停
+## 10. 取消与急停
 
 任务取消：
 
@@ -257,7 +356,7 @@ ros2 topic pub --once /motion_control/command \
 
 现场必须保留可触达的车辆物理急停。
 
-## 10. 当前已移除的旧实机入口
+## 11. 当前已移除的旧实机入口
 
 以下入口不再安装或用于实车主流程：
 

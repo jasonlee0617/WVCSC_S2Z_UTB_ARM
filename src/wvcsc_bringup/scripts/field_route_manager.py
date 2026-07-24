@@ -205,6 +205,10 @@ class FieldRouteManager(Node):
         if not self._relay_client.service_is_ready():
             self._fail(f'{context}: /relay/set is unavailable')
             return
+        self.get_logger().info(
+            f'[FIELD_ROUTE] relay channel={int(channel)} '
+            f'enabled={bool(enabled)} duration={float(duration):.1f}s '
+            f'context={context}')
         request = SetRelay.Request()
         request.channel = int(channel)
         request.enabled = bool(enabled)
@@ -265,14 +269,14 @@ class FieldRouteManager(Node):
             return
         # Wide spray state is explicit at every transition.  This avoids
         # relying on the relay's previous latched state after a restart.
-        if self._index in (0, 2):
+        # The wide-spray relay is on while the vehicle is traversing the
+        # field.  It is re-enabled after each inspect stop and remains on
+        # while driving from point_3 to point_4; point_4 is the stop where it
+        # is turned off before the final leg.
+        if self._index in (0, 2, 3):
             self._relay(
                 self._wide_channel, True, 0.0, self._send_nav_goal,
                 f'{step.point_id}: enable wide spray')
-        elif self._index in (3, 4):
-            self._relay(
-                self._wide_channel, False, 0.0, self._send_nav_goal,
-                f'{step.point_id}: disable wide spray')
         else:
             self._send_nav_goal()
 
@@ -344,8 +348,10 @@ class FieldRouteManager(Node):
                 self._wide_channel, False, 0.0, self._begin_inspect_stop,
                 f'{step.point_id}: disable wide spray before arm motion')
         elif step.role == 'wide_stop':
-            self._index += 1
-            self._start_navigation()
+            self._relay(
+                self._wide_channel, False, 0.0,
+                self._advance_after_wide_stop,
+                f'{step.point_id}: disable wide spray before final leg')
         elif step.role == 'finish':
             self._relay(
                 self._wide_channel, False, 0.0,
@@ -441,6 +447,13 @@ class FieldRouteManager(Node):
         self._relay(
             self._arm_channel, False, 0.0, self._begin_finish_stop,
             'finish: ensure arm spray is off')
+
+    def _advance_after_wide_stop(self):
+        """Leave point_4 only after the wide-spray relay is confirmed off."""
+        if self._state in (self.COMPLETED, self.FAILED):
+            return
+        self._index += 1
+        self._start_navigation()
 
     def _begin_finish_stop(self):
         if self._state in (self.COMPLETED, self.FAILED):

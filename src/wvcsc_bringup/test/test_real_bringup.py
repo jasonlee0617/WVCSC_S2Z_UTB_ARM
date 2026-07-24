@@ -111,6 +111,32 @@ def test_real_orchestration_uses_real_leaf_and_five_point_route_contract():
     assert "'relay_config_file'" in source
 
 
+def test_route_validation_launch_uses_real_navigation_and_fake_arm_only():
+    source = _source('real_field_route_validation.launch.py')
+    fake = (PACKAGE / 'scripts' / 'fake_arm_spray_action.py').read_text(
+        encoding='utf-8')
+
+    assert 'real_navigation.launch.py' in source
+    assert "controller.launch.py" in source
+    assert "executable='fake_arm_spray_action.py'" in source
+    assert "executable='field_route_manager.py'" in source
+    for forbidden in (
+            'real_arm.launch.py', 'spray_task', 'two_stage_yolo',
+            'c10_camera.launch.py', 'visual_servo'):
+        assert forbidden not in source
+    assert "'/arm/execute_spray'" in fake
+    assert 'relay channel 2' in fake
+    assert 'self._relay_channel = 2' not in fake
+
+
+def test_field_route_reopens_wide_relay_after_each_inspect():
+    manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
+        encoding='utf-8')
+    assert 'if self._index in (0, 2, 3):' in manager
+    assert 'def _advance_after_wide_stop' in manager
+    assert 'disable wide spray before final leg' in manager
+
+
 def test_real_bringup_does_not_install_legacy_site_task_tools():
     cmake = (PACKAGE / 'CMakeLists.txt').read_text(encoding='utf-8')
     assert 'scripts/load_site_mission.py' not in cmake
