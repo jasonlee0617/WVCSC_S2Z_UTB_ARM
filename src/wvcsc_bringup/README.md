@@ -311,8 +311,12 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 3. 每次机械臂成功后重新接通第 1 路并驶向下一点；第 4 点关闭第 1 路；
 4. 第 5 点再次关闭第 1、2 路，确认停稳后结束。
 
-任一继电器、导航、机械臂、病害识别、取消或超时失败都会取消活动 Action，命令第 1、2
-路断开，并以 `FAILED` 结束。运行中查看 `/mission/status`；人工取消使用：
+继电器请求超时、拒绝或通信异常只会输出 `[FIELD_ROUTE][WARN][RELAY]`，并按原定步骤继续；
+继电器的实际吸合状态此时无法由软件保证。`OBSERVE_FAILED`、`VISION_FAILED`、车辆停稳检查
+失败，以及已收到明确结果的 Nav2 失败会跳过当前点位，记录到 `/mission/status` 的
+`skipped_targets` 后继续路线。机械臂 Action 超时、取消、锁定、回 HOME 失败、喷洒失败、
+Action 结果通信失败以及启动前 Nav2/定位未就绪仍以 `FAILED` 结束，避免与未知中的运动并发。
+运行中查看 `/mission/status`；人工取消使用：
 
 ```bash
 ros2 service call /field_route/cancel std_srvs/srv/Trigger "{}"

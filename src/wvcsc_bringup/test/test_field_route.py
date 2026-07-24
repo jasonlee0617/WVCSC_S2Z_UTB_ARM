@@ -111,7 +111,7 @@ def test_v4_default_validation_keeps_geometry_but_not_capture_quality_gates(tmp_
         )
 
 
-def test_real_field_manager_is_fail_closed_and_keeps_shared_manual_route_untouched():
+def test_real_field_manager_keeps_shared_manual_route_untouched():
     manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
         encoding='utf-8')
     orchestration = (PACKAGE / 'launch' / 'real_orchestration.launch.py').read_text(
@@ -124,11 +124,38 @@ def test_real_field_manager_is_fail_closed_and_keeps_shared_manual_route_untouch
     assert "self._relay(\n                self._wide_channel, False" in manager
     assert 'self._command_all_off()' in manager
     assert 'ExecuteSpray.Result.OK' in manager
+    assert 'ExecuteSpray.Result.INSPECTED_NO_DISEASE' in manager
+    assert 'ExecuteSpray.Result.PARTIAL_SUCCESS' in manager
+    assert 'ExecuteSpray.Result.OBSERVE_FAILED' in manager
+    assert 'ExecuteSpray.Result.VISION_FAILED' in manager
+    assert 'def _skip_current_step' in manager
+    assert 'self._skipped_targets += 1' in manager
     assert "'/field_route/cancel'" in manager
     assert "MissionStatus.ARM_SPRAYING" in manager
     assert 'VERIFYING_INSPECT_STOP' in manager
     assert 'VERIFYING_FINISH_STOP' in manager
     assert 'vehicle stop verification' in manager
+
+
+def test_field_manager_continues_after_relay_and_recoverable_step_failures():
+    manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
+        encoding='utf-8')
+    relay = manager.split('    def _relay(', 1)[1].split(
+        '    def _command_all_off(', 1)[0]
+    clients_ready = manager.split('    def _clients_ready(self):', 1)[1].split(
+        '    def _tick(self):', 1)[0]
+    docs = (PACKAGE.parent / 'docs' /
+            'WVCSC_S2Z_UTB_ARM_实车导航验收指南.md').read_text(
+                encoding='utf-8')
+
+    assert 'def _relay_failure_continue' in relay
+    assert '[FIELD_ROUTE][WARN][RELAY]' in relay
+    assert 'continuation()' in relay
+    assert 'self._fail(' not in relay
+    assert '_relay_client' not in clients_ready
+    assert 'skipped_targets' in manager
+    assert '单点失败跳过、路线继续' in docs
+    assert '[FIELD_ROUTE][WARN][RELAY]' in docs
 
 
 def test_field_manager_uses_latched_mission_status_for_yolo():

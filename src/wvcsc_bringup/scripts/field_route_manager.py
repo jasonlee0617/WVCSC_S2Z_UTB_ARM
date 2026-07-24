@@ -3,7 +3,7 @@
 
 This node intentionally does not use ``/mission/load_manual``.  That API is
 shared with simulation and the Nav2 Qt tools; the fixed field demonstration
-has a different, fail-closed route contract and therefore owns its own
+has its own per-step continuation contract and therefore owns its own
 orchestration boundary.
 """
 
@@ -41,7 +41,7 @@ from wvcsc_mission_manager.core import StopDetector, tree_hint_from_arm_base_off
 
 
 class FieldRouteManager(Node):
-    """Fail-closed sequencer for the physical five-point demonstration."""
+    """Five-point sequencer with recoverable per-point task failures."""
 
     STARTING = 'STARTING'
     NAVIGATING = 'NAVIGATING'
@@ -77,6 +77,7 @@ class FieldRouteManager(Node):
         self._state = self.STARTING
         self._index = 0
         self._completed_inspects = 0
+        self._skipped_targets = 0
         self._last_error = ''
         self._ready_logged = False
         self._nav_goal = None
@@ -87,6 +88,10 @@ class FieldRouteManager(Node):
         self._arm_deadline = 0.0
         self._relay_deadline = 0.0
         self._relay_request_id = 0
+        self._relay_continuation = None
+        self._relay_context = ''
+        self._relay_channel_pending = 0
+        self._relay_enabled_pending = False
         self._initial_pose_received = False
         self._nav_stack_active = False
         self._nav_state_request_active = False
@@ -306,15 +311,13 @@ class FieldRouteManager(Node):
         return (
             self._nav_client.server_is_ready()
             and self._arm_client.server_is_ready()
-            and self._relay_client.service_is_ready()
         )
 
     def _tick(self):
         now = time.monotonic()
         if self._relay_deadline and now >= self._relay_deadline:
-            self._relay_deadline = 0.0
-            self._relay_request_id += 1
-            self._fail('relay service response timed out')
+            self._relay_failure_continue(
+                self._relay_request_id, 'relay service response timed out')
             return
         if (self._state in (self.NAVIGATING, self.WAITING_FOR_NAV_MOTION)
                 and self._nav_active
@@ -341,8 +344,8 @@ class FieldRouteManager(Node):
             if not self._clients_ready():
                 if not self._ready_logged:
                     self.get_logger().info(
-                        '[FIELD_ROUTE] waiting for /navigate_to_pose, '
-                        '/arm/execute_spray and /relay/set')
+                        '[FIELD_ROUTE] waiting for /navigate_to_pose and '
+                        '/arm/execute_spray; relay failures are non-blocking')
                     self._ready_logged = True
                 return
             self.get_logger().info(
@@ -383,51 +386,91 @@ class FieldRouteManager(Node):
             else:
                 self._complete()
         elif stop_state in (StopDetector.STALE, StopDetector.TIMEOUT):
-            self._fail(f'vehicle stop verification {stop_state}')
+            self._skip_current_step(
+                f'vehicle stop verification {stop_state}')
 
     def _relay(self, channel, enabled, duration, continuation, context):
         if self._state in (self.COMPLETED, self.FAILED):
             return
+        channel = int(channel)
+        enabled = bool(enabled)
         if not self._relay_client.service_is_ready():
-            self._fail(f'{context}: /relay/set is unavailable')
+            self._relay_warning(
+                context, channel, enabled, '/relay/set is unavailable')
+            continuation()
             return
         self.get_logger().info(
-            f'[FIELD_ROUTE] relay channel={int(channel)} '
-            f'enabled={bool(enabled)} duration={float(duration):.1f}s '
+            f'[FIELD_ROUTE] relay channel={channel} '
+            f'enabled={enabled} duration={float(duration):.1f}s '
             f'context={context}')
         request = SetRelay.Request()
-        request.channel = int(channel)
-        request.enabled = bool(enabled)
+        request.channel = channel
+        request.enabled = enabled
         request.duration = float(duration)
         self._relay_request_id += 1
         request_id = self._relay_request_id
+        self._relay_continuation = continuation
+        self._relay_context = str(context)
+        self._relay_channel_pending = channel
+        self._relay_enabled_pending = enabled
         self._relay_deadline = time.monotonic() + float(
             self.get_parameter('relay_service_timeout_sec').value)
         try:
             future = self._relay_client.call_async(request)
         except Exception as error:
-            self._relay_deadline = 0.0
-            self._fail(f'{context}: relay request failed: {error}')
+            self._relay_failure_continue(
+                request_id, f'relay request failed: {error}')
             return
 
         def done(result_future):
             if request_id != self._relay_request_id:
                 return
-            self._relay_deadline = 0.0
             if self._state in (self.COMPLETED, self.FAILED):
+                self._clear_relay_request()
                 return
             try:
                 response = result_future.result()
             except Exception as error:
-                self._fail(f'{context}: relay transport failed: {error}')
+                self._relay_failure_continue(
+                    request_id, f'relay transport failed: {error}')
                 return
             if response is None or not response.success:
                 message = '' if response is None else response.message
-                self._fail(f'{context}: relay rejected request: {message}')
+                self._relay_failure_continue(
+                    request_id, f'relay rejected request: {message}')
                 return
+            self._clear_relay_request()
             continuation()
 
         future.add_done_callback(done)
+
+    def _clear_relay_request(self):
+        self._relay_deadline = 0.0
+        self._relay_continuation = None
+        self._relay_context = ''
+        self._relay_channel_pending = 0
+        self._relay_enabled_pending = False
+
+    def _relay_warning(self, context, channel, enabled, reason):
+        self.get_logger().warning(
+            '[FIELD_ROUTE][WARN][RELAY] '
+            f'channel={int(channel)} enabled={bool(enabled)} '
+            f'context={context}: {reason}; continuing')
+
+    def _relay_failure_continue(self, request_id, reason):
+        """Log a relay failure and run the already scheduled route continuation."""
+        if request_id != self._relay_request_id:
+            return
+        continuation = self._relay_continuation
+        context = self._relay_context
+        channel = self._relay_channel_pending
+        enabled = self._relay_enabled_pending
+        self._clear_relay_request()
+        # Make a late response to the timed-out request harmless.
+        self._relay_request_id += 1
+        self._relay_warning(context, channel, enabled, reason)
+        if continuation is not None and self._state not in (self.COMPLETED, self.FAILED):
+            continuation()
 
     def _command_all_off(self):
         """Best-effort emergency off; it must not depend on another response."""
@@ -481,7 +524,9 @@ class FieldRouteManager(Node):
         try:
             future = self._nav_client.send_goal_async(goal)
         except Exception as error:
-            self._fail(f'{step.point_id}: Nav2 goal send failed: {error}')
+            self._nav_active = False
+            self._nav_deadline = 0.0
+            self._skip_current_step(f'{step.point_id}: Nav2 goal send failed: {error}')
             return
 
         def accepted(done_future):
@@ -495,7 +540,9 @@ class FieldRouteManager(Node):
                     handle.cancel_goal_async()
                 return
             if handle is None or not handle.accepted:
-                self._fail(f'{step.point_id}: Nav2 rejected goal')
+                self._nav_active = False
+                self._nav_deadline = 0.0
+                self._skip_current_step(f'{step.point_id}: Nav2 rejected goal')
                 return
             self._nav_goal = handle
             if self._awaiting_wide_motion:
@@ -522,11 +569,11 @@ class FieldRouteManager(Node):
             self._fail(f'Nav2 result transport failed: {error}')
             return
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
-            self._fail(
+            self._skip_current_step(
                 f'{step.point_id if step else "unknown"}: Nav2 failed with status={wrapped.status}')
             return
         if self._awaiting_wide_motion:
-            self._fail(
+            self._skip_current_step(
                 f'{step.point_id if step else "unknown"}: Nav2 completed before '
                 'vehicle motion confirmation; wide spray remained off')
             return
@@ -605,7 +652,9 @@ class FieldRouteManager(Node):
         try:
             future = self._arm_client.send_goal_async(goal)
         except Exception as error:
-            self._fail(f'{step.point_id}: arm goal send failed: {error}')
+            self._arm_active = False
+            self._arm_deadline = 0.0
+            self._skip_current_step(f'{step.point_id}: arm goal send failed: {error}')
             return
 
         def accepted(done_future):
@@ -619,7 +668,9 @@ class FieldRouteManager(Node):
                     handle.cancel_goal_async()
                 return
             if handle is None or not handle.accepted:
-                self._fail(f'{step.point_id}: arm rejected spray goal')
+                self._arm_active = False
+                self._arm_deadline = 0.0
+                self._skip_current_step(f'{step.point_id}: arm rejected spray goal')
                 return
             self._arm_goal = handle
             handle.get_result_async().add_done_callback(self._on_arm_result)
@@ -639,16 +690,65 @@ class FieldRouteManager(Node):
             self._fail(f'arm result transport failed: {error}')
             return
         result = wrapped.result
-        if (wrapped.status != GoalStatus.STATUS_SUCCEEDED or result is None
-                or not result.success or result.error_code != ExecuteSpray.Result.OK):
-            code = 'none' if result is None else str(result.error_code)
-            message = '' if result is None else result.message
+        if result is None:
+            self._fail(
+                f'{step.point_id if step else "unknown"}: arm spray failed '
+                f'status={wrapped.status} code=none')
+            return
+        code = result.error_code
+        message = result.message
+        if code in (
+                ExecuteSpray.Result.OBSERVE_FAILED,
+                ExecuteSpray.Result.VISION_FAILED):
+            self._skip_current_step(
+                f'{step.point_id if step else "unknown"}: arm spray skipped '
+                f'status={wrapped.status} code={code}: {message}')
+            return
+        if (wrapped.status != GoalStatus.STATUS_SUCCEEDED or not result.success
+                or code not in (
+                    ExecuteSpray.Result.OK,
+                    ExecuteSpray.Result.INSPECTED_NO_DISEASE,
+                    ExecuteSpray.Result.PARTIAL_SUCCESS)):
             self._fail(
                 f'{step.point_id if step else "unknown"}: arm spray failed '
                 f'status={wrapped.status} code={code}: {message}')
             return
         self._completed_inspects += 1
         self._index += 1
+        self._state = self.NAVIGATING
+        self._start_navigation()
+
+    def _skip_current_step(self, reason):
+        """Record a completed-but-unsuccessful step and continue the route."""
+        if self._state in (self.COMPLETED, self.FAILED):
+            return
+        step = self._step
+        if step is None:
+            self._fail(f'cannot skip route step: {reason}')
+            return
+        self._stop_detector.stop()
+        self._last_error = str(reason)
+        self._skipped_targets += 1
+        self.get_logger().warning(
+            f'[FIELD_ROUTE][SKIPPED] {step.point_id}: {reason}; continuing')
+        self._index += 1
+        if step.role == 'wide_stop':
+            self._relay(
+                self._wide_channel, False, 0.0,
+                self._advance_after_skipped_wide_stop,
+                f'{step.point_id}: best-effort disable wide spray after skipped point')
+            return
+        if self._index >= len(self._steps):
+            self._complete()
+            return
+        self._state = self.NAVIGATING
+        self._start_navigation()
+
+    def _advance_after_skipped_wide_stop(self):
+        self._wide_relay_enabled = False
+        if self._index >= len(self._steps):
+            self._complete()
+            return
         self._state = self.NAVIGATING
         self._start_navigation()
 
@@ -691,7 +791,7 @@ class FieldRouteManager(Node):
         self._last_error = str(reason)
         self._stop_detector.stop()
         self._relay_request_id += 1
-        self._relay_deadline = 0.0
+        self._clear_relay_request()
         if self._nav_goal is not None:
             self._nav_goal.cancel_goal_async()
         if self._arm_goal is not None:
@@ -716,7 +816,7 @@ class FieldRouteManager(Node):
         message.current_index = min(self._index, len(self._steps))
         message.total_targets = len(self._steps)
         message.completed_targets = self._completed_inspects
-        message.skipped_targets = 0
+        message.skipped_targets = self._skipped_targets
         message.last_error = self._last_error
         message.nav_goal_active = self._nav_active
         message.arm_goal_active = self._arm_active
