@@ -16,6 +16,11 @@ ros2 launch controller_pkg controller.launch.py
 节点默认读取 `config/fault.ini`，通过 Modbus RTU 控制继电器。
 服务请求中可以动态指定需要操作的通道。
 
+当前小车默认配置位于 `controller_pkg/config/fault.ini`，使用已验证的
+`/dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0`、38400 波特率和从站地址 1。
+开发机可使用 `controller_pkg/config/fault_dev.ini`，或通过
+`ros2 launch controller_pkg controller.launch.py config_file:=...` 显式指定。
+
 ### 测试
 调用服务：
 

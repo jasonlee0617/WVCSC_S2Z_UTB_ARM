@@ -36,7 +36,7 @@ def _launch(context, *, launch_dir):
     controller_share = get_package_share_directory('controller_pkg')
     real_config = os.path.join(bringup_share, 'config', 'real')
     helpers = _real_mission_helpers(launch_dir)
-    handeye_path = helpers._expand_path(
+    handeye_path = helpers._resolve_handeye_calibration(
         LaunchConfiguration('handeye_calibration').perform(context))
     c10_xyz, c10_rpy = helpers._load_calibrated_mount(handeye_path)
     # This standalone test intentionally treats tool0 as the spray centerline.
@@ -182,18 +182,17 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'c10_device',
-            default_value='/dev/video0'),
+            default_value='/dev/video4'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value='package://wvcsc_c10_camera/config/c10_intrinsics.yaml'),
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM1'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('control_mode', default_value='pv'),
         DeclareLaunchArgument('default_speed', default_value='0.5'),
         DeclareLaunchArgument(
             'handeye_calibration',
-            default_value=(
-                '~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib')),
+            default_value='latest_real'),
         DeclareLaunchArgument(
             'relay_config_file',
             default_value=os.path.join(

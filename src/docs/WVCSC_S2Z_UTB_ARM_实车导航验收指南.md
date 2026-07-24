@@ -32,8 +32,8 @@ source ~/WVCSC_S2Z_UTB_ARM/install/setup.bash
 机械臂串口和继电器串口是独立设备：
 
 ```text
-serial_port       → Alicia-M，默认 /dev/ttyACM0
-fault.ini PortName → Modbus 继电器，默认 /dev/ttyUSB0
+serial_port       → Alicia-M，默认 /dev/ttyACM1
+fault.ini PortName → Modbus 继电器，默认 /dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0
 ```
 
 现场建议使用 `/dev/serial/by-id/` 的稳定设备名。
@@ -181,10 +181,12 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
   mission_file:="$ROUTE_FILE" \
   map:="$MAP_FILE" \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python" \
-  relay_config_file:="${HOME}/relay_fault.ini"
+  relay_config_file:="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini"
 ```
 
 不传 `relay_config_file` 时，使用安装包中的 `controller_pkg/config/fault.ini`。
+手眼标定默认自动选择 config 目录下最新的
+`c10_handeye_YYYYMMDD_HHMMSS.calib`。
 
 ## 7. 五点任务行为
 

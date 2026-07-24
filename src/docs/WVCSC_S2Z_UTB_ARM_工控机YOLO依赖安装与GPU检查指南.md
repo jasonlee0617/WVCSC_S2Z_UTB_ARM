@@ -196,7 +196,11 @@ source "$HOME/venvs/wvcsc_yolo_ros/bin/activate"
 安装项目当前固定版本：
 
 ```bash
-pip install numpy==1.26.4 opencv-python==4.11.0.86 ultralytics==8.3.217
+"$HOME/venvs/wvcsc_yolo_ros/bin/python" -m pip install \
+  numpy==1.26.4 \
+  opencv-python==4.11.0.86 \
+  ultralytics==8.3.217 \
+  "typing_extensions>=4.12,<5"
 ```
 
 也可以参考 `wvcsc_rgb_vision/requirements-yolo-runtime.txt`，但如果里面的 CUDA wheel 与工控机驱动不匹配，不要强行安装该文件。先按第 5 节安装匹配的 `torch/torchvision`，再安装上面的运行依赖。
@@ -219,8 +223,13 @@ print("torch:", torch.__version__)
 print("torchvision:", torchvision.__version__)
 print("ultralytics:", ultralytics.__version__)
 print("cuda available:", torch.cuda.is_available())
+print("typing_extensions:", __import__("typing_extensions").__file__)
+print("has deprecated:", hasattr(__import__("typing_extensions"), "deprecated"))
 PY
 ```
+
+注意：必须使用目标虚拟环境的 `python -m pip`。不要使用系统 `pip`，否则
+`typing_extensions` 可能仍从 `/usr/lib/python3/dist-packages` 加载旧版本。
 
 ## 7. 验证 ROS 包能在 venv 中导入
 
@@ -240,9 +249,12 @@ import vision_msgs.msg
 import wvcsc_interfaces.msg
 import torch
 import ultralytics
+import typing_extensions
 print("ROS + YOLO runtime ok")
 print("torch:", torch.__version__)
 print("cuda:", torch.cuda.is_available())
+print("typing_extensions:", typing_extensions.__file__)
+print("has deprecated:", hasattr(typing_extensions, "deprecated"))
 PY
 ```
 
@@ -364,7 +376,8 @@ ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
 ```
 
 确认第 2 路实际吸合和断开后，再执行 `arm_spray_once`。如果继电器串口不是默认的
-`/dev/ttyUSB0`，复制并修改 `controller_pkg/resource/fault.ini`，然后通过
+`/dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0`，复制并修改
+`controller_pkg/config/fault.ini`，然后通过
 `relay_config_file:=/绝对路径/relay_fault.ini` 传给 launch。
 
 检查：
@@ -422,6 +435,42 @@ mkdir -p "$YOLO_CONFIG_DIR"
 ```
 
 ### 11.4 `torchvision` 与 `torch` 版本不匹配
+
+### 11.5 `ImportError: cannot import name 'deprecated' from typing_extensions`
+
+这表示 YOLO 使用的 Python 虚拟环境加载了系统旧版 `typing_extensions`。
+这不是 C10 相机、ROS 话题或 YOLO 权重问题。不要修改相机参数，也不要直接
+使用系统 `pip`；使用与 launch 完全相同的解释器修复：
+
+```bash
+VENV="$HOME/venvs/wvcsc_yolo_ros"
+
+"$VENV/bin/python" -m pip install \
+  --upgrade \
+  --force-reinstall \
+  "typing_extensions>=4.12,<5"
+
+PYTHONNOUSERSITE=1 "$VENV/bin/python" - <<'PY'
+import typing_extensions
+print("typing_extensions:", typing_extensions.__file__)
+print("has deprecated:", hasattr(typing_extensions, "deprecated"))
+PY
+```
+
+验收时 `typing_extensions.__file__` 应位于：
+
+```text
+~/venvs/wvcsc_yolo_ros/lib/python3.10/site-packages/
+```
+
+不能继续指向：
+
+```text
+/usr/lib/python3/dist-packages/typing_extensions.py
+```
+
+`--system-site-packages` 仍需保留，因为 `rclpy` 和 `cv_bridge` 来自 ROS
+系统环境；只需在 venv 中覆盖这个不兼容的 Python 包。
 
 现象通常是导入 `torchvision` 时报错。处理方式：
 

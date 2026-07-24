@@ -45,7 +45,11 @@ from wvcsc_arm_task.observation import (
 )
 
 from .alicia_sample_geometry import fixed_joint_samples
-from .calibration_io import write_calibration, write_calibration_outputs
+from .calibration_io import (
+    calibration_config_dir,
+    timestamped_calibration_paths,
+    write_calibration_outputs,
+)
 from .calibration_quality import (
     MarkerObservation,
     calibration_consensus,
@@ -264,11 +268,9 @@ class AutoCalibrationCollector(Node):
             'fixed_marker_refinement_max_iterations': 25,
             'easy_service_timeout_sec': 10.0,
             'startup_service_timeout_sec': 20.0,
-            'output_file': (
-                '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
-                'c10_handeye.yaml'),
-            'easy_handeye_output_file': (
-                '~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib'),
+            'calibration_output_dir': str(calibration_config_dir()),
+            'calibration_file_prefix': 'c10_handeye',
+            'calibration_simulation': False,
             'calibration_surface_enabled': False,
             'calibration_surface_id': 'calibration_surface',
             'calibration_surface_frame': 'alicia_base_link',
@@ -1080,15 +1082,17 @@ class AutoCalibrationCollector(Node):
         sample_save = self._call('save_samples', SaveSamples.Request())
         if not sample_save.success:
             raise RuntimeError('easy_handeye2 sample save failed')
-        output_path = str(self.get_parameter('output_file').value)
-        deployment_path = str(
-            self.get_parameter('easy_handeye_output_file').value).strip()
-        if deployment_path:
-            deployment_output, output = write_calibration_outputs(
-                handeye, deployment_path, output_path)
-        else:
-            deployment_output = None
-            output = write_calibration(handeye, output_path)
+        output_dir = str(self.get_parameter('calibration_output_dir').value)
+        simulation = bool(self.get_parameter('calibration_simulation').value)
+        prefix = str(self.get_parameter('calibration_file_prefix').value).strip()
+        expected_prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
+        if prefix != expected_prefix:
+            raise RuntimeError(
+                f'calibration_file_prefix must be {expected_prefix!r}')
+        deployment_path, output_path = timestamped_calibration_paths(
+            output_dir, simulation=simulation)
+        deployment_output, output = write_calibration_outputs(
+            handeye, deployment_path, output_path)
         self.get_logger().info(
             '[CALIBRATION] SUCCESS '
             f'algorithm={selected_algorithm} samples={len(samples)} '

@@ -40,6 +40,11 @@ class HandeyeCalibrationParametersProvider:
 
 def load_calibration(name) -> HandeyeCalibration:
     filepath = filepath_for_calibration(name)
+    return load_calibration_file(filepath)
+
+
+def load_calibration_file(filepath) -> HandeyeCalibration:
+    """Load a native easy_handeye2 calibration from an explicit path."""
     with open(filepath) as f:
         m = yaml.full_load(f.read())
     ret = HandeyeCalibration()

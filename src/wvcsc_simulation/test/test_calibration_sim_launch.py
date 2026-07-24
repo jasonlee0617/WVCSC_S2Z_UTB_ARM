@@ -200,7 +200,10 @@ def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
     assert 'minimum_corner_margin_px' not in config
     assert 'use_marker_position_prior_for_candidate_generation' not in config
     assert 'maximum_center_error_px' not in config
-    assert config['output_file'].startswith('$HOME/WVCSC_S2Z_UTB_ARM/src/')
+    assert config['calibration_output_dir'].startswith(
+        '$HOME/WVCSC_S2Z_UTB_ARM/src/')
+    assert config['calibration_file_prefix'] == 'c10_handeye_sim'
+    assert config['calibration_simulation'] is True
     assert config['marker_size_m'] == pytest.approx(0.070)
     assert config['minimum_samples'] == 14
     assert config['minimum_solution_samples'] == 14

@@ -1,17 +1,60 @@
 """Validate and export easy_handeye2 output to the WVCSC deployment file."""
 
 import argparse
+from datetime import datetime
 import math
 import os
 from pathlib import Path
+import re
 import tempfile
 
 import yaml
 
 
+_TIMESTAMPED_CALIBRATION = re.compile(
+    r'^c10_handeye(?P<sim>_sim)?_(?P<stamp>\d{8}_\d{6})\.(?P<kind>calib|yaml)$')
+
+
 def expanded_path(path):
     """Expand the portable ``$HOME`` and ``~`` forms used by calibration YAML."""
     return Path(os.path.expanduser(os.path.expandvars(os.fspath(path))))
+
+
+def calibration_config_dir():
+    """Return the source-workspace calibration directory used at runtime."""
+    return (Path.home() / 'WVCSC_S2Z_UTB_ARM' / 'src' /
+            'wvcsc_calibration' / 'config')
+
+
+def timestamped_calibration_paths(output_dir=None, *, simulation=False,
+                                  timestamp=None):
+    """Return matching native and normalized paths for one calibration run."""
+    directory = expanded_path(output_dir or calibration_config_dir())
+    stamp = timestamp or datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')
+    if not re.fullmatch(r'\d{8}_\d{6}', stamp):
+        raise ValueError('calibration timestamp must be YYYYMMDD_HHMMSS')
+    prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
+    stem = f'{prefix}_{stamp}'
+    return directory / f'{stem}.calib', directory / f'{stem}.yaml'
+
+
+def latest_calibration_path(directory=None, *, simulation=False, kind='calib'):
+    """Select the newest timestamped real or simulation calibration file."""
+    if kind not in ('calib', 'yaml'):
+        raise ValueError("calibration kind must be 'calib' or 'yaml'")
+    directory = expanded_path(directory or calibration_config_dir())
+    prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
+    candidates = []
+    for path in directory.glob(f'{prefix}_*.{kind}'):
+        match = _TIMESTAMPED_CALIBRATION.fullmatch(path.name)
+        if match is None or bool(match.group('sim')) != bool(simulation):
+            continue
+        candidates.append((match.group('stamp'), path.name, path))
+    if not candidates:
+        role = 'simulation' if simulation else 'real'
+        raise FileNotFoundError(
+            f'no timestamped {role} C10 hand-eye {kind} file in {directory}')
+    return max(candidates, key=lambda item: (item[0], item[1]))[2]
 
 
 def _finite(mapping, keys):
@@ -96,7 +139,12 @@ def normalized_calibration(data):
 
 
 def export_calibration(input_path, output_path):
-    source = expanded_path(input_path)
+    if os.fspath(input_path) in ('latest', 'latest_real'):
+        source = latest_calibration_path(simulation=False, kind='calib')
+    elif os.fspath(input_path) == 'latest_sim':
+        source = latest_calibration_path(simulation=True, kind='calib')
+    else:
+        source = expanded_path(input_path)
     with source.open(encoding='utf-8') as stream:
         normalized = normalized_calibration(yaml.safe_load(stream))
     return _write_normalized_calibration(normalized, output_path)
@@ -222,12 +270,11 @@ def _write_yaml_payloads_atomically(payloads):
 def main():
     parser = argparse.ArgumentParser(
         description='Validate and export easy_handeye2 C10 calibration.')
-    parser.add_argument(
-        '--input', default='~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib')
-    parser.add_argument(
-        '--output', default=(
-            '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
-            'c10_handeye.yaml'))
+    parser.add_argument('--input', default='latest_real')
+    parser.add_argument('--output', default='')
     args = parser.parse_args()
-    output = export_calibration(args.input, args.output)
+    output_path = args.output
+    if not output_path:
+        _native, output_path = timestamped_calibration_paths()
+    output = export_calibration(args.input, output_path)
     print(f'Validated WVCSC hand-eye calibration written to {output}')

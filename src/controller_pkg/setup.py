@@ -15,7 +15,7 @@ setup(
             ['resource/' + package_name],
         ),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/config', ['resource/fault.ini']),
+        ('share/' + package_name + '/config', glob('config/*.ini')),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],

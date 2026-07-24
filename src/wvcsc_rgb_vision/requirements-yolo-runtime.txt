@@ -5,6 +5,7 @@ torchvision==0.28.0+cu130
 numpy==1.26.4
 opencv-python==4.11.0.86
 ultralytics==8.3.217
+typing_extensions>=4.12,<5
 
 
 # 实验室电脑：
@@ -21,7 +22,8 @@ ultralytics==8.3.217
 #
 # ── 部署方式：隔离虚拟环境（推荐，与本机仿真环境一致） ──
 #   python3 -m venv --system-site-packages ~/venvs/wvcsc_yolo_ros
-#   ~/venvs/wvcsc_yolo_ros/bin/pip install -r requirements-yolo-runtime.txt
+#   ~/venvs/wvcsc_yolo_ros/bin/python -m pip install -r requirements-yolo-runtime.txt
+#   typing_extensions 必须安装在 venv 内，避免系统旧版本缺少 `deprecated`。
 #
 #   --system-site-packages 使 venv 能访问 ROS2 系统包：
 #     /opt/ros/humble/lib/python3.10/site-packages/ (cv_bridge, rclpy, ...)

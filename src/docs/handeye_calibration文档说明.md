@@ -53,10 +53,11 @@ ros2 launch wvcsc_simulation calibration_sim.launch.py
 
 采集器先根据 marker 先验生成已验证可达的初始 anchor 候选，再依次执行碰撞 IK、Jacobian 条件数、关节余量和 OMPL 门控。它不使用固定关节角作为初始观察位，也不会降低安全阈值来换取可见性。
 
-仿真默认输出：
+仿真默认输出为 config 目录下同一时间戳的一对文件：
 
 ```text
-$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye_sim.yaml
+c10_handeye_sim_YYYYMMDD_HHMMSS.calib
+c10_handeye_sim_YYYYMMDD_HHMMSS.yaml
 ```
 
 调试画面：
@@ -105,7 +106,7 @@ OpenCV 的 Park/Horaud/Tsai-Lenz 闭式解首先提供确定性初值；随后�
 
 ```bash
 ros2 launch wvcsc_calibration auto_handeye.launch.py \
-  video_device:=/dev/video0 serial_port:=/dev/ttyACM0
+  video_device:=/dev/video4 serial_port:=/dev/ttyACM1
 ```
 
 该入口只编排 C10、Alicia-M、MoveIt、ArUco、marker TF、easy_handeye2 与
@@ -116,14 +117,15 @@ ros2 launch wvcsc_calibration auto_handeye.launch.py \
 ros2 run wvcsc_arm_task motion_control_keyboard
 ```
 
-仅当采样、PnP 质量、多算法共识和固定标定码残差均通过后，实机默认原子写入两份同一变换：
+仅当采样、PnP 质量、多算法共识和固定标定码残差均通过后，实机默认在 source config
+目录原子写入两份同一变换。文件名使用同一时间戳：
 
 ```text
-~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib
-$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml
+c10_handeye_YYYYMMDD_HHMMSS.calib
+c10_handeye_YYYYMMDD_HHMMSS.yaml
 ```
 
-第一份供实机启动入口读取，第二份供 WVCSC 部署配置读取。任一质量门控或
+实机启动入口自动选择最新的 `.calib` 文件，第二份为 WVCSC 归一化部署配置。任一质量门控或
 写入预处理失败都不会覆盖已有标定。输出文件可纳入版本控制，但只应提交经过现场复测确认的安装外参。
 
 ## 4. 速度、加速度与 marker 位置调整

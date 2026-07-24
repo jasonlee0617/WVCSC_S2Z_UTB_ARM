@@ -2,7 +2,7 @@ import pathlib
 
 import numpy as np
 from ament_index_python import get_resource
-from easy_handeye2.handeye_calibration import load_calibration
+from easy_handeye2.handeye_calibration import load_calibration, load_calibration_file
 from python_qt_binding import loadUi
 from python_qt_binding.QtCore import QTimer
 from rclpy.node import ParameterDescriptor, ParameterType
@@ -29,7 +29,10 @@ class RqtHandeyeEvaluatorWidget(QWidget):
         # self.parameters = self.parameters_provider.read()
         self._node.declare_parameter('name', descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING))
         name = self._node.get_parameter('name').get_parameter_value().string_value
-        self.calibration = load_calibration(name)
+        self._node.declare_parameter('calibration_file', '')
+        calibration_file = self._node.get_parameter('calibration_file').value
+        self.calibration = (load_calibration_file(calibration_file)
+                            if calibration_file else load_calibration(name))
         self.parameters = self.calibration.parameters
 
         # Process standalone plugin command-line arguments

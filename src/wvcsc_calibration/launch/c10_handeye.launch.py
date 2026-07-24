@@ -18,8 +18,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'video_device',
-            default_value='/dev/video0'),
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
+            default_value='/dev/video4'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM1'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(

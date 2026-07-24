@@ -36,8 +36,10 @@ def test_automatic_entry_uses_only_the_c10_calibration_frame_contract():
 
 def test_real_collector_requires_operator_confirmation_and_exports_both_paths():
     assert 'auto_start: false' in REAL_CONFIG
-    assert 'easy_handeye_output_file: ~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib' \
-        in REAL_CONFIG
+    assert 'calibration_output_dir:' in REAL_CONFIG
+    assert 'calibration_file_prefix: c10_handeye' in REAL_CONFIG
+    assert 'calibration_simulation: false' in REAL_CONFIG
+    assert 'easy_handeye2/calibrations' not in REAL_CONFIG
     assert 'write_calibration_outputs(' in COLLECTOR_SOURCE
     assert 'write_calibration_outputs(' in COLLECTOR_SOURCE.split(
         "self._verify_simulation_ground_truth(handeye)", 1)[1]

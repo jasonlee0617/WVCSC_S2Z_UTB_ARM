@@ -146,6 +146,24 @@ ros2 run wvcsc_bringup validate_field_route -- --file "$ROUTE_FILE" --map "$MAP_
 不要把图中约 8 m、2 m 的示意值直接写成导航坐标；采点工具会写入地图哈希、五点
 位姿和每点质量记录。地图改变后，旧路线将被前置检查拒绝。
 
+## 硬件默认值与标定文件
+
+当前代码默认按小车工控机配置：
+
+| 项目 | 开发机常用覆盖值 | 小车默认值 |
+| --- | --- | --- |
+| C10 V4L2 | `/dev/video0` | `/dev/video4` |
+| Alicia-M | `/dev/ttyACM0` | `/dev/ttyACM1` |
+| 继电器配置 | `fault_dev.ini` | `controller_pkg/config/fault.ini` |
+| 实机手眼标定 | config 下最新 `c10_handeye_*.calib` | 同左 |
+| 仿真手眼标定 | config 下最新 `c10_handeye_sim_*.calib` | 不使用实机文件 |
+
+开发机设备不同时间，通过 `c10_device:=...`、`serial_port:=...` 和
+`relay_config_file:=...` 覆盖；C10 是视频设备路径，不是串口。运行前可用
+`v4l2-ctl --list-devices`、`ls -l /dev/serial/by-id /dev/serial/by-path` 核对设备。
+实机和仿真标定结果均写入 `$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config`，
+每次生成的 `.calib` 与 `.yaml` 使用同一 `YYYYMMDD_HHMMSS` 后缀，启动时选择最新匹配文件。
+
 ## 4. 机械臂单独喷洒测试
 
 此模式用于现场单独验证机械臂喷洒闭环：C10、真实 YOLO、MoveIt、Servo、
@@ -157,9 +175,10 @@ VisualServo、SprayTask 和喷洒 Action。它不启动底盘、LiDAR、IMU、EK
 - `yolov8s_real.pt`: `detect`, `{0: tree}`；
 - `yolov8s_seg_real.pt`: `segment`, `{0: disease_leaf}`。
 
-启动前还会读取实机标定：
-
-- `~/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib`（支持 easy_handeye2 原始格式）；
+启动前还会读取实机标定：默认从
+`$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config` 自动选择最新的
+`c10_handeye_YYYYMMDD_HHMMSS.calib`；也可通过
+`handeye_calibration:=/绝对路径/文件.calib` 显式指定。
 - 喷洒测试暂时将 `tool0` 作为喷洒中心线，喷嘴挂载为零位姿，不读取喷嘴标定文件。
 
 启动机械臂单独测试栈：
@@ -218,9 +237,10 @@ ros2 topic echo /spray/simulated_active
 
 当前实机入口默认通过 `controller_pkg` 的 `/relay/set` 控制第 2 路虫害喷洒
 继电器。实机 `spray_actuator_real.yaml` 固定使用 `spray_mode: service`，不会退回
-仿真的 `timer` 模式。启动前必须确认 `controller_pkg/resource/fault.ini` 的继电器
-串口、波特率和从站地址与实际设备一致；这里的继电器串口与上面的机械臂
-`serial_port` 是两条独立串口，不能因为机械臂使用 `/dev/ttyACM0` 就把继电器也改成
+仿真的 `timer` 模式。启动前必须确认 `controller_pkg/config/fault.ini` 的继电器
+串口、波特率和从站地址与实际设备一致；小车默认继电器路径为
+`/dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0`。这里的继电器串口与上面的机械臂
+`serial_port` 是两条独立串口，不能因为机械臂使用 `/dev/ttyACM1` 就把继电器也改成
 同一个设备。
 
 在小车工控机上先验证服务和继电器，再启动完整测试：
@@ -240,8 +260,8 @@ ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
 ```bash
 ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python" \
-  serial_port:=/dev/ttyACM0 \
-  relay_config_file:=/absolute/path/to/relay_fault.ini
+  serial_port:=/dev/ttyACM1 \
+  relay_config_file:="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini"
 ```
 
 `relay_config_file` 不传时使用安装包中的
@@ -266,7 +286,8 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 - `yolov8s_real.pt`: `detect`, `{0: tree}`；
 - `yolov8s_seg_real.pt`: `segment`, `{0: disease_leaf}`。
 - `wvcsc_c10_camera/config/c10_intrinsics.yaml`；
-- `$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml`；
+- `$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config` 中最新的
+  `c10_handeye_YYYYMMDD_HHMMSS.calib`；
 - `~/.ros/wvcsc_calibration/nozzle.yaml`。
 
 实机权重需由用户放入
@@ -332,8 +353,9 @@ ros2 run wvcsc_arm_task motion_control_keyboard
 手眼标定 launch 不加载 `real_sensors.launch.py`：不会启动底盘、LiDAR、IMU、EKF
 或 Nav2。车辆必须保持停稳，并保留可触达的物理急停。
 
-默认手眼输出为
-`$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml`。
+默认手眼输出为 config 目录下同一时间戳的一对文件：
+`c10_handeye_YYYYMMDD_HHMMSS.calib` 与
+`c10_handeye_YYYYMMDD_HHMMSS.yaml`。
 自动采集会先根据 marker 相对 `alicia_base_link` 的配置生成安全初始观察位，
 再清空上一轮服务端样本，逐候选执行碰撞IK、Jacobian条件数、关节余量和OMPL
 门控，并以Park/Horaud/Tsai-Lenz共识及离群剔除后结果原子写入。

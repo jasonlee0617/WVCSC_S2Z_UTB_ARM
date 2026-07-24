@@ -6,13 +6,69 @@ transform from the saved calibration result, allowing RViz visual verification.
 """
 
 import os
+from pathlib import Path
+import re
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+
+def _latest_handeye_path(simulation=False):
+    directory = (Path.home() / 'WVCSC_S2Z_UTB_ARM' / 'src' /
+                 'wvcsc_calibration' / 'config')
+    prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
+    pattern = re.compile(rf'^{re.escape(prefix)}_(\d{{8}}_\d{{6}})\.calib$')
+    candidates = [
+        (match.group(1), path.name, path)
+        for path in directory.glob(f'{prefix}_*.calib')
+        for match in [pattern.fullmatch(path.name)]
+        if match
+    ]
+    if not candidates:
+        raise RuntimeError(f'no timestamped hand-eye calibration in {directory}')
+    return str(max(candidates, key=lambda item: (item[0], item[1]))[2])
+
+
+def _handeye_publisher(context):
+    value = LaunchConfiguration('handeye_calibration').perform(context)
+    if value in ('', 'latest', 'latest_real'):
+        value = _latest_handeye_path()
+    elif value == 'latest_sim':
+        value = _latest_handeye_path(simulation=True)
+    else:
+        value = os.path.expanduser(os.path.expandvars(value))
+    return [Node(
+        package='easy_handeye2', executable='handeye_publisher',
+        name='handeye_publisher',
+        parameters=[{
+            'name': 'wvcsc_c10',
+            'calibration_file': value,
+            'calibration_type': 'eye_in_hand',
+            'publish_rate_hz': 10.0,
+        }],
+        output='screen')]
+
+
+def _evaluate_gui(context):
+    value = LaunchConfiguration('handeye_calibration').perform(context)
+    if value in ('', 'latest', 'latest_real'):
+        value = _latest_handeye_path()
+    elif value == 'latest_sim':
+        value = _latest_handeye_path(simulation=True)
+    else:
+        value = os.path.expanduser(os.path.expandvars(value))
+    return [IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            get_package_share_directory('easy_handeye2'),
+            'launch', 'evaluate.launch.py')),
+        launch_arguments={
+            'name': 'wvcsc_c10',
+            'calibration_file': value,
+        }.items())]
 
 
 def generate_launch_description():
@@ -24,7 +80,7 @@ def generate_launch_description():
         # ── C10 camera ──────────────────────────────────────────
         DeclareLaunchArgument(
             'video_device',
-            default_value='/dev/video0'),
+            default_value='/dev/video4'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(
@@ -46,7 +102,7 @@ def generate_launch_description():
                        'base_link', 'alicia_base_link']),
 
         # ── Alicia-M arm (MoveIt + ros2_control, arm-only URDF) ──
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM1'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 alicia_bringup_share, 'launch', 'moveit_hardware.launch.py')),
@@ -88,24 +144,10 @@ def generate_launch_description():
             }],
             output='both'),
 
-        # ── Hand-eye TF publisher (loads saved calibration,
-        #     publishes calibrated tool0→camera_color_optical_frame) ──
-        Node(
-            package='easy_handeye2', executable='handeye_publisher',
-            name='handeye_publisher',
-            parameters=[{
-                'name': 'wvcsc_c10',
-                'calibration_type': 'eye_in_hand',
-                'publish_rate_hz': 10.0,
-            }],
-            output='screen'),
+        DeclareLaunchArgument('handeye_calibration', default_value='latest_real'),
+        # ── Hand-eye TF publisher (loads the newest timestamped file) ──
+        OpaqueFunction(function=_handeye_publisher),
 
         # ── easy_handeye2 evaluate GUI ──────────────────────────
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(os.path.join(
-                get_package_share_directory('easy_handeye2'),
-                'launch', 'evaluate.launch.py')),
-            launch_arguments={
-                'name': 'wvcsc_c10',
-            }.items()),
+        OpaqueFunction(function=_evaluate_gui),
     ])

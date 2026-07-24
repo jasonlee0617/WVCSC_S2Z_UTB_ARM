@@ -5,7 +5,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import ParameterType, ParameterDescriptor
 import tf2_ros
 import geometry_msgs.msg
-from easy_handeye2.handeye_calibration import load_calibration
+from easy_handeye2.handeye_calibration import load_calibration, load_calibration_file
 
 
 class HandeyePublisher(rclpy.node.Node):
@@ -14,10 +14,17 @@ class HandeyePublisher(rclpy.node.Node):
 
         self.declare_parameter('name', descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING))
         name = self.get_parameter('name').get_parameter_value().string_value
+        self.declare_parameter('calibration_file', '')
+        calibration_file = self.get_parameter('calibration_file').value
 
-        self.get_logger().info(f'Loading the calibration with name {name}')
+        if calibration_file:
+            self.get_logger().info(
+                f'Loading calibration file {calibration_file}')
+            self.calibration = load_calibration_file(calibration_file)
+        else:
+            self.get_logger().info(f'Loading the calibration with name {name}')
+            self.calibration = load_calibration(name)
 
-        self.calibration = load_calibration(name)
         parameters = self.calibration.parameters
 
         if parameters.calibration_type == 'eye_in_hand':

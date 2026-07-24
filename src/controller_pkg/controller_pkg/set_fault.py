@@ -7,12 +7,26 @@ from pathlib import Path
 import sys
 
 try:
+    from ament_index_python.packages import get_package_share_directory
+except ImportError:
+    get_package_share_directory = None
+
+try:
     import serial
 except ImportError:
     serial = None
 
 
-DEFAULT_CONFIG = Path(__file__).with_name("fault.ini")
+def _default_config():
+    if get_package_share_directory is not None:
+        try:
+            return Path(get_package_share_directory('controller_pkg')) / 'config' / 'fault.ini'
+        except Exception:
+            pass
+    return Path(__file__).parents[1] / 'config' / 'fault.ini'
+
+
+DEFAULT_CONFIG = _default_config()
 
 
 def crc16_modbus(data: bytes) -> bytes:

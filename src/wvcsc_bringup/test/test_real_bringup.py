@@ -134,7 +134,7 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     assert "_load_calibrated_mount(handeye_path)" in source
     assert "'aim_nozzle_frame': 'tool0'" in source
     assert 'nozzle_calibration' not in source
-    assert 'wvcsc_c10.calib' in source
+    assert 'latest_real' in source
     assert 'nozzle_xyz = (0.0, 0.0, 0.0)' in source
     assert 'c10_camera.launch.py' in source
     assert 'vision_real.yaml' in source
@@ -272,7 +272,8 @@ def test_handeye_session_enables_standalone_robot_tf():
                  'auto_calibration_collector.py').read_text(encoding='utf-8')
     assert "RemoveSample.Request(sample_index=count - 1)" in collector
     assert "'minimum_solution_samples': 14" in collector
-    assert '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/' in collector
+    assert 'calibration_output_dir' in collector
+    assert 'timestamped_calibration_paths' in collector
 
 
 def test_arm_only_bringup_does_not_require_unpublished_wheel_states():
@@ -291,7 +292,8 @@ def test_real_mission_uses_portable_handeye_and_c10_calibration_paths():
     source = _source('real_system_mission.launch.py')
     assert 'def _expand_path(path):' in source
     assert 'os.path.expandvars' in source
-    assert '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/' in source
+    assert "def _latest_handeye_calibration" in source
+    assert "default_value='latest_real'" in source
     assert "c10_share, 'config', 'c10_intrinsics.yaml'" in source
 
 

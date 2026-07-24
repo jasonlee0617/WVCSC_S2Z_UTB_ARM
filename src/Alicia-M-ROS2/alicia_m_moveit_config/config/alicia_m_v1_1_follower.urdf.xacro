@@ -2,7 +2,7 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="alicia_m_v1_1_follower">
     <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
     <xacro:arg name="ros2_control_plugin" default="mock_components/GenericSystem" />
-    <xacro:arg name="serial_port" default="/dev/ttyACM0" />
+    <xacro:arg name="serial_port" default="/dev/ttyACM1" />
     <xacro:arg name="baudrate" default="1000000" />
     <xacro:arg name="control_mode" default="pv" />
     <xacro:arg name="default_speed" default="1.0" />

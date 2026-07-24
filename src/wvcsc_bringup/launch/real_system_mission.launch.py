@@ -3,6 +3,8 @@
 import os
 from functools import partial
 import math
+from pathlib import Path
+import re
 
 import yaml
 
@@ -33,6 +35,33 @@ def _include(launch_dir, filename, arguments=None):
 
 def _expand_path(path):
     return os.path.expanduser(os.path.expandvars(os.fspath(path)))
+
+
+def _latest_handeye_calibration(simulation=False):
+    directory = (Path.home() / 'WVCSC_S2Z_UTB_ARM' / 'src' /
+                 'wvcsc_calibration' / 'config')
+    prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
+    pattern = re.compile(
+        rf'^{re.escape(prefix)}_(\d{{8}}_\d{{6}})\.calib$')
+    candidates = []
+    for path in directory.glob(f'{prefix}_*.calib'):
+        match = pattern.fullmatch(path.name)
+        if match:
+            candidates.append((match.group(1), path.name, path))
+    if not candidates:
+        role = 'simulation' if simulation else 'real'
+        raise RuntimeError(
+            f'no timestamped {role} C10 hand-eye calibration in {directory}')
+    return str(max(candidates, key=lambda item: (item[0], item[1]))[2])
+
+
+def _resolve_handeye_calibration(value, *, simulation=False):
+    value = os.fspath(value)
+    if value in ('', 'latest', 'latest_real'):
+        return _latest_handeye_calibration(simulation=simulation)
+    if value == 'latest_sim':
+        return _latest_handeye_calibration(simulation=True)
+    return _expand_path(value)
 
 
 def _rpy_matrix(roll, pitch, yaw):
@@ -167,7 +196,7 @@ def _resolve_calibrations(context, *, launch_dir):
     initial_actions = []
 
     # --- hand-eye calibration ---
-    calibration_path = _expand_path(
+    calibration_path = _resolve_handeye_calibration(
         LaunchConfiguration('handeye_calibration').perform(context))
     if not os.path.isfile(calibration_path):
         raise RuntimeError(
@@ -328,8 +357,8 @@ def generate_launch_description():
                 bringup_share, 'scripts', 'preflight_check.py')),
         DeclareLaunchArgument(
             'c10_device',
-            default_value='/dev/video0'),
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
+            default_value='/dev/video4'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM1'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('control_mode', default_value='pv'),
         DeclareLaunchArgument('default_speed', default_value='0.5'),
@@ -340,9 +369,7 @@ def generate_launch_description():
         DeclareLaunchArgument('nozzle_mount_rpy', default_value='0 0 0'),
         DeclareLaunchArgument(
             'handeye_calibration',
-            default_value=(
-                '$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
-                'c10_handeye.yaml')),
+            default_value='latest_real'),
         DeclareLaunchArgument(
             'nozzle_calibration',
             default_value=os.path.expanduser(

@@ -5,8 +5,10 @@ import yaml
 
 from wvcsc_calibration import calibration_io
 from wvcsc_calibration.calibration_io import (
+    latest_calibration_path,
     expanded_path,
     normalized_calibration,
+    timestamped_calibration_paths,
     write_calibration_outputs,
 )
 
@@ -50,6 +52,23 @@ def test_expanded_path_supports_portable_home_environment_variable(monkeypatch, 
     monkeypatch.setenv('WVCSC_CALIBRATION_TEST_ROOT', str(tmp_path))
     assert expanded_path('$WVCSC_CALIBRATION_TEST_ROOT/result.yaml') == (
         tmp_path / 'result.yaml')
+
+
+def test_latest_calibration_selects_real_and_simulation_independently(tmp_path):
+    (tmp_path / 'c10_handeye_20260724_090000.calib').write_text('real-old')
+    (tmp_path / 'c10_handeye_20260724_100000.calib').write_text('real-new')
+    (tmp_path / 'c10_handeye_sim_20260724_110000.calib').write_text('sim')
+    assert latest_calibration_path(tmp_path).name == \
+        'c10_handeye_20260724_100000.calib'
+    assert latest_calibration_path(tmp_path, simulation=True).name == \
+        'c10_handeye_sim_20260724_110000.calib'
+
+
+def test_timestamped_paths_share_one_stem(tmp_path):
+    native, normalized = timestamped_calibration_paths(
+        tmp_path, timestamp='20260724_120000')
+    assert native.name == 'c10_handeye_20260724_120000.calib'
+    assert normalized.name == 'c10_handeye_20260724_120000.yaml'
 
 
 def test_exported_easy_handeye_and_deployment_files_describe_same_transform(tmp_path):
