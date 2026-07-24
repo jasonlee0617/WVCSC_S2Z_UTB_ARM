@@ -10,6 +10,7 @@ uint8 MISSION_COMPLETED=8
 uint8 CANCELED=9
 uint8 FAILED=10
 uint8 RETURNING_HOME=11
+uint8 DWELLING=12
 
 std_msgs/Header header
 string mission_id

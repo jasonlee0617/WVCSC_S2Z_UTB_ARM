@@ -7,6 +7,37 @@ source /opt/ros/humble/setup.bash
 source ~/WVCSC_S2Z_UTB_ARM/install/setup.bash
 ```
 
+## Qt 任意路线任务（默认实车入口）
+
+完整实车任务默认启动 Qt 编辑器，且在操作者点击开始前**不会自动行驶**：
+
+```bash
+ros2 launch wvcsc_bringup real_system_mission.launch.py \
+  yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python"
+```
+
+不要同时启动 `real_navigation.launch.py`；完整入口已包含同一套 Nav2/AMCL。先在
+RViz 点击 `2D Pose Estimate` 完成定位，再在 Qt 点击“记录起点”。路线编辑规则：
+
+- 通行点/终点：一次 `2D Goal` 作为停车位；
+- 病株检查点：第一次 `2D Goal` 为停车位，第二次 `2D Goal` 点树中心；Qt 计算
+  `alicia_base_link` 的带符号树相对 X/Y；
+- `tree_y > 0.05` 使用左侧预设，`tree_y < -0.05` 使用右侧预设，中心线附近拒绝；
+- “驶向该点时开启广域喷洒”是入段第1路属性；病株到点后第1路关闭，第2路由机械臂
+  喷洒；
+- 支持表格排序、删除、逐点喷洒/停留设置、JSON 保存加载和完成后返回起点；
+- “终止作业并回HOME”通过 `/mission/abort_and_home` 取消导航/机械臂，关闭两路并让
+  `motion_control` 安全复位。
+
+当前 LiDAR 不自动输出单株玉米中心或病株 ID，因此病株树中心仍需人工在 RViz 选择。
+单点任务错误会标记跳过并继续；动作超时、未确认取消、运动锁定和关键定位缺失仍会停止。
+
+使用原五点 YAML 路线而非 Qt 时，显式选择兼容模式：
+
+```bash
+ros2 launch wvcsc_bringup real_system_mission.launch.py mission_mode:=file
+```
+
 ## 1. 建图
 
 ```bash
@@ -131,13 +162,14 @@ ros2 run wvcsc_bringup capture_site_pose -- \
 该模式仅保留初始 `/imu`、`/ekf_odom`、`/amcl_pose` 和 30 个有效 TF 样本要求，
 跳过新鲜度、停稳、质量和地图 footprint 门控；仅用于当前调试，不代表站点位姿可靠。
 
-### 3.1 实机五点路线采集
+### 3.1 兼容的实机五点路线采集
 
-实机完整作业只接受 schema-v4 的五点路线，不会读取上面的 `corn_site.yaml`。
+这是 `mission_mode:=file` 的兼容入口；默认 Qt 任意路线不读取这个五点 YAML。
 现场逐点停稳后，用同一个文件依次采集 `point_1` 至 `point_5`。点 2、3 的树位置
 树偏移以 `alicia_base_link` 为原点，而不是车体坐标。当前 `alicia_mount_joint`
 相对车体绕 Z 轴旋转 `pi`，因此 `alicia +X = 车体 -X`、`alicia +Y = 车体 -Y`。
-关节预设模式要求 `tree-y-m > 0`；不要按车体左右方向手工反转符号。两点喷洒时长固定为 3.0 s。
+关节预设模式支持 `tree-y-m > 0.05` 的左侧和 `tree-y-m < -0.05` 的右侧；不要按车体
+左右方向手工反转符号。两点喷洒时长固定为 3.0 s。
 
 ```bash
 MISSION_DIR="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/mission_$(date +%Y%m%d_%H%M%S)"
@@ -203,11 +235,11 @@ ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
 坐标约定与采点一致：`+X` 为车头前方，`+Y` 为车体左侧。玉米树放在机械臂正左侧
 时 `--tree-x-m` 填 `0.0`：
 
-实机默认 `observation_mode:=joint_presets`：MoveIt 会按“正对、左扇形、右扇形”
-三组已现场确认的关节姿态扫描，且只允许 `tree_y_m > 0` 的左侧树。当前
+实机默认 `observation_mode:=joint_presets`：MoveIt 对左、右两侧分别按“正对、扇形、扇形”
+三组已现场确认的关节姿态扫描，`tree_y_m > 0.05` 为左侧、`tree_y_m < -0.05` 为右侧。当前
 `spray_working_distance_m=1.00 m` 是这三组姿态的人工确认作业距离；不是由初始
-观察 IK 计算得出。右侧树（`tree_y_m <= 0`）会在机械臂运动前明确拒绝，必须显式
-改用原有 IK 观察模式：
+观察 IK 计算得出。中心线附近（`abs(tree_y_m) <= 0.05`）会在机械臂运动前明确拒绝；
+也可显式改用原有 IK 观察模式：
 
 ```bash
 ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
@@ -287,11 +319,12 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python"
 ```
 
-启动前检查会在任何硬件节点运行之前验证：
+默认 `mission_mode:=qt` 会启动 Qt 编辑器，但在你完成 RViz 初始定位并点击 Qt 的开始按钮前
+不会导航。启动前检查会在任何硬件节点运行之前验证：
 
 - C10 和 Alicia-M 设备路径；
 - 地图文件和 ROS 包；
-- schema-v4 五点路线、地图哈希、停车区域与采样质量；
+- 当前地图、Qt/任务 ROS 包与停车相关基础配置；
 - 独立 YOLO Python 环境；
 - `yolov8s_real.pt`: `detect`, `{0: tree}`；
 - `yolov8s_seg_real.pt`: `segment`, `{0: disease_leaf}`。
@@ -304,7 +337,8 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 `wvcsc_rgb_vision/models/`。权重缺失或类别契约不匹配时，整个实机启动会
 在硬件上电前失败，不会回退到仿真权重。
 
-前置检查、Nav2、机械臂 Action 和 `/relay/set` 都就绪后，五点路线会自动开始：
+若要运行旧五点 YAML，请显式传入 `mission_mode:=file`；这时前置检查才会校验
+schema-v4 五点路线和地图哈希，并在就绪后自动开始：
 
 1. 进入第 1 点前接通第 1 路广域喷洒；
 2. 第 2、3 点到达后断开第 1 路，确认车辆停稳，机械臂识别病害并只通过第 2 路喷洒 3.0 s；

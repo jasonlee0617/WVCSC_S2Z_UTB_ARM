@@ -86,7 +86,10 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "'aim_fixed_range_m'" in source
     assert "'relay_config_file'" in source
     assert "'--relay-config', relay_config" in source
-    assert "'--operation', 'field_route'" in source
+    assert "'qt_mission' if mission_mode == 'qt' else 'field_route'" in source
+    assert "'mission_mode', default_value='qt'" in source
+    assert "'use_qt_gui', default_value='true'" in source
+    assert 'nav2_qt.launch.py' in source
     assert "'use_nav_rviz', default_value='true'" in source
     assert "'use_moveit_rviz', default_value='false'" in source
 
@@ -101,19 +104,23 @@ def test_real_system_rviz_processes_have_separate_explicit_controls_and_names():
     assert "name='moveit_rviz'" in arm
 
 
-def test_real_orchestration_uses_real_leaf_and_five_point_route_contract():
+def test_real_orchestration_uses_qt_by_default_and_keeps_file_route_compatibility():
     source = _source('real_orchestration.launch.py')
     vision = (PACKAGE.parent / 'wvcsc_rgb_vision' / 'config' /
               'vision_real.yaml').read_text(encoding='utf-8')
 
     assert "executable='field_route_manager.py'" in source
-    assert "package='wvcsc_mission_manager', executable='mission_manager'" not in source
+    assert "package='wvcsc_mission_manager', executable='mission_manager'" in source
+    assert "'mission_mode', default_value='qt'" in source
+    assert "' == 'qt'" in source
+    assert "' == 'file'" in source
     assert "executable='load_site_mission.py'" not in source
     assert 'mission_source' not in source
     assert 'wvcsc_uav_gateway' not in source
     assert "'map_file': LaunchConfiguration('map')" in source
     assert "'wide_relay_channel': 1" in source
     assert "'arm_relay_channel': 2" in source
+    assert "'arm_base_yaw_rad': 3.141592653589793" in source
     assert 'vision_real.yaml' in source
     assert 'yolov8s_real.pt' in vision
     assert 'yolov8s_seg_real.pt' in vision
@@ -123,6 +130,18 @@ def test_real_orchestration_uses_real_leaf_and_five_point_route_contract():
     assert "get_package_share_directory('controller_pkg')" in source
     assert 'spray_actuator_real.yaml' in source
     assert "'relay_config_file'" in source
+
+
+def test_qt_real_mode_never_autostarts_or_requires_a_file_route():
+    system = _source('real_system_mission.launch.py')
+    orchestration = _source('real_orchestration.launch.py')
+    preflight = (PACKAGE / 'scripts' / 'preflight_check.py').read_text(
+        encoding='utf-8')
+
+    assert "'auto_start': False" in orchestration
+    assert 'def _optional_latest_field_route()' in system
+    assert "args.operation != 'qt_mission'" in preflight
+    assert "'qt_mission' if mission_mode == 'qt' else 'field_route'" in system
 
 
 def test_route_validation_launch_uses_real_navigation_and_fake_arm_only():

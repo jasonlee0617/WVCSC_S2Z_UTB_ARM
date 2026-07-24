@@ -39,9 +39,16 @@ from .target_flow import (TargetAttempt, TargetFlowMixin,
 
 
 DEFAULT_JOINT_PRESETS_DEG = {
+    # The original field-validated scan set for trees at +Y of
+    # ``alicia_base_link``.
     'center': (95.3, -136.9, -71.0, 7.7, 57.3, -4.4),
     'fan_left': (52.2, -131.7, -55.4, -58.9, 76.5, 18.2),
     'fan_right': (118.5, -129.4, -55.8, 47.6, 66.2, -17.1),
+    # Independently field-validated scan set for trees at -Y.  These values
+    # are intentionally not a mathematical mirror of the +Y presets.
+    'right_center': (-105.4, -127.8, -50.5, -15.4, 71.2, -4.9),
+    'right_fan_left': (-139.8, -128.6, -57.3, -70.1, 79.7, 13.0),
+    'right_fan_right': (-70.8, -126.8, -50.6, 32.2, 69.8, -12.1),
 }
 
 
@@ -78,6 +85,12 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             self.get_parameter('spray_on_alignment_failure').value)
         self._observation_mode, self._joint_preset_positions = (
             self._joint_preset_parameters())
+        self._joint_preset_side_epsilon_m = float(
+            self.get_parameter('joint_preset_side_epsilon_m').value)
+        if (not math.isfinite(self._joint_preset_side_epsilon_m)
+                or self._joint_preset_side_epsilon_m < 0.0):
+            raise ValueError('joint_preset_side_epsilon_m must be finite and non-negative')
+        self._joint_preset_side = ''
         self._observation_config = self._observation_parameters()
         self._recenter_config = self._target_recenter_parameters()
 
@@ -239,6 +252,13 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 DEFAULT_JOINT_PRESETS_DEG['fan_left']),
             'joint_preset_fan_right_deg': list(
                 DEFAULT_JOINT_PRESETS_DEG['fan_right']),
+            'joint_preset_right_center_deg': list(
+                DEFAULT_JOINT_PRESETS_DEG['right_center']),
+            'joint_preset_right_fan_left_deg': list(
+                DEFAULT_JOINT_PRESETS_DEG['right_fan_left']),
+            'joint_preset_right_fan_right_deg': list(
+                DEFAULT_JOINT_PRESETS_DEG['right_fan_right']),
+            'joint_preset_side_epsilon_m': 0.05,
             'confirmation_frames': 3,                # 连续 3 帧锁定目标，过滤单帧误检
             # 真实场景下 YOLO 检测有延迟，5秒超时确保足够的容错空间
             'scan_pose_detection_timeout_sec': 5.0,
@@ -311,20 +331,32 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             raise ValueError('observation_mode must be ik or joint_presets')
         if mode == 'ik':
             return mode, ()
-        presets = []
-        for name, parameter in (
-                ('center', 'joint_preset_center_deg'),
-                ('fan_left', 'joint_preset_fan_left_deg'),
-                ('fan_right', 'joint_preset_fan_right_deg')):
-            try:
-                degrees = tuple(
-                    float(value) for value in self.get_parameter(parameter).value)
-            except (TypeError, ValueError) as error:
-                raise ValueError(f'{parameter} must contain six finite degrees') from error
-            if len(degrees) != 6 or not all(math.isfinite(value) for value in degrees):
-                raise ValueError(f'{parameter} must contain six finite degrees')
-            presets.append((name, tuple(math.radians(value) for value in degrees)))
-        return mode, tuple(presets)
+        presets_by_side = {}
+        for side, definitions in (
+                ('left', (
+                    ('center', 'joint_preset_center_deg'),
+                    ('fan_left', 'joint_preset_fan_left_deg'),
+                    ('fan_right', 'joint_preset_fan_right_deg'),
+                )),
+                ('right', (
+                    ('center', 'joint_preset_right_center_deg'),
+                    ('fan_left', 'joint_preset_right_fan_left_deg'),
+                    ('fan_right', 'joint_preset_right_fan_right_deg'),
+                ))):
+            presets = []
+            for name, parameter in definitions:
+                try:
+                    degrees = tuple(
+                        float(value) for value in self.get_parameter(parameter).value)
+                except (TypeError, ValueError) as error:
+                    raise ValueError(
+                        f'{parameter} must contain six finite degrees') from error
+                if (len(degrees) != 6
+                        or not all(math.isfinite(value) for value in degrees)):
+                    raise ValueError(f'{parameter} must contain six finite degrees')
+                presets.append((name, tuple(math.radians(value) for value in degrees)))
+            presets_by_side[side] = tuple(presets)
+        return mode, presets_by_side
 
     def _observation_parameters(self):
         """解析观察位姿生成的网格参数与运动学安全阈值"""

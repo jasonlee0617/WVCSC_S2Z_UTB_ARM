@@ -27,6 +27,7 @@ from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.msg import (
@@ -35,7 +36,7 @@ from wvcsc_interfaces.msg import (
     MissionTargetPlan,
     MissionTargetStatus,
 )
-from wvcsc_interfaces.srv import LoadManualMission
+from wvcsc_interfaces.srv import LoadManualMission, SetRelay
 
 from .core import (
     DEFAULT_ARM_BASE_FORWARD_OFFSET,
@@ -43,8 +44,10 @@ from .core import (
     DEFAULT_DOCKING_LATERAL_OFFSET,
     MissionCore,
     MissionState,
+    PointType,
     StopDetector,
     Target,
+    WorkSide,
     navigation_pose,
     tree_hint_from_arm_base_offset,
     tree_offset_from_docking,
@@ -68,6 +71,8 @@ class MissionManager(Node):
             self.get_parameter('arm_base_forward_offset_m').value)
         self._arm_base_left_offset = float(
             self.get_parameter('arm_base_left_offset_m').value)
+        self._arm_base_yaw = float(
+            self.get_parameter('arm_base_yaw_rad').value)
         self._require_docking_quality = bool(
             self.get_parameter('require_docking_quality').value)
         self._localization_max_age = float(
@@ -92,6 +97,14 @@ class MissionManager(Node):
         self._spray_timeout = float(self.get_parameter('spray_goal_timeout_sec').value)
         self._spray_progress_timeout = float(
             self.get_parameter('spray_progress_timeout_sec').value)
+        self._wide_relay_channel = self._positive_channel('wide_relay_channel')
+        self._arm_relay_channel = self._positive_channel('arm_relay_channel')
+        if self._wide_relay_channel == self._arm_relay_channel:
+            raise ValueError('wide_relay_channel and arm_relay_channel must differ')
+        self._wide_motion_linear_threshold = float(
+            self.get_parameter('wide_spray_motion_linear_threshold').value)
+        self._wide_motion_timeout = float(
+            self.get_parameter('wide_spray_motion_timeout_sec').value)
         self._return_home_after_finish = bool(
             self.get_parameter('return_home_after_finish').value)
         self._home_pose = (
@@ -102,8 +115,12 @@ class MissionManager(Node):
         if not all(math.isfinite(value) for value in self._home_pose):
             raise ValueError('home pose must contain finite values')
         if not all(math.isfinite(value) for value in (
-                self._arm_base_forward_offset, self._arm_base_left_offset)):
-            raise ValueError('arm base offsets must be finite')
+                self._arm_base_forward_offset, self._arm_base_left_offset,
+                self._arm_base_yaw, self._wide_motion_linear_threshold,
+                self._wide_motion_timeout)):
+            raise ValueError('arm base and wide spray parameters must be finite')
+        if self._wide_motion_linear_threshold < 0.0 or self._wide_motion_timeout <= 0.0:
+            raise ValueError('wide spray motion thresholds are invalid')
         if (not math.isfinite(self._nav_startup_retry_timeout) or
                 not math.isfinite(self._nav_startup_retry_interval) or
                 self._nav_startup_retry_timeout <= 0.0 or
@@ -158,6 +175,10 @@ class MissionManager(Node):
             self, NavigateToPose, str(self.get_parameter('nav_action_name').value))
         self._spray_client = ActionClient(
             self, ExecuteSpray, str(self.get_parameter('spray_action_name').value))
+        self._relay_client = self.create_client(
+            SetRelay, str(self.get_parameter('relay_service_name').value))
+        self._motion_command_pub = self.create_publisher(
+            String, '/motion_control/command', 10)
 
         # Action 状态句柄
         self._nav_handle = None
@@ -174,6 +195,14 @@ class MissionManager(Node):
         self._docking_retry_count = 0
         self._docking_retry_target_index = None
         self._last_docking_log_state = None
+        self._last_odom_at = None
+        self._latest_linear_speed = 0.0
+        self._wide_motion_pending = False
+        self._wide_motion_deadline = None
+        self._wide_relay_enabled = False
+        self._abort_and_home_requested = False
+        self._abort_reset_sent = False
+        self._motion_control_state = ''
 
         # 对外暴露的高层操作服务
         self.create_service(Trigger, '/mission/start', self._start)
@@ -184,9 +213,13 @@ class MissionManager(Node):
         self.create_service(
             Trigger, '/mission/return_home', self._return_home)
         self.create_service(Trigger, '/mission/cancel', self._cancel)
+        self.create_service(
+            Trigger, '/mission/abort_and_home', self._abort_and_home)
         self.create_service(Trigger, '/mission/reset', self._reset)
         self.create_service(
             LoadManualMission, '/mission/load_manual', self._load_manual)
+        self.create_subscription(
+            String, '/motion_control/state', self._on_motion_control_state, 10)
 
         # 调度定时器 (100ms 的高频看门狗，用于超时判断和停稳检测)
         self.create_timer(0.1, self._tick)
@@ -206,6 +239,7 @@ class MissionManager(Node):
             'docking_lateral_offset': DEFAULT_DOCKING_LATERAL_OFFSET,
             'arm_base_forward_offset_m': DEFAULT_ARM_BASE_FORWARD_OFFSET,
             'arm_base_left_offset_m': DEFAULT_ARM_BASE_LEFT_OFFSET,
+            'arm_base_yaw_rad': 0.0,
             'require_docking_quality': False,
             'localization_pose_topic': '/amcl_pose',
             'localization_max_age_sec': 1.0,
@@ -220,6 +254,11 @@ class MissionManager(Node):
             'nav_startup_retry_interval_sec': 0.5,
             'spray_goal_timeout_sec': 180.0,
             'spray_progress_timeout_sec': 30.0,
+            'relay_service_name': '/relay/set',
+            'wide_relay_channel': 1,
+            'arm_relay_channel': 2,
+            'wide_spray_motion_linear_threshold': 0.03,
+            'wide_spray_motion_timeout_sec': 10.0,
             'return_home_after_finish': False,
             'home_x': 0.0,
             'home_y': 0.0,
@@ -229,13 +268,21 @@ class MissionManager(Node):
             'stop_stable_duration_sec': 1.0,
             'odom_stale_timeout_sec': 1.0,
             'stop_verify_timeout_sec': 5.0,
-            'max_targets': 20,
+            # Qt 实车路线可包含 23 株病株以及通行/终点，不能沿用旧的
+            # 二十目标上限；仍保留有限上界防止错误任务文件无限膨胀。
+            'max_targets': 64,
             'max_abs_coordinate': 50.0,
             'min_spray_duration': 0.2,
             'max_spray_duration': 10.0,
         }
         for name, default in parameters.items():
             self.declare_parameter(name, default)
+
+    def _positive_channel(self, parameter):
+        value = int(self.get_parameter(parameter).value)
+        if not 1 <= value <= 255:
+            raise ValueError(f'{parameter} must be within 1..255')
+        return value
 
     def _now(self):
         return self.get_clock().now().nanoseconds * 1e-9
@@ -257,6 +304,8 @@ class MissionManager(Node):
         self._return_home_after_finish = bool(
             request.return_home_after_finish)
         self._manual_return_home = False
+        self._abort_and_home_requested = False
+        self._abort_reset_sent = False
         self._clear_nav_startup_retry()
         self._reset_docking_verification()
         self.get_logger().info(
@@ -290,8 +339,26 @@ class MissionManager(Node):
             target_id = item.target_id.strip()
             if not target_id or target_id in seen:
                 raise ValueError('target_id must be non-empty and unique')
-            duration = float(item.spray_duration)
-            if not math.isfinite(duration) or not min_duration <= duration <= max_duration:
+            point_type = int(getattr(item, 'point_type', PointType.INSPECT))
+            if point_type not in set(PointType):
+                raise ValueError(f'{target_id}: unsupported point_type')
+            work_side = int(getattr(item, 'work_side', WorkSide.UNSPECIFIED))
+            if work_side not in set(WorkSide):
+                raise ValueError(f'{target_id}: unsupported work_side')
+            dwell_time = float(getattr(item, 'dwell_time_sec', 0.0))
+            if not math.isfinite(dwell_time) or dwell_time < 0.0:
+                raise ValueError(f'{target_id}: dwell_time_sec must be non-negative')
+            wide_spray_on_approach = bool(getattr(
+                item, 'wide_spray_on_approach', False))
+            legacy_duration = float(item.spray_duration)
+            configured_duration = float(getattr(
+                item, 'arm_spray_duration_sec', 0.0))
+            duration = (
+                configured_duration if configured_duration > 0.0
+                else legacy_duration)
+            if point_type == PointType.INSPECT and (
+                    not math.isfinite(duration) or
+                    not min_duration <= duration <= max_duration):
                 raise ValueError(f'{target_id}: spray_duration out of range')
             confidence = float(getattr(item, 'confidence', 1.0))
             if not math.isfinite(confidence) or not 0.0 < confidence <= 1.0:
@@ -304,6 +371,18 @@ class MissionManager(Node):
                     item.docking_pose, f'{target_id}.docking_pose')
                 if abs(docking[0]) > bound or abs(docking[1]) > bound:
                     raise ValueError(f'{target_id}: docking pose out of bounds')
+            if point_type != PointType.INSPECT:
+                if compute_docking:
+                    raise ValueError(
+                        f'{target_id}: non-inspect point requires docking_pose')
+                target = Target(
+                    target_id, 0.0, 0.0, 0.0, confidence, 0.0,
+                    str(getattr(item, 'evidence_uri', '')).strip(), docking,
+                    None, point_type, wide_spray_on_approach, dwell_time,
+                    work_side)
+                seen.add(target_id)
+                targets.append(target)
+                continue
             explicit_hint = bool(getattr(
                 item, 'use_explicit_tree_hint', False))
             use_offset = bool(getattr(
@@ -325,6 +404,11 @@ class MissionManager(Node):
                 source = (
                     str(getattr(item, 'evidence_uri', '')).strip()
                     or 'manual://measured')
+                side_tree_y = None if docking is None else tree_offset_from_docking(
+                    docking, tree_hint,
+                    self._arm_base_forward_offset,
+                    self._arm_base_left_offset,
+                    self._arm_base_yaw)[1]
             else:
                 tree_x_m = float(getattr(item, 'tree_x_m', float('nan')))
                 tree_y_m = float(getattr(item, 'tree_y_m', float('nan')))
@@ -335,13 +419,23 @@ class MissionManager(Node):
                     raise ValueError(f'{target_id}: non-finite arm-base tree offset')
                 if math.hypot(tree_x_m, tree_y_m) < 1e-6:
                     raise ValueError(f'{target_id}: arm-base tree offset is zero')
+                side_tree_y = tree_y_m
                 tree_hint = tree_hint_from_arm_base_offset(
                     docking, tree_x_m, tree_y_m, tree_base_z,
                     self._arm_base_forward_offset,
-                    self._arm_base_left_offset)
+                    self._arm_base_left_offset,
+                    self._arm_base_yaw)
                 source = (
                     str(getattr(item, 'evidence_uri', '')).strip()
                     or 'manual://arm-base-offset')
+            if work_side != WorkSide.UNSPECIFIED and side_tree_y is not None:
+                expected_side = (
+                    WorkSide.LEFT if side_tree_y > 0.0 else WorkSide.RIGHT)
+                # Keep the route contract aligned with joint_presets: targets
+                # within +/-5 cm of the arm centreline have no safe side.
+                if abs(side_tree_y) <= 0.05 or work_side != expected_side:
+                    raise ValueError(
+                        f'{target_id}: work_side conflicts with signed tree Y')
             target = Target(
                 target_id,
                 tree_hint[0],
@@ -352,6 +446,10 @@ class MissionManager(Node):
                 source,
                 docking,
                 tree_hint,
+                point_type,
+                wide_spray_on_approach,
+                dwell_time,
+                work_side,
             )
             # Mock YAML only supplies a tree hint.  Validate its derived
             # parking pose here so an invalid road-side relation is rejected
@@ -400,7 +498,7 @@ class MissionManager(Node):
         if self.core.state != MissionState.READY:
             return self._reply(response, False, 'mission is not READY')
         if not self._servers_ready():
-            return self._reply(response, False, 'Nav2 or spray Action server is not ready')
+            return self._reply(response, False, 'required Nav2 or spray Action server is not ready')
         self._begin_mission_navigation()
         return self._reply(response, True, 'mission started')
 
@@ -419,7 +517,7 @@ class MissionManager(Node):
         if not self._nav_client.server_is_ready():
             return self._reply(response, False, 'Nav2 Action server is not ready')
         self.core.resume()
-        self._send_nav_goal()
+        self._start_navigation()
         return self._reply(response, True, 'mission resumed')
 
     def _cancel(self, _request, response):
@@ -428,8 +526,31 @@ class MissionManager(Node):
         self._stop_detector.stop()
         self._cancel_nav_goal()
         self._cancel_spray_goal()
+        self._command_all_relays_off()
         self._publish_status()
         return self._reply(response, True, 'mission canceled')
+
+    def _abort_and_home(self, _request, response):
+        """Cancel the route, then request a locked MoveIt HOME reset.
+
+        ``motion_control`` owns the physical arm reset.  This node only
+        sequences its request after the Nav2 and arm Actions have settled.
+        """
+        if self.core.state not in self.core.ACTIVE | {MissionState.READY}:
+            return self._reply(response, False, 'mission cannot be aborted in this state')
+        self.core.cancel()
+        self._abort_and_home_requested = True
+        self._abort_reset_sent = False
+        self._stop_detector.stop()
+        self._clear_nav_startup_retry()
+        self._cancel_nav_goal()
+        self._cancel_spray_goal()
+        self._command_all_relays_off()
+        self._publish_motion_command('stop')
+        self.core.last_error = 'abort requested; waiting for active actions before HOME reset'
+        self._publish_status()
+        self._advance_abort_and_home()
+        return self._reply(response, True, 'abort requested; arm HOME will start after actions settle')
 
     def _skip_current(self, _request, response):
         if self.core.state == MissionState.PAUSED and (
@@ -449,7 +570,7 @@ class MissionManager(Node):
             if not self._nav_client.server_is_ready():
                 self._fail('Nav2 Action server is not ready after skip')
                 return self._reply(response, False, self.core.last_error)
-            self._send_nav_goal()
+            self._start_navigation()
         else:
             self._publish_status()
         return self._reply(response, True, f'skipped {target.tree_id}')
@@ -467,7 +588,7 @@ class MissionManager(Node):
                 'return home is allowed only while READY, PAUSED, verifying stop, or completed')
         self._manual_return_home = not completed
         self._stop_detector.stop()
-        self._send_nav_goal()
+        self._start_navigation()
         return self._reply(response, True, 'return home started')
 
     def _reset(self, _request, response):
@@ -478,6 +599,8 @@ class MissionManager(Node):
             return self._reply(response, False, 'reset requires a terminal state')
         self._restore_configured_mission_options()
         self._manual_return_home = False
+        self._abort_and_home_requested = False
+        self._abort_reset_sent = False
         self._clear_nav_startup_retry()
         self._reset_docking_verification()
         self._publish_plan()
@@ -491,7 +614,9 @@ class MissionManager(Node):
         return response
 
     def _servers_ready(self):
-        return self._nav_client.server_is_ready() and self._spray_client.server_is_ready()
+        needs_spray = any(target.requires_arm for target in self.core.targets)
+        return self._nav_client.server_is_ready() and (
+            not needs_spray or self._spray_client.server_is_ready())
 
     def _clear_nav_startup_retry(self):
         self._initial_nav_started = None
@@ -502,7 +627,7 @@ class MissionManager(Node):
         self._reset_docking_verification()
         self._initial_nav_started = self._now()
         self._nav_retry_due = None
-        self._send_nav_goal()
+        self._start_navigation()
 
     def _schedule_initial_nav_retry(self):
         """
@@ -527,6 +652,8 @@ class MissionManager(Node):
 
     def _send_nav_goal(self):
         """发送 Nav2 导航目标并启动超时计时。"""
+        if not self._navigation_active():
+            return
         if self.core.state == MissionState.RETURNING_HOME:
             x, y, yaw = self._home_pose
             target_label = 'HOME'
@@ -556,9 +683,168 @@ class MissionManager(Node):
             f'[NAV] sent target={target_label} pose=({x:.2f},{y:.2f},{yaw:.2f})')
         self._publish_status()
 
+    def _start_navigation(self):
+        """Ensure wide spray is off for a disabled incoming segment first."""
+        if self.core.state == MissionState.RETURNING_HOME:
+            self._wide_motion_pending = False
+            self._command_relay_best_effort(
+                self._wide_relay_channel, False, 0.0,
+                self._send_nav_goal, 'returning home: disable wide spray')
+            return
+        target = self.core.current_target
+        if target is None:
+            self._fail('no current navigation target')
+            return
+        self._wide_motion_pending = False
+        if target.wide_spray_on_approach:
+            self._send_nav_goal()
+            return
+        self._command_relay_best_effort(
+            self._wide_relay_channel, False, 0.0,
+            self._send_nav_goal,
+            f'{target.tree_id}: approach has wide spray disabled')
+
     def _navigation_active(self):
         return self.core.state in (
             MissionState.NAVIGATING, MissionState.RETURNING_HOME)
+
+    def _begin_stop_verification(self):
+        if self.core.state != MissionState.VERIFYING_STOP:
+            return
+        self._localization_recovery_started = None
+        self._last_docking_log_state = None
+        self._phase_started = self._now()
+        self._stop_detector.start(self._phase_started)
+        self._publish_status()
+
+    def _skip_navigation_point(self, reason):
+        """Continue after a Nav2 result that explicitly ended the goal."""
+        target = self.core.current_target
+        if target is None or not self.core.skip_current(
+                self._return_home_after_finish, reason):
+            self._fail(reason)
+            return
+        self._wide_motion_pending = False
+        self._stop_detector.stop()
+        self.get_logger().warning(
+            f'[MISSION] skipped point={target.tree_id}: {reason}')
+        self._continue_after_point()
+
+    def _finish_noninspect_point(self):
+        target = self.core.current_target
+        if target is None or not self.core.point_succeeded(
+                self._return_home_after_finish, 'route point completed'):
+            self._fail('cannot complete non-inspect route point')
+            return
+        self.get_logger().info(f'[MISSION] completed point={target.tree_id}')
+        self._continue_after_point()
+
+    def _continue_after_point(self):
+        if self.core.state in {
+                MissionState.NAVIGATING, MissionState.RETURNING_HOME}:
+            self._start_navigation()
+            return
+        self._command_all_relays_off()
+        self._publish_status()
+
+    def _command_relay_best_effort(
+            self, channel, enabled, duration, continuation, context):
+        """Issue a non-blocking relay request; route progression never waits forever."""
+        channel = int(channel)
+        enabled = bool(enabled)
+        duration = float(duration)
+        if channel == self._wide_relay_channel:
+            self._wide_relay_enabled = enabled
+        if not self._relay_client.service_is_ready():
+            self.get_logger().warning(
+                '[MISSION][WARN][RELAY] '
+                f'channel={channel} enabled={enabled} context={context}: '
+                'service unavailable; continuing')
+            if continuation is not None:
+                continuation()
+            return
+        request = SetRelay.Request()
+        request.channel = channel
+        request.enabled = enabled
+        request.duration = duration
+        try:
+            future = self._relay_client.call_async(request)
+        except Exception as error:
+            self.get_logger().warning(
+                '[MISSION][WARN][RELAY] '
+                f'channel={channel} enabled={enabled} context={context}: '
+                f'{error}; continuing')
+            if continuation is not None:
+                continuation()
+            return
+
+        def done(result_future):
+            try:
+                response = result_future.result()
+                if response is None or not response.success:
+                    message = '' if response is None else response.message
+                    self.get_logger().warning(
+                        '[MISSION][WARN][RELAY] '
+                        f'channel={channel} enabled={enabled} context={context}: '
+                        f'{message or "request rejected"}; continuing')
+            except Exception as error:
+                self.get_logger().warning(
+                    '[MISSION][WARN][RELAY] '
+                    f'channel={channel} enabled={enabled} context={context}: '
+                    f'{error}; continuing')
+            if continuation is not None:
+                continuation()
+
+        future.add_done_callback(done)
+
+    def _command_all_relays_off(self):
+        self._wide_motion_pending = False
+        self._command_relay_best_effort(
+            self._wide_relay_channel, False, 0.0, None,
+            'mission shutdown: disable wide spray')
+        self._command_relay_best_effort(
+            self._arm_relay_channel, False, 0.0, None,
+            'mission shutdown: disable arm spray')
+
+    def _tick_wide_spray_motion(self, now):
+        if not self._wide_motion_pending:
+            return
+        if self.core.state != MissionState.NAVIGATING:
+            self._wide_motion_pending = False
+            return
+        if now >= self._wide_motion_deadline:
+            self._wide_motion_pending = False
+            self.get_logger().warning(
+                '[MISSION][WARN][RELAY] vehicle did not start moving before '
+                'wide spray timeout; continuing with channel 1 off')
+            return
+        if self._last_odom_at is None or now - self._last_odom_at > float(
+                self.get_parameter('odom_stale_timeout_sec').value):
+            return
+        if self._latest_linear_speed < self._wide_motion_linear_threshold:
+            return
+        self._wide_motion_pending = False
+        target = self.core.current_target
+        context = (
+            'vehicle motion confirmed; enable wide spray'
+            if target is None else
+            f'{target.tree_id}: vehicle motion confirmed; enable wide spray')
+        self._command_relay_best_effort(
+            self._wide_relay_channel, True, 0.0, None, context)
+
+    def _publish_motion_command(self, command):
+        self._motion_command_pub.publish(String(data=str(command)))
+
+    def _advance_abort_and_home(self):
+        if not self._abort_and_home_requested or self._abort_reset_sent:
+            return
+        if any((self._nav_pending, self._spray_pending,
+                self._nav_handle is not None, self._spray_handle is not None)):
+            return
+        self._abort_reset_sent = True
+        self._publish_motion_command('reset')
+        self.core.last_error = 'abort_and_home: motion_control reset requested'
+        self._publish_status()
 
     def _nav_goal_response(self, future):
         self._nav_pending = False
@@ -567,17 +853,25 @@ class MissionManager(Node):
         except Exception as error:
             if self._navigation_active():
                 self._fail(f'Nav2 goal send failed: {error}')
+            self._advance_abort_and_home()
             return
         if handle is None or not handle.accepted:
             if self._schedule_initial_nav_retry():
                 return
             if self._navigation_active():
-                self._fail('Nav2 rejected the goal')
+                self._skip_navigation_point('Nav2 rejected the goal')
+            self._advance_abort_and_home()
             return
         self._nav_handle = handle
         self._clear_nav_startup_retry()
         if not self._navigation_active():
             self._cancel_nav_goal()
+        elif (self.core.state == MissionState.NAVIGATING and
+              self.core.current_target is not None and
+              self.core.current_target.wide_spray_on_approach):
+            self._wide_motion_pending = True
+            self._wide_motion_deadline = (
+                self._now() + self._wide_motion_timeout)
         result_future = handle.get_result_async()
         result_future.add_done_callback(self._nav_result)
 
@@ -588,12 +882,15 @@ class MissionManager(Node):
         except Exception as error:
             if self._navigation_active():
                 self._fail(f'Nav2 result failed: {error}')
+            self._advance_abort_and_home()
             return
         if not self._navigation_active():
             self._publish_status()
+            self._advance_abort_and_home()
             return
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
-            self._fail(f'Nav2 failed with status {wrapped.status}')
+            self._skip_navigation_point(
+                f'Nav2 failed with status {wrapped.status}')
             return
         if self.core.state == MissionState.RETURNING_HOME:
             self.core.home_succeeded(canceled=self._manual_return_home)
@@ -601,19 +898,38 @@ class MissionManager(Node):
                 f'[NAV] HOME reached; state={self.core.state.name}')
             self._publish_status()
             return
+        self._wide_motion_pending = False
         self.core.nav_succeeded()
-        self._localization_recovery_started = None
-        self._last_docking_log_state = None
-        self._phase_started = self._now()
-        self._stop_detector.start(self._phase_started)
-        self.get_logger().info(
-            f'[NAV] succeeded tree={self.core.current_target.tree_id}')
-        self._publish_status()
+        target = self.core.current_target
+        if target is None:
+            self._fail('navigation completed without a route point')
+            return
+        self.get_logger().info(f'[NAV] succeeded point={target.tree_id}')
+        if target.requires_arm or int(target.point_type) == int(PointType.FINISH):
+            self._command_relay_best_effort(
+                self._wide_relay_channel, False, 0.0,
+                self._begin_stop_verification,
+                f'{target.tree_id}: disable wide spray at stop')
+        else:
+            self._begin_stop_verification()
 
     def _on_odom(self, message):
         linear = math.hypot(message.twist.twist.linear.x, message.twist.twist.linear.y)
         angular = abs(message.twist.twist.angular.z)
-        self._stop_detector.update(self._now(), linear, angular)
+        now = self._now()
+        self._last_odom_at = now
+        self._latest_linear_speed = linear
+        self._stop_detector.update(now, linear, angular)
+
+    def _on_motion_control_state(self, message):
+        self._motion_control_state = str(message.data)
+        if self._abort_and_home_requested and self._abort_reset_sent:
+            if self._motion_control_state in {'HOME_LOCKED', 'RESET_FAILED'}:
+                self.core.last_error = (
+                    'abort_and_home: arm HOME complete'
+                    if self._motion_control_state == 'HOME_LOCKED'
+                    else 'abort_and_home: arm HOME reset failed')
+                self._publish_status()
 
     @staticmethod
     def _yaw_from_quaternion(quaternion):
@@ -783,6 +1099,17 @@ class MissionManager(Node):
             return target.tree_hint_override
         return target.x, target.y, target.z
 
+    def _skip_arm_point(self, reason):
+        target = self.core.current_target
+        if target is None or not self.core.skip_current(
+                self._return_home_after_finish, reason):
+            self._fail(reason)
+            return
+        self._manual_return_home = False
+        self.get_logger().warning(
+            f'[MISSION] skipped arm point={target.tree_id}: {reason}')
+        self._continue_after_point()
+
     def _spray_goal_response(self, future):
         self._spray_pending = False
         try:
@@ -790,10 +1117,12 @@ class MissionManager(Node):
         except Exception as error:
             if self.core.state == MissionState.ARM_SPRAYING:
                 self._fail(f'spray goal send failed: {error}')
+            self._advance_abort_and_home()
             return
         if handle is None or not handle.accepted:
             if self.core.state == MissionState.ARM_SPRAYING:
-                self._fail('spray Action rejected the goal')
+                self._skip_arm_point('spray Action rejected the goal')
+            self._advance_abort_and_home()
             return
         self._spray_handle = handle
         if self.core.state != MissionState.ARM_SPRAYING:
@@ -816,33 +1145,25 @@ class MissionManager(Node):
         except Exception as error:
             if self.core.state == MissionState.ARM_SPRAYING:
                 self._fail(f'spray result failed: {error}')
+            self._advance_abort_and_home()
             return
         if self.core.state != MissionState.ARM_SPRAYING:
             self._publish_status()
+            self._advance_abort_and_home()
             return
         result = wrapped.result
-        if (not result.success
-                and result.error_code == ExecuteSpray.Result.VISION_FAILED):
-            skipped = self.core.current_target.tree_id
-            self._manual_return_home = False
-            self.core.skip_current(self._return_home_after_finish)
-            self.get_logger().info(
-                f'[MISSION] skipped tree={skipped} '
-                f'processed={self.core.processed_targets}/'
-                f'{len(self.core.targets)} completed={self.core.completed_targets} '
-                f'partial={self.core.partial_targets} '
-                f'skipped={self.core.skipped_targets}: {result.message}')
-            if self.core.state in {
-                    MissionState.NAVIGATING,
-                    MissionState.RETURNING_HOME}:
-                self._send_nav_goal()
-            else:
-                self._publish_status()
-            return
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED or not result.success:
-            self._fail(
-                f'spray failed status={wrapped.status} code={result.error_code}: '
-                f'{result.message}')
+            reason = (
+                f'spray failed status={wrapped.status} '
+                f'code={result.error_code}: {result.message}')
+            if result.error_code in {
+                    ExecuteSpray.Result.CANCELED,
+                    ExecuteSpray.Result.HOME_FAILED,
+                    ExecuteSpray.Result.LOCKED,
+                    ExecuteSpray.Result.INTERNAL_ERROR}:
+                self._fail(reason)
+            else:
+                self._skip_arm_point(reason)
             return
         finished = self.core.current_target.tree_id
         self._manual_return_home = False
@@ -867,20 +1188,17 @@ class MissionManager(Node):
             f'partial={self.core.partial_targets} '
             f'skipped={self.core.skipped_targets}: {result.message}')
         if self.core.state == MissionState.NAVIGATING:
-            self._send_nav_goal()
+            self._start_navigation()
         elif self.core.state == MissionState.RETURNING_HOME:
-            self._send_nav_goal()
+            self._start_navigation()
         else:
-            if self.core.state == MissionState.FAILED:
-                self.get_logger().error(
-                    '[MISSION] FAILED: mission contains incomplete tree results')
-            elif self.core.state == MissionState.MISSION_COMPLETED:
+            if self.core.state == MissionState.MISSION_COMPLETED:
                 self.get_logger().info(
                     f'[MISSION] MISSION_COMPLETED targets={len(self.core.targets)} '
                     f'completed={self.core.completed_targets} '
                     f'partial={self.core.partial_targets} '
                     f'skipped={self.core.skipped_targets}')
-            self._publish_status()
+            self._continue_after_point()
 
     # ---------- 100ms 调度看门狗 (Tick) ----------
     def _tick(self):
@@ -896,12 +1214,16 @@ class MissionManager(Node):
             self._begin_mission_navigation()
             return
         now = self._now()
+        self._advance_abort_and_home()
+        if self._abort_and_home_requested:
+            return
+        self._tick_wide_spray_motion(now)
         if self._nav_retry_due is not None:
             if not self._navigation_active():
                 self._clear_nav_startup_retry()
             elif now >= self._nav_retry_due:
                 self._nav_retry_due = None
-                self._send_nav_goal()
+                self._start_navigation()
             return
         if self._navigation_active() and self._phase_started is not None:
             if now - self._phase_started >= self._nav_timeout:
@@ -909,15 +1231,41 @@ class MissionManager(Node):
         elif self.core.state == MissionState.VERIFYING_STOP:
             status = self._stop_detector.status(now)
             if status == StopDetector.STABLE:
-                if (not getattr(self, '_require_docking_quality', False) or
-                        self._verify_docking_quality(now)):
+                target = self.core.current_target
+                if target is None:
+                    self._fail('stop verified without a route point')
+                elif (not getattr(self, '_require_docking_quality', False) or
+                      not target.requires_arm or
+                      self._verify_docking_quality(now)):
                     self._stop_detector.stop()
                     self.core.stop_verified()
                     self.get_logger().info(
                         '[STOP_CHECK] vehicle is stable and docking quality passed')
-                    self._send_spray_goal()
+                    if self.core.state == MissionState.ARM_SPRAYING:
+                        self._send_spray_goal()
+                    elif self.core.state == MissionState.DWELLING:
+                        self._phase_started = now
+                        if target.dwell_time_sec <= 0.0:
+                            self._finish_noninspect_point()
+                        else:
+                            self._publish_status()
             elif status in (StopDetector.STALE, StopDetector.TIMEOUT):
-                self._fail(f'odom stop verification failed: {status}')
+                target = self.core.current_target
+                if target is not None and target.requires_arm:
+                    # Nav2 has already reported arrival.  Without a verified
+                    # stationary vehicle the arm must not move, but this one
+                    # inspection point must not terminate the remaining route.
+                    self._skip_arm_point(
+                        f'odom stop verification failed: {status}')
+                else:
+                    self._fail(f'odom stop verification failed: {status}')
+        elif self.core.state == MissionState.DWELLING:
+            target = self.core.current_target
+            if target is None:
+                self._fail('dwell without a route point')
+            elif (self._phase_started is not None and
+                  now - self._phase_started >= target.dwell_time_sec):
+                self._finish_noninspect_point()
         elif self.core.state == MissionState.ARM_SPRAYING and self._phase_started is not None:
             if now - self._phase_started >= self._spray_timeout:
                 self._fail('spray Action timed out')
@@ -932,6 +1280,7 @@ class MissionManager(Node):
         self._stop_detector.stop()
         self._cancel_nav_goal()
         self._cancel_spray_goal()
+        self._command_all_relays_off()
         self.get_logger().error(f'[MISSION] FAILED: {message}')
         self._publish_status()
 
@@ -1012,7 +1361,8 @@ class MissionManager(Node):
             item.tree_x_m, item.tree_y_m = tree_offset_from_docking(
                 docking, (target.x, target.y, target.z),
                 self._arm_base_forward_offset,
-                self._arm_base_left_offset)
+                self._arm_base_left_offset,
+                self._arm_base_yaw)
             self._set_pose(
                 item.docking_pose,
                 *docking,

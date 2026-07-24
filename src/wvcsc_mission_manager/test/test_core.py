@@ -5,6 +5,7 @@ import pytest
 from wvcsc_mission_manager.core import (
     MissionCore,
     MissionState,
+    PointType,
     StopDetector,
     Target,
     docking_pose,
@@ -110,6 +111,29 @@ def test_two_target_success_path():
     assert core.target_outcomes == [core.COMPLETED, core.COMPLETED]
 
 
+def test_transit_and_finish_points_do_not_send_the_arm_to_spray():
+    core = MissionCore()
+    core.load('route', [
+        Target(
+            'transit_01', 0.0, 0.0, 0.0, 1.0, 0.0,
+            docking_pose_override=(1.0, 0.0, 0.0),
+            point_type=PointType.TRANSIT,
+            wide_spray_on_approach=True),
+        Target(
+            'finish_01', 0.0, 0.0, 0.0, 1.0, 0.0,
+            docking_pose_override=(2.0, 0.0, 0.0),
+            point_type=PointType.FINISH),
+    ])
+    assert core.start()
+    assert core.nav_succeeded() and core.stop_verified()
+    assert core.state == MissionState.DWELLING
+    assert core.point_succeeded()
+    assert core.state == MissionState.NAVIGATING
+    assert core.nav_succeeded() and core.stop_verified()
+    assert core.point_succeeded()
+    assert core.state == MissionState.MISSION_COMPLETED
+
+
 def test_optional_return_home_finishes_only_after_home_navigation():
     core = MissionCore()
     core.load('demo', [_targets()[0]])
@@ -121,7 +145,7 @@ def test_optional_return_home_finishes_only_after_home_navigation():
     assert core.state == MissionState.MISSION_COMPLETED
 
 
-def test_partial_tree_continues_remaining_targets_but_cannot_complete_mission():
+def test_partial_tree_continues_remaining_targets_and_completes_mission():
     core = MissionCore()
     core.load('demo', _targets())
     core.start()
@@ -133,13 +157,13 @@ def test_partial_tree_continues_remaining_targets_but_cannot_complete_mission():
     assert core.target_outcomes == [core.PARTIAL, core.PENDING]
 
     assert core.nav_succeeded() and core.stop_verified() and core.arm_succeeded()
-    assert core.state == MissionState.FAILED
+    assert core.state == MissionState.MISSION_COMPLETED
     assert core.completed_targets == 1
     assert core.partial_targets == 1
     assert core.target_outcomes == [core.PARTIAL, core.COMPLETED]
 
 
-def test_partial_tree_return_home_stays_failed_after_home_navigation():
+def test_partial_tree_return_home_completes_after_home_navigation():
     core = MissionCore()
     core.load('demo', [_targets()[0]])
     core.start()
@@ -147,7 +171,7 @@ def test_partial_tree_return_home_stays_failed_after_home_navigation():
     assert core.arm_partial('sprayed=1 unresolved=1', return_home=True)
     assert core.state == MissionState.RETURNING_HOME
     assert core.home_succeeded()
-    assert core.state == MissionState.FAILED
+    assert core.state == MissionState.MISSION_COMPLETED
 
 
 def test_safe_skip_and_manual_return_home_semantics():

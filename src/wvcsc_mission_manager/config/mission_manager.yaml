@@ -38,6 +38,8 @@ mission_manager:
     # 机械臂基座原点相对 base_footprint 的平面安装偏移，须与整车 URDF 一致。
     arm_base_forward_offset_m: -0.40
     arm_base_left_offset_m: 0.0
+    # 仿真通用默认值；实车入口按 alicia_mount_joint 覆盖为 pi。
+    arm_base_yaw_rad: 0.0
 
     # 实机逐树实测任务启用；仿真保持 false，避免依赖 AMCL。
     require_docking_quality: false
@@ -64,6 +66,13 @@ mission_manager:
     # 如果机械臂 Action 在 30 秒内没有发布任何进度反馈 (Feedback)，则认为卡死。
     spray_progress_timeout_sec: 30.0
 
+    # 第 1 路广域喷洒。继电器失败只记录告警，路线继续执行。
+    relay_service_name: /relay/set
+    wide_relay_channel: 1
+    arm_relay_channel: 2
+    wide_spray_motion_linear_threshold: 0.03
+    wide_spray_motion_timeout_sec: 10.0
+
     # ----------------------------------------------------------------
     # HOME (待命/充电) 位姿配置
     # ----------------------------------------------------------------
@@ -89,8 +98,8 @@ mission_manager:
     # ----------------------------------------------------------------
     # 任务校验阈值
     # ----------------------------------------------------------------
-    # 单次任务最多允许多少棵树。
-    max_targets: 20
+    # 单次 Qt 路线最多允许的点数，支持当前 23 株病株及通行/终点。
+    max_targets: 64
     # 任务坐标的最大绝对值限制 (防止异常的坏数据导航到地图外)。
     max_abs_coordinate: 50.0
     # 喷洒持续时间 (秒) 的安全边界。

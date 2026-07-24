@@ -1215,17 +1215,26 @@ class ObservationFlowMixin:
             return False
         self._tree_in_base = tree_in_base
 
-        if self._observation_mode == 'joint_presets' and tree_in_base[1] <= 0.0:
-            self._observation_failure_reason = (
-                'joint_preset_tree_side_unsupported '
-                f'(tree_y_m={tree_in_base[1]:.3f}, requires>0)')
-            self.get_logger().error(
-                '[ARM][OBSERVE] mode=joint_presets rejects tree on or right of '
-                f'the base Y axis: y={tree_in_base[1]:.3f} m')
-            self._publish_observation_debug(
-                'search_failed',
-                rejection_reason=self._observation_failure_reason)
-            return False
+        if self._observation_mode == 'joint_presets':
+            epsilon = self._joint_preset_side_epsilon_m
+            if tree_in_base[1] > epsilon:
+                self._joint_preset_side = 'left'
+            elif tree_in_base[1] < -epsilon:
+                self._joint_preset_side = 'right'
+            else:
+                self._joint_preset_side = ''
+                self._observation_failure_reason = (
+                    'joint_preset_tree_side_ambiguous '
+                    f'(tree_y_m={tree_in_base[1]:.3f}, '
+                    f'requires_abs_y>{epsilon:.3f})')
+                self.get_logger().error(
+                    '[ARM][OBSERVE] mode=joint_presets rejects tree too close '
+                    f'to the base Y axis: y={tree_in_base[1]:.3f} m, '
+                    f'epsilon={epsilon:.3f} m')
+                self._publish_observation_debug(
+                    'search_failed',
+                    rejection_reason=self._observation_failure_reason)
+                return False
 
         try:
             # 粗对准仍需已加载的 tool0 -> camera 外参；预设扫描本身不使用它求 IK。
@@ -1254,9 +1263,19 @@ class ObservationFlowMixin:
         """Prepare the fixed real-arm scan order without camera look-at IK."""
         self._observation_candidates = []
         self._observation_candidate_index = -1
-        for index, (name, joints) in enumerate(self._joint_preset_positions):
+        presets = self._joint_preset_positions.get(self._joint_preset_side, ())
+        if not presets:
+            self._observation_failure_reason = (
+                f'joint_preset_side_unconfigured ({self._joint_preset_side or "none"})')
+            self.get_logger().error(
+                '[ARM][OBSERVE] mode=joint_presets has no configured presets '
+                f'for side={self._joint_preset_side or "none"}')
+            self._publish_observation_debug(
+                'search_failed', rejection_reason=self._observation_failure_reason)
+            return False
+        for index, (name, joints) in enumerate(presets):
             self._observation_candidates.append(_build_candidate(
-                candidate_id=f'joint_preset_{name}',
+                candidate_id=f'joint_preset_{self._joint_preset_side}_{name}',
                 distance_m=self._spray_working_distance,
                 camera_height_m=0.0,
                 azimuth_deg=(0.0, -1.0, 1.0)[index],
@@ -1275,7 +1294,7 @@ class ObservationFlowMixin:
         self.get_logger().info(
             '[ARM][OBSERVE] mode=joint_presets tree_in_base='
             f'({self._tree_in_base[0]:.2f},{self._tree_in_base[1]:.2f},'
-            f'{self._tree_in_base[2]:.2f}) prepared='
+            f'{self._tree_in_base[2]:.2f}) side={self._joint_preset_side} prepared='
             f'{len(self._observation_candidates)}')
         return True
 

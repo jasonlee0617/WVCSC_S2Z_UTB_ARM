@@ -37,6 +37,21 @@ class MissionState(IntEnum):
     CANCELED = 9            # 任务被取消
     FAILED = 10             # 任务严重失败
     RETURNING_HOME = 11     # 返回 HOME 位
+    DWELLING = 12           # 路线点停留
+
+
+class PointType(IntEnum):
+    """Route point kind.  INSPECT is zero for legacy ManualMissionTarget."""
+    INSPECT = 0
+    TRANSIT = 1
+    FINISH = 2
+
+
+class WorkSide(IntEnum):
+    """Declared tree side relative to alicia_base_link."""
+    UNSPECIFIED = 0
+    LEFT = 1
+    RIGHT = 2
 
 
 @dataclass(frozen=True)
@@ -51,6 +66,14 @@ class Target:
     evidence_uri: str = ''
     docking_pose_override: tuple | None = None  # 如果手动注入任务，可覆盖自动生成的停靠点
     tree_hint_override: tuple | None = None  # 实测任务可显式提供树根 map 坐标
+    point_type: int = PointType.INSPECT
+    wide_spray_on_approach: bool = False
+    dwell_time_sec: float = 0.0
+    work_side: int = WorkSide.UNSPECIFIED
+
+    @property
+    def requires_arm(self):
+        return int(self.point_type) == int(PointType.INSPECT)
 
 
 class MissionCore:
@@ -70,6 +93,7 @@ class MissionCore:
         MissionState.ARM_SPRAYING,
         MissionState.PAUSED,
         MissionState.RETURNING_HOME,
+        MissionState.DWELLING,
     }
     # 终端状态集合 (任务已彻底结束)
     TERMINAL = {
@@ -124,7 +148,15 @@ class MissionCore:
         return self._transition(MissionState.NAVIGATING, MissionState.VERIFYING_STOP)
 
     def stop_verified(self):
-        return self._transition(MissionState.VERIFYING_STOP, MissionState.ARM_SPRAYING)
+        if self.state != MissionState.VERIFYING_STOP:
+            return False
+        target = self.current_target
+        if target is None:
+            return False
+        self.state = (
+            MissionState.ARM_SPRAYING if target.requires_arm
+            else MissionState.DWELLING)
+        return True
 
     def retry_navigation(self):
         """停靠质量不合格时重新导航当前目标，不推进任务索引。"""
@@ -139,16 +171,32 @@ class MissionCore:
         return bool(self.targets) and all(
             outcome == self.COMPLETED for outcome in self.target_outcomes)
 
+    @property
+    def all_targets_processed(self):
+        return bool(self.targets) and all(
+            outcome != self.PENDING for outcome in self.target_outcomes)
+
     def _finish_after_current(self, return_home):
         """处理完当前任务后，决定是否进入下一棵树、返回 Home 或完成任务。"""
         if self.current_index < len(self.targets):
             self.state = MissionState.NAVIGATING
         elif return_home:
             self.state = MissionState.RETURNING_HOME
-        elif self.all_targets_completed:
+        elif self.all_targets_processed:
             self.state = MissionState.MISSION_COMPLETED
         else:
             self.state = MissionState.FAILED
+
+    def point_succeeded(self, return_home=False, message=''):
+        """Finish a transit or finish point after its optional dwell."""
+        if self.state != MissionState.DWELLING:
+            return False
+        self.target_outcomes[self.current_index] = self.COMPLETED
+        self.target_messages[self.current_index] = str(message)
+        self.completed_targets += 1
+        self.current_index += 1
+        self._finish_after_current(return_home)
+        return True
 
     def arm_succeeded(self, return_home=False, message=''):
         """机械臂喷洒成功。"""
@@ -162,7 +210,7 @@ class MissionCore:
         return True
 
     def arm_partial(self, message='', return_home=False):
-        """记录树级部分成功 (如只喷了一半的病果)，任务会继续但最终状态必须是 FAILED。"""
+        """记录树级部分成功；路线继续，最终状态仍可正常结束。"""
         if self.state != MissionState.ARM_SPRAYING:
             return False
         self.target_outcomes[self.current_index] = self.PARTIAL
@@ -174,26 +222,30 @@ class MissionCore:
         self._finish_after_current(return_home)
         return True
 
-    def skip_current(self, return_home=False):
+    def skip_current(self, return_home=False, message='tree skipped'):
         """跳过当前任务。"""
         if self.state not in {
                 MissionState.READY,
                 MissionState.PAUSED,
+                MissionState.NAVIGATING,
                 MissionState.VERIFYING_STOP,
-                MissionState.ARM_SPRAYING}:
+                MissionState.ARM_SPRAYING,
+                MissionState.DWELLING}:
             return False
         previous_state = self.state
         self.target_outcomes[self.current_index] = self.SKIPPED
-        self.target_messages[self.current_index] = 'tree skipped'
+        self.target_messages[self.current_index] = str(message)
         self.last_error = (
-            f'incomplete tree={self.targets[self.current_index].tree_id}: tree skipped')
+            f'incomplete tree={self.targets[self.current_index].tree_id}: {message}')
         self.current_index += 1
         self.skipped_targets += 1
         if self.current_index >= len(self.targets):
             self._finish_after_current(return_home)
         elif previous_state in {
                 MissionState.VERIFYING_STOP,
-                MissionState.ARM_SPRAYING}:
+                MissionState.ARM_SPRAYING,
+                MissionState.NAVIGATING,
+                MissionState.DWELLING}:
             self.state = MissionState.NAVIGATING
         else:
             self.state = previous_state
@@ -212,8 +264,7 @@ class MissionCore:
     def home_succeeded(self, canceled=False):
         target = (
             MissionState.CANCELED if canceled
-            else (MissionState.MISSION_COMPLETED
-                  if self.all_targets_completed else MissionState.FAILED))
+            else MissionState.MISSION_COMPLETED)
         return self._transition(MissionState.RETURNING_HOME, target)
 
     def pause(self):

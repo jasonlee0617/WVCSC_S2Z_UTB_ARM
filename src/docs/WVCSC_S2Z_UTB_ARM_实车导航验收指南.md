@@ -1,18 +1,109 @@
-# WVCSC 实车五点导航与喷洒验收指南
+# WVCSC 实车任意路线导航与喷洒验收指南
 
-本文档描述当前实车主流程：建图/定位、采集五个导航点、自动执行五点路线、广域喷洒和机械臂定点喷洒。
+当前实车默认使用 **Qt 驱动的任意路线任务**。它不再限制为五个点，适用于当前
+23 株病株以及任意数量的通行点、病株检查点和终点。保留原有 YAML 五点路线与
+`capture_site_pose` 命令行采点，作为已验证的兼容模式和继电器联调工具。
 
-当前实车任务唯一入口为：
+默认数据流为：
 
 ```text
-real_system_mission.launch.py
-  → preflight
-  → real_orchestration.launch.py
-  → field_route_manager
-  → 五点导航 + 第1路广域喷洒 + 第2路机械臂喷洒
+real_system_mission.launch.py (mission_mode:=qt)
+  → Nav2 / AMCL / RViz + Qt 任务编辑器
+  → 操作者确认初始位姿、编辑路线并点击“多点导航+喷洒”
+  → mission_manager
+  → Nav2 + 第1路广域喷洒 + 第2路机械臂喷洒
 ```
 
-`wvcsc_mission_manager` 和 `/mission/load_manual` 仅保留给仿真兼容；不再作为实车任务入口。
+启动后不会自动行驶。只有 Qt 向 `/mission/load_manual` 提交路线并调用
+`/mission/start` 后才开始执行；因此必须先在 RViz 完成 `2D Pose Estimate`。
+
+## 1. Qt 任意路线作业（默认）
+
+### 1.1 启动与初始定位
+
+建图完成后，不要再单独启动 `real_navigation.launch.py`。完整任务入口已经启动同一套
+底盘、LiDAR、IMU、EKF、AMCL、Nav2、RViz、C10、YOLO、MoveIt 和继电器；同时再启动
+独立导航会造成 Nav2、AMCL、TF 和 `/navigate_to_pose` 冲突。
+
+```bash
+source /opt/ros/humble/setup.bash
+source "$HOME/WVCSC_S2Z_UTB_ARM/install/setup.bash"
+
+ros2 launch wvcsc_bringup real_system_mission.launch.py \
+  yolo_python_executable:="$HOME/venvs/wvcsc_yolo_ros/bin/python"
+```
+
+实车默认硬件为 C10 `/dev/video2`、Alicia-M `/dev/ttyACM0`。设备号变化时只在本次
+启动显式覆盖 `c10_device:=...` 或 `serial_port:=...`，不要改动 YOLO 节点代码。
+
+在弹出的导航 RViz 中：
+
+1. 选择 `2D Pose Estimate`，在地图上点击并拖动，设置小车当前位置和朝向；
+2. 等待 AMCL 位姿与机器人模型稳定；
+3. 再到 Qt 窗口点击“记录起点”。该起点只用于可选的任务完成后返回，不会触发导航。
+
+### 1.2 通过 RViz 与 Qt 记录路线
+
+Qt 的“点类型”就是人工确认点位属性的入口：
+
+| 点类型 | 人工含义 | RViz 操作 | 到点动作 |
+| --- | --- | --- | --- |
+| 通行点 `TRANSIT` | 健康株附近或仅需经过的位置 | 一次 `2D Goal`，Qt 点击“使用最新目标为停靠位” | 可选停留；不驱动机械臂 |
+| 病株检查点 `INSPECT` | 需要机械臂视觉识别/单独喷洒的玉米树 | 第一次 `2D Goal` 是停车位，点击“使用最新目标为停靠位”；第二次 `2D Goal` 点该树中心，再点击“使用下一目标为树中心” | 关闭第1路、停稳、机械臂识别并第2路喷洒 |
+| 终点 `FINISH` | 路线结束位置 | 一次 `2D Goal`，Qt 点击“使用最新目标为停靠位” | 第1、2路最佳努力关闭，可选停留；不驱动机械臂 |
+
+`2D Goal` 只提供地图平面位置和航向，不会自动识别“第几株玉米”或自动判断病害；
+LiDAR 能看到行侧障碍，但当前工程没有可靠的单株玉米中心/ID提取器。因此病株中心仍由
+操作者在 RViz 点击，Qt 才能计算机械臂所需的相对坐标。
+
+对于每个 `INSPECT`，Qt 使用停车位与树中心的两个 map 坐标，并按实际安装关系
+`alicia_base_link = base_footprint + (-0.40, 0, pi)` 计算带符号的
+`tree_x_m/tree_y_m`。显示为：
+
+```text
+tree_y_m > +0.05 m  → 左侧预设
+tree_y_m < -0.05 m  → 右侧预设
+abs(tree_y_m) <= 0.05 m → 拒绝提交，需要重新选择停车位或树中心
+```
+
+这两个符号属于 `alicia_base_link`，不是车体坐标，也不应手动按“地图左/右”猜测。
+左、右两侧均使用已人工提供的独立关节预设；不会用镜像角度替代。
+
+### 1.3 广域喷洒、病株喷洒和顺序
+
+“驶向该点时开启广域喷洒”是 **到该点的入段属性**，不是健康/病害标签。
+例如路线为 `点1(通行) → 点2(病株) → 点3(病株) → 点4(通行) → 点5(终点)` 时：
+
+```text
+点1 incoming wide=开：车辆确认开始运动后，第1路开启
+点2 incoming wide=开：到点后关闭第1路，车辆停稳，机械臂执行第2路喷洒
+点3 incoming wide=开：点2完成且车辆再次起步后，第1路重新开启；到点重复病株流程
+点4 incoming wide=开：点3完成后再次起步时第1路开启
+点5 incoming wide=关：发送最终导航前关闭第1路；终点关闭两路
+```
+
+因此“在不到达病树前都执行广域喷洒”只在你为每一个入段勾选广域喷洒时成立；到达
+病株停车位后广域喷洒一定关闭，避免机械臂运动时第1路仍工作。第1路只有在 Nav2 已
+接受目标且 `/ekf_odom` 线速度达到 `0.03 m/s` 后才尝试开启；继电器通信失败当前只记
+录告警，路线继续。
+
+在表格内可修改/排序/删除各点，并设置每点的广域入段开关、病株喷洒时长、停留时间和
+侧位。点击“保存多点任务”保存 JSON，点击“加载多点任务”恢复；勾选“完成后返回起点”
+时，最后一个点完成后关闭第1路并导航回起点。
+
+### 1.4 开始、跳过与终止
+
+检查表格、路线标记和起点后点击“多点导航+喷洒”（单点路线可点击“单点导航+喷洒”）。
+任务不会因为一个点的已确认 Nav2 失败、视觉失败、观察失败或继电器调用失败而整体中断：
+该点会标记为跳过，继续后续点。仍会在导航/机械臂 Action 超时、取消尚未确认、运动锁定
+或关键定位状态缺失时停止，避免与未结束动作并发。
+
+“终止作业并回HOME”调用 `/mission/abort_and_home`：先取消导航和机械臂 Action，最佳
+努力关闭第1、2路，再通过 `motion_control` 发送 `stop` 和 `reset`，等待其 `HOME_LOCKED`
+或 `RESET_FAILED` 状态；它不是固定延时后直接下发复位命令。现场急停和物理断电仍是
+继电器异常时的最后安全手段。
+
+## 2. 前置条件
 
 ## 1. 前置条件
 
@@ -75,7 +166,7 @@ ros2 launch wvcsc_bringup real_navigation.launch.py
 
 `real_navigation.launch.py` 只用于定位和导航诊断，不启动机械臂喷洒任务。
 
-## 4. 创建并采集五点路线
+## 3. 兼容模式：YAML 五点路线与命令行采点
 
 复制模板到新的时间戳任务目录：
 
@@ -128,9 +219,9 @@ alicia +X = 车体 -X，alicia +Y = 车体 -Y。
 ```
 
 `point_2` 和 `point_3` 的树坐标必须使用机械臂基座坐标系下的带符号 X/Y。
-关节预设观察模式只接受 `tree-y-m > 0`；这是 `alicia_base_link` 的正 Y，
-不是车体正 Y。当前安装下，不能因为树位于车体某一侧而手工把该值改成负数；
-路线管理器会应用安装偏航 `yaw_rad: pi` 后再生成 map 中的树提示。
+关节预设观察模式支持 `tree-y-m > 0.05` 的左侧树和 `tree-y-m < -0.05` 的右侧树；
+这是 `alicia_base_link` 的正/负 Y，不是车体正/负 Y。当前安装下，不能因为树位于
+车体某一侧而手工猜测符号；路线管理器会应用安装偏航 `yaw_rad: pi` 后再生成 map 中的树提示。
 
 ### 4.1 采点门控说明
 
@@ -283,7 +374,7 @@ ros2 service type /relay/set
 
 联调通过只证明导航、继电器和任务编排正确，不代表机械臂视觉喷洒已经通过。
 
-## 7. 启动完整五点实车任务
+## 4. 兼容模式：启动完整五点实车任务
 
 联调入口验收完成后先按 `Ctrl-C` 停止
 `real_field_route_validation.launch.py`，确认第1、2路都已断开，再启动生产任务。
@@ -323,7 +414,7 @@ $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/nozzle.example.yaml
 该文件是临时 tool0 零偏置配置，`spray_nozzle_link` 与 `tool0` 平移为零、旋转为单位
 旋转，不代表真实喷嘴外参。
 
-## 8. 五点任务行为
+## 5. 五点兼容任务行为
 
 ```text
 point_1:

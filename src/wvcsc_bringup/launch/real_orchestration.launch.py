@@ -1,4 +1,4 @@
-"""Real perception, arm task and fixed five-point field orchestration."""
+"""Real perception, arm task, Qt route editing and file-route compatibility."""
 
 import os
 
@@ -7,11 +7,20 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, FindExecutable, LaunchConfiguration
+from launch.substitutions import (
+    Command, FindExecutable, LaunchConfiguration, PythonExpression)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 from wvcsc_bringup.path_defaults import latest_field_route, latest_map_yaml
+
+
+def _optional_latest_field_route():
+    """Keep interactive Qt mode usable before its first route is saved."""
+    try:
+        return latest_field_route()
+    except RuntimeError:
+        return ''
 
 
 def generate_launch_description():
@@ -19,6 +28,7 @@ def generate_launch_description():
     description_share = get_package_share_directory('wvcsc_description')
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
     controller_share = get_package_share_directory('controller_pkg')
+    mission_share = get_package_share_directory('wvcsc_mission_manager')
     real_config = os.path.join(bringup_share, 'config', 'real')
 
     xacro_file = os.path.join(
@@ -128,8 +138,29 @@ def generate_launch_description():
             'config_file': LaunchConfiguration('relay_config_file'),
         }.items(),
     )
+    mission_manager = Node(
+        package='wvcsc_mission_manager', executable='mission_manager',
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('mission_mode'), "' == 'qt'",
+        ])),
+        parameters=[
+            os.path.join(mission_share, 'config', 'mission_manager.yaml'),
+            {
+                'use_sim_time': False,
+                'auto_start': False,
+                'arm_base_yaw_rad': 3.141592653589793,
+                'wide_relay_channel': 1,
+                'arm_relay_channel': 2,
+                'relay_service_name': '/relay/set',
+            },
+        ],
+        remappings=[('/odom', '/ekf_odom')],
+        output='screen')
     field_route_manager = Node(
         package='wvcsc_bringup', executable='field_route_manager.py',
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('mission_mode'), "' == 'file'",
+        ])),
         parameters=[
             {
                 'use_sim_time': False,
@@ -156,8 +187,11 @@ def generate_launch_description():
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
         DeclareLaunchArgument('use_keyboard', default_value='false'),
         DeclareLaunchArgument(
+            'mission_mode', default_value='qt',
+            description='qt: interactive Qt route editor; file: fixed YAML route'),
+        DeclareLaunchArgument(
             'mission_file',
-            default_value=latest_field_route()),
+            default_value=_optional_latest_field_route()),
         DeclareLaunchArgument('map', default_value=latest_map_yaml()),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
@@ -185,6 +219,7 @@ def generate_launch_description():
         motion_control,
         spray_task,
         spray_actuator,
+        mission_manager,
         field_route_manager,
         keyboard,
     ])

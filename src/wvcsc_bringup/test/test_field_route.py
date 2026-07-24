@@ -111,7 +111,7 @@ def test_v4_default_validation_keeps_geometry_but_not_capture_quality_gates(tmp_
         )
 
 
-def test_real_field_manager_keeps_shared_manual_route_untouched():
+def test_real_file_mode_keeps_shared_manual_route_untouched():
     manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
         encoding='utf-8')
     orchestration = (PACKAGE / 'launch' / 'real_orchestration.launch.py').read_text(
@@ -119,7 +119,10 @@ def test_real_field_manager_keeps_shared_manual_route_untouched():
 
     assert "executable='field_route_manager.py'" in orchestration
     assert "executable='load_site_mission.py'" not in orchestration
-    assert "package='wvcsc_mission_manager', executable='mission_manager'" not in orchestration
+    # The generic manager is started only by mission_mode:=qt.  File mode
+    # retains this manager unchanged for its existing schema-v4 route.
+    assert "package='wvcsc_mission_manager', executable='mission_manager'" in orchestration
+    assert "' == 'file'" in orchestration
     assert "self._relay(\n                self._wide_channel, True" in manager
     assert "self._relay(\n                self._wide_channel, False" in manager
     assert 'self._command_all_off()' in manager

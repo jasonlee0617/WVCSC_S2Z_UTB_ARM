@@ -38,6 +38,9 @@ class _Logger:
     def warn(self, _message):
         pass
 
+    def warning(self, _message):
+        pass
+
 
 class _Detector:
     def __init__(self, status=StopDetector.WAITING):
@@ -84,6 +87,8 @@ class _Harness:
         self._home_pose = (0.0, 0.0, 0.0)
         self._stop_detector = _Detector()
         self._nav_client = _NavClient()
+        self._abort_and_home_requested = False
+        self._wide_motion_pending = False
         self.failures = []
         self.nav_cancels = 0
         self.spray_cancels = 0
@@ -94,6 +99,16 @@ class _Harness:
             MissionManager._clear_nav_startup_retry.__get__(self, _Harness))
         self._schedule_initial_nav_retry = (
             MissionManager._schedule_initial_nav_retry.__get__(self, _Harness))
+        self._skip_navigation_point = (
+            MissionManager._skip_navigation_point.__get__(self, _Harness))
+        self._skip_arm_point = (
+            MissionManager._skip_arm_point.__get__(self, _Harness))
+        self._continue_after_point = (
+            MissionManager._continue_after_point.__get__(self, _Harness))
+        self._advance_abort_and_home = lambda: None
+        self._command_all_relays_off = lambda: None
+        self._start_navigation = lambda: setattr(self, 'nav_sent', True)
+        self._tick_wide_spray_motion = lambda _now: None
 
     def _fail(self, message):
         self.failures.append(str(message))
@@ -123,6 +138,7 @@ class _Validator:
         self._docking_lateral_offset = 0.5
         self._arm_base_forward_offset = -0.40
         self._arm_base_left_offset = 0.0
+        self._arm_base_yaw = 0.0
         self.parameters = {
             'max_targets': 2,
             'max_abs_coordinate': 50.0,
@@ -167,20 +183,21 @@ def _manual_request(frame='map', x=3.0, count=1):
     )
 
 
-def test_nav_rejection_and_failure_are_fail_fast():
+def test_nav_rejection_and_confirmed_failure_skip_current_route_point():
     rejected = _Harness()
     MissionManager._nav_goal_response(
         rejected, _Future(SimpleNamespace(accepted=False)))
-    assert rejected.core.state == MissionState.FAILED
-    assert rejected.failures == ['Nav2 rejected the goal']
+    assert rejected.core.state == MissionState.MISSION_COMPLETED
+    assert rejected.core.skipped_targets == 1
+    assert rejected.failures == []
 
     failed = _Harness()
     MissionManager._nav_result(
         failed,
         _Future(SimpleNamespace(status=GoalStatus.STATUS_ABORTED)),
     )
-    assert failed.core.state == MissionState.FAILED
-    assert failed.core.current_index == 0
+    assert failed.core.state == MissionState.MISSION_COMPLETED
+    assert failed.core.current_index == 1
 
 
 def test_initial_nav_rejection_retries_while_lifecycle_activates():
@@ -207,12 +224,12 @@ def test_paused_navigation_cancel_does_not_fail_mission():
     assert paused._nav_handle is None
 
 
-def test_spray_rejection_and_failed_result_do_not_advance_target():
+def test_spray_rejection_skips_but_home_failure_remains_blocking():
     rejected = _Harness(MissionState.ARM_SPRAYING)
     MissionManager._spray_goal_response(
         rejected, _Future(SimpleNamespace(accepted=False)))
-    assert rejected.core.state == MissionState.FAILED
-    assert rejected.core.current_index == 0
+    assert rejected.core.state == MissionState.MISSION_COMPLETED
+    assert rejected.core.current_index == 1
 
     failed = _Harness(MissionState.ARM_SPRAYING)
     result = SimpleNamespace(
@@ -240,7 +257,7 @@ def test_ordinary_vision_failure_skips_target_after_home():
             status=GoalStatus.STATUS_ABORTED, result=result)),
     )
 
-    assert harness.core.state == MissionState.FAILED
+    assert harness.core.state == MissionState.MISSION_COMPLETED
     assert harness.core.skipped_targets == 1
     assert harness.core.target_outcomes == [MissionCore.SKIPPED]
     assert harness.failures == []
@@ -265,7 +282,7 @@ def test_inspected_without_disease_completes_the_tree():
     assert harness.core.skipped_targets == 0
 
 
-def test_partial_success_marks_tree_incomplete_and_fails_final_mission():
+def test_partial_success_marks_tree_incomplete_but_completes_route():
     harness = _Harness(MissionState.ARM_SPRAYING)
     result = SimpleNamespace(
         success=True,
@@ -279,13 +296,13 @@ def test_partial_success_marks_tree_incomplete_and_fails_final_mission():
             status=GoalStatus.STATUS_SUCCEEDED, result=result)),
     )
 
-    assert harness.core.state == MissionState.FAILED
+    assert harness.core.state == MissionState.MISSION_COMPLETED
     assert harness.core.completed_targets == 0
     assert harness.core.partial_targets == 1
     assert harness.core.target_outcomes == [MissionCore.PARTIAL]
 
 
-def test_nav_spray_and_stop_timeouts_fail_the_active_target():
+def test_nav_and_spray_timeouts_stay_blocking_but_inspect_stop_timeout_skips():
     navigating = _Harness(MissionState.NAVIGATING)
     MissionManager._tick(navigating)
     assert navigating.failures == ['Nav2 goal timed out']
@@ -297,7 +314,9 @@ def test_nav_spray_and_stop_timeouts_fail_the_active_target():
     stale = _Harness(MissionState.VERIFYING_STOP)
     stale._stop_detector = _Detector(StopDetector.STALE)
     MissionManager._tick(stale)
-    assert stale.failures == ['odom stop verification failed: stale']
+    assert stale.failures == []
+    assert stale.core.state == MissionState.MISSION_COMPLETED
+    assert stale.core.skipped_targets == 1
 
 
 def test_spray_feedback_prevents_the_progress_watchdog_from_canceling_work():
@@ -334,7 +353,7 @@ def test_invalid_manual_frame_coordinate_target_count_and_confidence_are_rejecte
     for request in (
             _manual_request(frame='odom'),
             _manual_request(x=51.0),
-            _manual_request(count=3)):
+            _manual_request(count=65)):
         try:
             MissionManager._validate_manual_request(validator, request)
         except ValueError:
@@ -354,6 +373,16 @@ def test_manual_targets_preserve_selected_pose_and_validate_input():
     assert targets[0].docking_pose_override[:2] == (3.0, 0.5)
     assert math.isclose(targets[0].docking_pose_override[2], 0.2)
     assert home == (0.0, 0.0, 0.0)
+
+
+def test_manual_qt_route_accepts_twenty_three_inspection_points():
+    validator = _Validator()
+    validator.parameters['max_targets'] = 64
+    request = _manual_request(count=23)
+
+    targets, _home = MissionManager._validate_manual_request(validator, request)
+
+    assert len(targets) == 23
 
 
 def test_mock_style_manual_target_uses_mission_manager_docking_geometry():
@@ -533,7 +562,7 @@ def test_skip_requires_paused_navigation_to_settle():
     MissionManager._skip_current(harness, None, response)
     assert response.success
     assert harness.core.skipped_targets == 1
-    assert harness.core.state == MissionState.FAILED
+    assert harness.core.state == MissionState.MISSION_COMPLETED
 
 
 def test_manual_return_home_is_started_only_from_safe_settled_state():

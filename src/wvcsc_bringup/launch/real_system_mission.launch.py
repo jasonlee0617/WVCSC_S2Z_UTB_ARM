@@ -1,4 +1,4 @@
-"""WVCSC real-hardware full-mission entry point (measured sites only)."""
+"""WVCSC real-hardware full-mission entry point (Qt route editor by default)."""
 
 import os
 from functools import partial
@@ -23,7 +23,8 @@ from launch.actions import (
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 
 from wvcsc_bringup.path_defaults import latest_field_route, latest_map_yaml
 
@@ -33,6 +34,14 @@ def _include(launch_dir, filename, arguments=None):
         PythonLaunchDescriptionSource(os.path.join(launch_dir, filename)),
         launch_arguments=(arguments or {}).items(),
     )
+
+
+def _optional_latest_field_route():
+    """Qt route editing must work before a field-route YAML exists."""
+    try:
+        return latest_field_route()
+    except RuntimeError:
+        return ''
 
 
 def _expand_path(path):
@@ -196,6 +205,9 @@ def _resolve_calibrations(context, *, launch_dir):
     """Load hand-eye, nozzle and camera calibrations; block if missing."""
 
     initial_actions = []
+    mission_mode = LaunchConfiguration('mission_mode').perform(context)
+    if mission_mode not in ('qt', 'file'):
+        raise RuntimeError("mission_mode must be 'qt' or 'file'")
 
     # --- hand-eye calibration ---
     calibration_path = _resolve_handeye_calibration(
@@ -264,7 +276,8 @@ def _resolve_calibrations(context, *, launch_dir):
         cmd=[
             LaunchConfiguration('preflight_script').perform(context),
             '--mode', 'localization',
-            '--operation', 'field_route',
+            '--operation', (
+                'qt_mission' if mission_mode == 'qt' else 'field_route'),
             '--mission-file', LaunchConfiguration('mission_file').perform(context),
             '--camera-device', LaunchConfiguration('c10_device').perform(context),
             '--arm-device', LaunchConfiguration('serial_port').perform(context),
@@ -291,8 +304,24 @@ def _resolve_calibrations(context, *, launch_dir):
         'nozzle_mount_xyz': LaunchConfiguration('nozzle_mount_xyz'),
         'nozzle_mount_rpy': LaunchConfiguration('nozzle_mount_rpy'),
     }
+    qt_editor = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            get_package_share_directory('my_navigation2'), 'launch',
+            'nav2_qt.launch.py')),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('mission_mode'), "' == 'qt' and '",
+            LaunchConfiguration('use_qt_gui'), "' == 'true'",
+        ])),
+        launch_arguments={
+            'use_sim_time': 'false',
+            'map_frame': 'map',
+            'base_frame': 'base_footprint',
+            'goal_pose_topic': '/manual_goal_pose',
+        }.items())
     success_actions = [
-        LogInfo(msg='[BRINGUP] preflight passed; starting full mission stack'),
+        LogInfo(msg=(
+            '[BRINGUP] preflight passed; starting full mission stack '
+            f'(mode={mission_mode})')),
         _include(launch_dir, 'real_sensors.launch.py', {
             **shared_description_args,
             'c10_device': LaunchConfiguration('c10_device'),
@@ -314,6 +343,7 @@ def _resolve_calibrations(context, *, launch_dir):
             **shared_description_args,
             'map': LaunchConfiguration('map'),
             'mission_file': LaunchConfiguration('mission_file'),
+            'mission_mode': LaunchConfiguration('mission_mode'),
             'yolo_python_executable': LaunchConfiguration(
                 'yolo_python_executable'),
             'use_keyboard': LaunchConfiguration('use_keyboard'),
@@ -329,6 +359,7 @@ def _resolve_calibrations(context, *, launch_dir):
             'aim_trim_v_px': LaunchConfiguration('aim_trim_v_px'),
             'relay_config_file': LaunchConfiguration('relay_config_file'),
         }),
+        qt_editor,
     ]
 
     def after_preflight(event, _context):
@@ -358,7 +389,10 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            'mission_file', default_value=latest_field_route()),
+            'mission_file', default_value=_optional_latest_field_route()),
+        DeclareLaunchArgument(
+            'mission_mode', default_value='qt',
+            description='qt: interactive route editing; file: fixed field-route YAML'),
         DeclareLaunchArgument(
             'map', default_value=latest_map_yaml()),
         DeclareLaunchArgument(
@@ -408,10 +442,11 @@ def generate_launch_description():
             'yolo_python_executable',
             default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
-        # Full missions start headless by default.  Enable only the display
-        # that is required for the current operation.
+        # Qt route editing needs the navigation RViz for 2D Pose Estimate and
+        # 2D Goal.  MoveIt RViz remains opt-in to avoid a second RViz window.
         DeclareLaunchArgument('use_nav_rviz', default_value='true'),
         DeclareLaunchArgument('use_moveit_rviz', default_value='false'),
+        DeclareLaunchArgument('use_qt_gui', default_value='true'),
         DeclareLaunchArgument('use_keyboard', default_value='false'),
         OpaqueFunction(function=partial(_resolve_calibrations, launch_dir=launch_dir)),
     ])
