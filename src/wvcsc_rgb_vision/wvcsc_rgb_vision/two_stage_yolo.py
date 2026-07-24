@@ -621,7 +621,8 @@ class TwoStageYolo(Node):
         active = message.state == MissionStatus.ARM_SPRAYING
         mission_id = message.mission_id if active else ''
         tree_id = message.current_tree_id if active else ''
-        if (mission_id, tree_id) != (self._mission_id, self._tree_id):
+        changed = (mission_id, tree_id) != (self._mission_id, self._tree_id)
+        if changed:
             self._reset_tracking()
         self._mission_id = mission_id
         self._tree_id = tree_id
@@ -629,6 +630,10 @@ class TwoStageYolo(Node):
             self._selected_target_id = ''
             self._selected_target_reference = None
             self._selected_target_template = None
+        if changed:
+            self.get_logger().info(
+                f'[YOLO][MISSION] active={active} mission={mission_id or "-"} '
+                f'tree={tree_id or "-"}')
 
     def _on_selected_target(self, message):
         """接收来自 `spray_task` 的逻辑目标 ID 锁定指令。"""

@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 from std_msgs.msg import Header
 from types import SimpleNamespace
+from wvcsc_interfaces.msg import MissionStatus
 
 from wvcsc_rgb_vision.model_utils import (
     DISEASED_TARGET_CLASS_NAMES,
@@ -76,6 +77,44 @@ def test_detection_message_exposes_only_shared_target_class():
         10.0, 20.0, 30.0, 40.0, 20.0, 30.0)
     detection = TwoStageYolo._detection(Header(), instance)
     assert detection.results[0].hypothesis.class_id == 'diseased_target'
+
+
+def test_mission_status_activates_and_clears_task_vision_identity():
+    class Logger:
+        def __init__(self):
+            self.messages = []
+
+        def info(self, message):
+            self.messages.append(message)
+
+    node = object.__new__(TwoStageYolo)
+    node._standalone_mode = False
+    node._mission_id = ''
+    node._tree_id = ''
+    node._selected_target_id = 'stale-target'
+    node._selected_target_reference = object()
+    node._selected_target_template = object()
+    reset_calls = []
+    logger = Logger()
+    node._reset_tracking = lambda: reset_calls.append(True)
+    node.get_logger = lambda: logger
+
+    TwoStageYolo._on_status(node, SimpleNamespace(
+        state=MissionStatus.ARM_SPRAYING,
+        mission_id='corn_field_five_point_001', current_tree_id='corn_01'))
+    assert (node._mission_id, node._tree_id) == (
+        'corn_field_five_point_001', 'corn_01')
+    assert reset_calls == [True]
+    assert logger.messages == [
+        '[YOLO][MISSION] active=True mission=corn_field_five_point_001 tree=corn_01']
+
+    TwoStageYolo._on_status(node, SimpleNamespace(
+        state=MissionStatus.NAVIGATING,
+        mission_id='corn_field_five_point_001', current_tree_id=''))
+    assert (node._mission_id, node._tree_id) == ('', '')
+    assert node._selected_target_id == ''
+    assert node._selected_target_reference is None
+    assert node._selected_target_template is None
 
 
 def test_fruit_tracks_survive_a_short_detector_dropout():

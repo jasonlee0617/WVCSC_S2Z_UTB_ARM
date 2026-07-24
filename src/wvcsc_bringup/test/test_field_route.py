@@ -131,6 +131,17 @@ def test_real_field_manager_is_fail_closed_and_keeps_shared_manual_route_untouch
     assert 'vehicle stop verification' in manager
 
 
+def test_field_manager_uses_latched_mission_status_for_yolo():
+    manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
+        encoding='utf-8')
+
+    assert 'from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy' in manager
+    assert 'mission_status_qos = QoSProfile(' in manager
+    assert 'reliability=ReliabilityPolicy.RELIABLE' in manager
+    assert 'durability=DurabilityPolicy.TRANSIENT_LOCAL' in manager
+    assert "MissionStatus, '/mission/status', mission_status_qos" in manager
+
+
 def test_field_manager_waits_for_full_nav2_and_localization_before_point_one():
     manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
         encoding='utf-8')

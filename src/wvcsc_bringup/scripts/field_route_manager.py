@@ -23,6 +23,7 @@ from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -117,7 +118,16 @@ class FieldRouteManager(Node):
             timeout=float(self.get_parameter('stop_verify_timeout_sec').value),
         )
 
-        self._status_pub = self.create_publisher(MissionStatus, '/mission/status', 10)
+        # Match the shared mission-status contract used by YOLO and the
+        # generic mission manager.  The visual node may start after this
+        # orchestrator, so it must receive the latest ARM_SPRAYING state.
+        mission_status_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._status_pub = self.create_publisher(
+            MissionStatus, '/mission/status', mission_status_qos)
         self._nav_client = ActionClient(
             self, NavigateToPose,
             str(self.get_parameter('nav_action_name').value))
