@@ -7,7 +7,8 @@
 - 小车停在现场固定位置，底盘不运动；
 - 参照仿真，将玉米树放在机械臂左侧；
 - 只测试 Alicia-M、C10、真实 YOLO、VisualServo、SprayTask 和喷洒 Action；
-- 默认使用 `spray_actuator` 的 `timer` 模式验证流程，不直接打开真实喷头或水泵。
+- 实机默认使用 `spray_actuator` 的 `service` 模式，通过
+  `controller_pkg` 的 `/relay/set` 控制第 2 路继电器；仿真才使用 `timer` 模式。
 
 ## 1. 当前解耦边界
 
@@ -25,6 +26,7 @@ ros2 launch wvcsc_bringup real_arm_spray_test.launch.py
 - `wvcsc_visual_servo`；
 - `wvcsc_arm_task/spray_task`；
 - `wvcsc_arm_task/spray_actuator`。
+- `controller_pkg/relay_controller`，提供 `/relay/set` 继电器服务。
 
 该启动文件不会启动：
 
@@ -101,17 +103,12 @@ yolov8s_seg_real.pt  task=segment names={0: disease_leaf}
 确认标定文件存在：
 
 ```bash
-ls -l "$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/c10_handeye.yaml"
-ls -l "$HOME/.ros/wvcsc_calibration/nozzle.yaml"
+ls -l "$HOME/.ros2/easy_handeye2/calibrations/wvcsc_c10.calib"
 ```
 
-如果喷嘴标定还没有完成，可以先复制示例文件做干流程验证，但不能代表真实落点准确：
-
-```bash
-mkdir -p "$HOME/.ros/wvcsc_calibration"
-cp "$(ros2 pkg prefix wvcsc_calibration)/share/wvcsc_calibration/config/nozzle.example.yaml" \
-  "$HOME/.ros/wvcsc_calibration/nozzle.yaml"
-```
+当前单独喷洒入口暂时将 `tool0` 作为喷洒中心线，喷嘴挂载使用零位姿；因此本入口
+不读取 `nozzle.yaml`。手眼标定文件缺失或格式错误时，launch 会在启动阶段失败，不能
+继续执行喷洒。
 
 确认 C10 设备：
 
@@ -141,6 +138,24 @@ ls -l /dev/ttyACM* /dev/ttyUSB*
 
 如果不同，启动时用 `serial_port:=...` 显式传入。
 
+确认继电器串口配置。机械臂串口和继电器串口是两个独立设备：
+
+```bash
+sed -n '1,20p' ~/WVCSC_S2Z_UTB_ARM/src/controller_pkg/resource/fault.ini
+```
+
+`fault.ini` 中的 `PortName` 必须指向继电器 Modbus 串口（默认
+`/dev/ttyUSB0`），`serial_port` 只指向 Alicia-M 机械臂串口（默认
+`/dev/ttyACM0`）。现场建议使用 `/dev/serial/by-id/` 下的稳定设备名，并确认当前用户
+具有串口访问权限。
+
+先启动继电器服务或启动完整测试栈后，验证服务类型：
+
+```bash
+ros2 service type /relay/set
+# 应为：wvcsc_interfaces/srv/SetRelay
+```
+
 ## 4. 启动机械臂单独测试栈
 
 终端一：
@@ -160,10 +175,15 @@ ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python" \
   c10_device:=/dev/video0 \
   serial_port:=/dev/ttyACM0 \
+  relay_config_file:="${HOME}/relay_fault.ini" \
   arm_velocity_scaling:=0.20 \
   arm_acceleration_scaling:=0.20 \
   use_moveit_rviz:=true
 ```
+
+不传 `relay_config_file` 时，launch 使用安装包中的
+`controller_pkg/config/fault.ini`。如果现场修改了源文件，必须重新构建
+`controller_pkg`，或者直接通过 `relay_config_file` 指定外部配置文件。
 
 现场首次测试建议保持：
 
@@ -226,6 +246,18 @@ ros2 topic echo /vision/visual_servo_debug
 ros2 topic echo /spray/simulated_active
 ```
 
+`/spray/simulated_active` 只是喷洒执行状态话题名称，实机物理输出不由该话题直接
+控制。继电器实际控制接口是：
+
+```bash
+ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
+  "{channel: 2, enabled: true, duration: 1.0}"
+ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
+  "{channel: 2, enabled: false, duration: 0.0}"
+```
+
+首次测试必须确认第 2 路确实吸合和断开，再执行机械臂喷洒任务。
+
 图像查看：
 
 ```bash
@@ -266,8 +298,9 @@ RETURNING_HOME
 
 喷洒应满足：
 
-- `/spray/simulated_active` 在喷洒期间为 `true`；
-- 喷洒结束后回到 `false`；
+- 日志出现 `[SPRAY] service mode, relay service=/relay/set channel=2`；
+- 继电器节点日志出现“第 2 路继电器已吸合”，并在时长到期后自动断开；
+- `/spray/simulated_active` 在喷洒期间为 `true`，结束后回到 `false`；
 - `arm_spray_once` 退出码为 `0`。
 
 ## 8. 常见失败与处理
@@ -366,8 +399,22 @@ ros2 topic pub --once /motion_control/command std_msgs/msg/String "{data: reset}
 ros2 topic pub --once /motion_control/command std_msgs/msg/String "{data: resume}"
 ```
 
-## 10. 真实喷洒硬件接入边界
+## 10. 真实喷洒硬件与继电器控制
 
-当前单独测试默认使用 `spray_actuator` 的 `timer` 模式，不会控制真实泵/阀。
+当前实机单独测试已经接入真实继电器：
 
-后续接入真实喷洒硬件时，只替换 `/spray/execute` 的 `wvcsc_interfaces/action/Spray` Action server。上层 `spray_task`、VisualServo、YOLO 和 `arm_spray_once` 不需要改接口。
+```text
+/arm/execute_spray
+    → wvcsc_arm_task/spray_actuator
+    → /relay/set (wvcsc_interfaces/srv/SetRelay)
+    → controller_pkg Modbus RTU
+    → 第 2 路继电器
+```
+
+喷洒 Action 开始时，`spray_actuator` 会先等待 `/relay/set` 返回
+`success=true`，再请求 `channel=2, enabled=true` 并携带喷洒时长。继电器服务端会按
+该时长自动断开；Action 完成、取消、运动锁定和节点退出时还会显式发送第 2 路断开。
+
+如果 `/relay/set` 不可用、串口配置错误或继电器返回失败，喷洒 Action 必须失败，不会
+把定时器模拟结果误报为真实喷洒成功。仿真环境仍使用 `timer` 模式，不启动
+`controller_pkg`。

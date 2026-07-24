@@ -18,7 +18,7 @@ from data_acquisition.yolo_seed_dataset import (
 
 
 def _image():
-    return np.full((720, 1280, 3), (90, 125, 95), dtype=np.uint8)
+    return np.full((480, 640, 3), (90, 125, 95), dtype=np.uint8)
 
 
 def test_raw_capture_contains_no_automatic_label_artifacts(tmp_path):
@@ -39,7 +39,7 @@ def test_validation_accepts_only_raw_images_and_matching_manifest(tmp_path):
     try:
         validate_unlabeled_dataset(tmp_path, expected=3)
     except ValueError as error:
-        assert '1280x720' in str(error)
+        assert '640x480' in str(error)
     else:
         raise AssertionError('invalid image size must fail validation')
 

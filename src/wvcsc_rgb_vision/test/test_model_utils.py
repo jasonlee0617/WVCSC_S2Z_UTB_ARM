@@ -342,7 +342,7 @@ def test_candidate_id_churn_keeps_the_published_logical_target_id():
     node._target_pub = Publisher()
     node._log_target_state = lambda *_args: None
     image = SimpleNamespace(
-        header=Header(), width=1280, height=720)
+        header=Header(), width=640, height=480)
 
     for candidate_id, left in [('fruit-9', 12.0), ('fruit-10', 14.0)]:
         candidate = Instance(

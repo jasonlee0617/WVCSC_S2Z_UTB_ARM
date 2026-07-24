@@ -37,8 +37,8 @@ class CameraWatchdog(Node):
         defaults = {
             'image_topic': '/color/image_raw',           # 图像话题
             'camera_info_topic': '/color/camera_info',   # 相机内参话题
-            'expected_width': 1280,                      # 期望分辨率宽度
-            'expected_height': 720,                      # 期望分辨率高度
+            'expected_width': 640,                       # 期望分辨率宽度
+            'expected_height': 480,                      # 期望分辨率高度
             'expected_fps': 30.0,                        # 期望帧率
             'stale_timeout_sec': 1.0,                    # 判定流过期的超时时间（秒）
             'health_topic': '/camera/healthy',           # 实机安全联锁输入

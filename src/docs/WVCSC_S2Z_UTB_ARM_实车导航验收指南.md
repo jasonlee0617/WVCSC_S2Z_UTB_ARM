@@ -1,379 +1,267 @@
-# WVCSC 实车导航验收指南（无机械臂）
+# WVCSC 实车五点导航与喷洒验收指南
 
-> 本文描述在**不启动机械臂**的情况下，独立验证小车 SLAM 建图、Nav2 导航、逐树停靠和坐标采集的完整流程。
+本文档描述当前实车主流程：建图/定位、采集五个导航点、自动执行五点路线、广域喷洒和机械臂定点喷洒。
+
+当前实车任务唯一入口为：
+
+```text
+real_system_mission.launch.py
+  → preflight
+  → real_orchestration.launch.py
+  → field_route_manager
+  → 五点导航 + 第1路广域喷洒 + 第2路机械臂喷洒
+```
+
+`wvcsc_mission_manager` 和 `/mission/load_manual` 仅保留给仿真兼容；不再作为实车任务入口。
 
 ## 1. 前置条件
 
-- 小车底盘、LiDAR、IMU 硬件正常，所有线缆连接牢固
-- 遥控器电量充足，急停开关可正常触发
-- 已安装 `wvcsc_bringup` 包
+- 小车底盘、LiDAR、IMU、Alicia-M、C10 和继电器硬件已连接；
+- 物理急停可用，首次测试使用低速；
+- 已完成 C10 内参和手眼标定；
+- 实车 YOLO 权重已放入 `wvcsc_rgb_vision/models/`；
+- 继电器串口配置已确认。
 
----
+先加载环境：
 
-## 阶段 1：建图
+```bash
+source /opt/ros/humble/setup.bash
+source ~/WVCSC_S2Z_UTB_ARM/install/setup.bash
+```
 
-### 1.1 启动 Cartographer 建图
+机械臂串口和继电器串口是独立设备：
+
+```text
+serial_port       → Alicia-M，默认 /dev/ttyACM0
+fault.ini PortName → Modbus 继电器，默认 /dev/ttyUSB0
+```
+
+现场建议使用 `/dev/serial/by-id/` 的稳定设备名。
+
+## 2. 建图
 
 ```bash
 ros2 launch wvcsc_bringup real_cartographer.launch.py
 ```
 
-启动流程：
-0. 该启动不加载 C10；它复用已验证的底盘、LiDAR、IMU、EKF 硬件链和
-   `wvcsc_bringup/rviz/real_cartographer.rviz`
-1. 确认 RViz 窗口打开，能看到 LiDAR 扫描点（红色点云）和 Cartographer 子地图
-2. **小车在原地静止至少 5 秒**，让 EKF 融合 IMU 和轮式里程计后收敛
-3. 用遥控器**低速**（≤ 0.3 m/s）控制小车在作业区域内行驶一整圈
-4. 行驶路径需覆盖所有玉米树所在的路段，确保 Cartographer 回环闭合（回到起点附近时地图自动对齐）
-5. 观察 RViz 中地图不再有重影或漂移
-
-### 1.2 保存地图
+低速遥控小车覆盖完整作业区域，确认地图无重影、无明显漂移后保存：
 
 ```bash
 bash "$(ros2 pkg prefix wvcsc_bringup)/share/wvcsc_bringup/scripts/save_corn_map.sh"
 ```
 
-脚本默认保存到
-`${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard`。
+地图文件示例：
 
-生成文件：
-- `orchard.pgm` — 栅格地图图片
-- `orchard.yaml` — 地图元数据（分辨率、原点）
+```text
+~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml
+```
 
-**验收**：`orchard.yaml` 中的 `origin` 坐标正确（地图左下角在 map 坐标系中的位置），`resolution: 0.05`。
-
----
-
-## 阶段 2：采点（导航模式 + 遥控器驱动）
-
-### 2.1 启动导航
+## 3. 启动定位并初始化 AMCL
 
 ```bash
 ros2 launch wvcsc_bringup real_navigation.launch.py
 ```
 
-该命令直接启动底盘、LiDAR、IMU、EKF、AMCL、Nav2 和一个 RViz，不加载 C10，默认读取
-`${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml`。Nav2 最终速度
-直接发布到 `/cmd_vel`，底盘急停由硬件负责。RViz 使用
-`wvcsc_bringup/rviz/real_navigation.rviz`。
+在 RViz 中使用 `2D Pose Estimate` 设置初始位姿，确认：
 
-启动后确认：
-- RViz 窗口中能看到已加载的地图（灰色占用栅格）
-- `ros2 topic echo /amcl_pose` 有正常输出
+- 地图正常显示；
+- `/amcl_pose` 持续发布；
+- `/map → /base_footprint` TF 可用；
+- `/imu` 和 `/ekf_odom` 有数据。
 
-### 2.2 初始化 AMCL 定位
+`real_navigation.launch.py` 只用于定位和导航诊断，不启动机械臂喷洒任务。
 
-在 RViz 中：
-1. 点击顶部工具栏的 **`2D Pose Estimate`** 按钮
-2. 在地图上小车实际所在位置点击，并拖拽箭头指向车头方向
-3. 释放后 AMCL 粒子云（绿色箭头簇）应快速收敛到单簇
-4. 如果粒子云发散或不收敛，重新点击 `2D Pose Estimate`
+## 4. 创建并采集五点路线
 
-### 2.3 将小车移动到玉米树旁
-
-**方式 A：RViz Nav2 Goal 导航（推荐）**
-1. 点击顶部工具栏的 **`Navigation2 Goal`** 按钮
-2. 在地图上点击目标位置，拖拽箭头指向期望的停靠航向
-3. Nav2 自动规划路径并导航到目标
-
-**方式 B：遥控器手动驾驶**
-1. 遥控器低速控制小车到玉米树侧方
-2. 车头朝向与道路平行（航向接近 0° 或 180°）
-3. 观察 RViz 中 `base_footprint` 的位置确认已到达作业位置
-
-### 2.4 确认停稳
-
-在终端监控停稳状态：
+复制模板：
 
 ```bash
-ros2 topic echo /ekf_odom
+ROUTE_FILE="$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/field_route_corn.yaml"
+MAP_FILE="$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
+cp "$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/field_route_corn.example.yaml" "$ROUTE_FILE"
 ```
 
-确认 `twist.twist.linear.x` 和 `twist.twist.angular.z` 持续 1 秒均 ≤ 0.03（小车完全静止）。
-
-同时确认 AMCL 协方差合格：
+小车通过 RViz `Navigation2 Goal` 或遥控器移动到每个点，车辆停止后依次执行：
 
 ```bash
-ros2 topic echo /amcl_pose
-```
-
-当前采点脚本使用“只要流程成功”的执行优先门限：位置/偏航标准差均 ≤ 1.00
-m，位置/偏航散布均 ≤ 1.00 m/rad。定位链稳定后，应再恢复为工程验收门限。
-AMCL 位姿在采样期间允许最多 2 秒未更新；短暂过期时脚本会自动等待下一次
-AMCL 更新，不会因约 1 Hz 发布抖动直接中断采点。
-
-### 2.5 采集 HOME 位姿
-
-采集树目标前必须先采集 HOME 位姿。HOME 是任务完成后小车返回的位置，
-也是站点文件中 `mission.home_pose` 的来源。
-
-操作步骤：
-
-1. 将小车停在任务结束后希望返回的安全位置；
-2. 在 RViz 中确认 `map → base_footprint` TF 正常，AMCL 粒子云已经收敛；
-3. 确认车体停稳后执行：
-
-旧`schema_version: 1`站点以`base_footprint`为测量原点，不能直接复用，必须重新采集。
-旧`schema_version: 2`站点已保存带符号的实测偏移，可先迁移为当前格式：
-
-```bash
-ros2 run wvcsc_bringup migrate_site_mission -- \
-  --file "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml" \
-  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
-```
-
-`schema_version: 1` 升级前先执行：
-
-```bash
-mv "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml" \
-  "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site_schema_v1.bak"
+ros2 run wvcsc_bringup capture_site_pose -- \
+  --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_1
 ```
 
 ```bash
-ros2 run wvcsc_bringup capture_site_pose \
-  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
-  --capture-home \
-  --timeout-sec 60
+ros2 run wvcsc_bringup capture_site_pose -- \
+  --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_2 \
+  --tree-id corn_01 --tree-x-m 0.0 --tree-y-m 1.50
 ```
 
-成功输出类似：
+```bash
+ros2 run wvcsc_bringup capture_site_pose -- \
+  --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_3 \
+  --tree-id corn_02 --tree-x-m 0.0 --tree-y-m 1.50
+```
+
+```bash
+ros2 run wvcsc_bringup capture_site_pose -- \
+  --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_4
+
+ros2 run wvcsc_bringup capture_site_pose -- \
+  --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_5
+```
+
+坐标约定：
 
 ```text
-[SITE] captured HOME pose=(-1.950,0.107,0.020) file=.../corn_site.yaml
++X：车头方向
++Y：车体左侧
+-Y：车体右侧
 ```
 
-只有看到 `captured HOME` 后，才能执行后面的树目标采集。重复采集 HOME
-会更新 `mission.home_pose`，原文件会自动保存为 `.bak`。
+`point_2` 和 `point_3` 的树坐标必须使用机械臂基座坐标系下的带符号 X/Y。
 
-### 2.6 测量树到小车的距离
+### 4.1 采点门控说明
 
-小车停稳后，用卷尺测量两个距离：
+默认采点为宽松模式：
 
-```
-俯视图：
+- 仍需要初始 `/imu`、`/ekf_odom`、`/amcl_pose` 和有效 `map → base_footprint` TF；
+- 质量、协方差、样本散布、短暂数据过期和地图 footprint 不再阻止写入；
+- 质量数据仍保存到 `capture_quality`，异常只输出 warning；
+- 不要求使用 `--force-capture`。
 
-        ←── 卷尺横向距离 (tree-y-m) ──→
-   ┌──────────────────────────────────────●  ← 玉米树根部 (tree_hint)
-   │
-   │
-   ↑
-   ◎ ← 机械臂基座物理原点（坐标轴与车体平行）
-   │
-   └── 卷尺纵向距离 (tree-x-m)，车头方向
-```
-
-| 参数 | 测量基准点 | 测量方向 | 工具 | 示例值 |
-|------|-----------|---------|------|--------|
-| `--tree-x-m` | 机械臂基座原点 | **车头朝向**（车体 +X） | 卷尺 | `0.0`（树在正侧方） |
-| `--tree-y-m` | 机械臂基座原点 | **小车左侧**（+Y，右侧填**负数**） | 卷尺 | `1.50`（树在左侧 1.5m） |
-
-**实测方法**：
-1. 从机械臂基座物理原点沿车头方向测量树根的纵向偏差，作为`tree-x-m`。
-2. 从同一原点沿车体左侧测量`tree-y-m`；右侧填负数。
-3. 调整小车使树处于机械臂基座正侧方，`tree-x-m`尽量为`0.0`，且必须在`±0.20 m`内。
-
-### 2.7 执行采点
+最终工程验收时可显式启用严格门控：
 
 ```bash
-ros2 run wvcsc_bringup capture_site_pose \
-  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
-  --target-id tree_01 \
-  --tree-x-m 0.0 \
-  --tree-y-m 1.50 \
-  --force-capture
+ros2 run wvcsc_bringup capture_site_pose -- \
+  --file "$ROUTE_FILE" --map "$MAP_FILE" \
+  --route-point point_1 --strict-capture --update
 ```
 
-脚本执行流程：
-1. 普通模式下自行调用 AMCL 的 `/request_nomotion_update`，等待 IMU、AMCL 定位稳定 + EKF 停稳 1 秒
-2. 连续采集 30 个样本（0.1 秒/次），当前执行优先阶段位置散布 ≤ 1.00 m、偏航散布 ≤ 1.00 rad
-3. 使用记录的带符号机械臂基座 X/Y 坐标计算树根 map 坐标
-4. 写入 `~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml`（自动创建或追加）
+## 5. 验证路线文件
 
-采点前必须确认 `/dev/yesense_IMU` 存在且 `ros2 topic hz /imu` 有持续输出；
-当前执行优先门限为位置/偏航标准差 ≤ `1.00` m/rad。
+日常任务验证使用宽松模式：
 
-成功输出示例：
-```
-[SITE] captured tree_01 pose=(3.002,0.498,0.003) file=~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
+```bash
+ros2 run wvcsc_bringup validate_field_route.py -- \
+  --file "$ROUTE_FILE" --map "$MAP_FILE"
 ```
 
-### 2.8 重复所有树
-
-对每棵玉米树重复步骤 2.3~2.7：
-
-### 2.9 采点门控说明与参数调整
-
-正常采点模式中的门控作用如下：
-
-- **新鲜度门控**：检查 `/imu`、`/ekf_odom` 和 `/amcl_pose` 是否近期更新，避免使用过期的定位或里程计数据；当前 AMCL 允许最多约 2 秒未更新。
-- **停稳门控**：检查 EKF 线速度和角速度，并要求车辆持续停稳约 1 秒，避免把运动中的位姿写入站点文件。
-- **质量门控**：检查 30 个 TF 样本的位置/偏航散布，以及 AMCL 协方差，判断采集位姿是否稳定。
-- **footprint 门控**：把小车 footprint 投影到地图，检查 HOME 和 docking 位姿是否落在地图自由区域，避免目标位姿落在障碍物或未知区域。
-
-当前执行优先门限集中定义在：
+输出中应包含：
 
 ```text
-wvcsc_bringup/wvcsc_bringup/site_mission.py
+[FIELD_ROUTE][VALID] ... steps=point_1,point_2,point_3,point_4,point_5
+[FIELD_ROUTE][WARN] capture quality and footprint gates are disabled
 ```
 
-可调整以下四个参数：
-
-```python
-MAX_CAPTURE_POSITION_SPREAD_M = 1.00
-MAX_CAPTURE_YAW_SPREAD_RAD = 1.00
-MAX_CAPTURE_POSITION_STDDEV_M = 1.00
-MAX_CAPTURE_YAW_STDDEV_RAD = 1.00
-```
-
-修改后必须重新构建并重新加载工作区：
+最终验收可使用：
 
 ```bash
-cd ~/WVCSC_S2Z_UTB_ARM
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install --packages-select wvcsc_bringup
-source install/setup.bash
+ros2 run wvcsc_bringup validate_field_route.py -- \
+  --file "$ROUTE_FILE" --map "$MAP_FILE" --strict
 ```
 
-采点质量数据仍会写入 `capture_quality`，因此门限放宽只代表允许写入，
-不代表当前定位精度已经满足最终工程验收。
+基础结构、地图绑定、树距离、树 ID 和喷洒时长即使在宽松模式下仍然严格校验。
 
-如果当前阶段只要求先完成文件写入，可在采点命令末尾增加 `--force-capture`：
-该调试模式跳过 AMCL/EKF/停稳新鲜度、质量和地图 footprint 门控，但仍要求
-初始传感器消息和 30 个有效 `map → base_footprint` TF 样本；它不适合作为最终
-实机导航验收依据。
+## 6. 启动完整五点实车任务
+
+确认继电器服务配置：
 
 ```bash
-# tree_01 (左侧)
-ros2 run wvcsc_bringup capture_site_pose \
-  --map .../orchard.yaml --target-id tree_01 \
-  --tree-x-m 0.0 --tree-y-m 1.50
-
-# tree_02 (右侧)
-ros2 run wvcsc_bringup capture_site_pose \
-  --map .../orchard.yaml --target-id tree_02 \
-  --tree-x-m 0.1 --tree-y-m -1.55
-
-# tree_03 (左侧)
-ros2 run wvcsc_bringup capture_site_pose \
-  --map .../orchard.yaml --target-id tree_03 \
-  --tree-x-m -0.1 --tree-y-m 1.48
-
-# tree_04 (右侧)
-ros2 run wvcsc_bringup capture_site_pose \
-  --map .../orchard.yaml --target-id tree_04 \
-  --tree-x-m 0.0 --tree-y-m -1.52
+ros2 service type /relay/set
 ```
 
-### 2.10 验证 YAML
+应返回：
+
+```text
+wvcsc_interfaces/srv/SetRelay
+```
+
+启动任务：
 
 ```bash
-cat ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml
+ros2 launch wvcsc_bringup real_system_mission.launch.py \
+  mission_file:="$ROUTE_FILE" \
+  map:="$MAP_FILE" \
+  yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python" \
+  relay_config_file:="${HOME}/relay_fault.ini"
 ```
 
-预期格式：
+不传 `relay_config_file` 时，使用安装包中的 `controller_pkg/config/fault.ini`。
 
-```yaml
-schema_version: 3
-site_id: corn_site
-arm_base_mount:
-  x_m: -0.40
-  y_m: 0.0
-map:
-  frame_id: map
-  yaml_sha256: abc123...
-  image_sha256: def456...
-mission:
-  mission_id: corn_measured_001
-  return_home_after_finish: false
-  home_pose: {x: -1.950, y: 0.107, yaw: 0.020}
-  targets:
-    - target_id: tree_01
-      docking_pose: {x: 3.002, y: 0.498, yaw: 0.003}
-      tree_offset_arm_base_m:
-        reference: alicia_base_link_xy
-        x_m: 0.0
-        y_m: 1.5
-      tree_base_z_m: 0.0
-      spray_duration: 5.0
-      capture_quality: {samples: 30, position_spread_m: 0.012, ...}
-    - target_id: tree_02
-      ...
+## 7. 五点任务行为
+
+```text
+point_1:
+  第1路广域喷洒开启 → 导航
+
+point_2:
+  第1路关闭 → 车辆停稳 → 机械臂识别病害并通过第2路喷洒3秒
+  → 第1路重新开启
+
+point_3:
+  第1路关闭 → 车辆停稳 → 机械臂识别病害并通过第2路喷洒3秒
+  → 继续导航
+
+point_4:
+  第1路关闭 → 继续导航
+
+point_5:
+  第1、2路再次关闭 → 车辆停稳 → 任务完成
 ```
 
-**注意**：`docking_pose` 和 `tree_hint` 由脚本自动计算，**不需要手动填写**。
+车辆到达 `point_2`、`point_3` 和 `point_5` 后，仍会执行停稳检查；该检查是运行安全门控，避免车辆运动时机械臂动作，不属于采点质量门控。
 
----
+任意导航、继电器、机械臂、病害识别、取消或超时失败，都会：
 
-## 阶段 3：自动导航验收（无机械臂）
+1. 取消当前 Nav2/机械臂 Action；
+2. 请求第 1、2 路继电器断开；
+3. 发布 `FAILED` 状态并停止任务。
 
-### 3.1 目的
-
-用刚采集的 `corn_site.yaml` 中保存的 `docking_pose`，让小车依次自动导航到每棵玉米树的停靠位置。到达每个点后停留 2 秒，目视确认停靠精度后自动前往下一目标。
-
-### 3.2 启动导航
+## 8. 运行监控
 
 ```bash
-ros2 launch wvcsc_bringup real_navigation.launch.py
+ros2 topic echo /mission/status
+ros2 topic hz /camera/color/image_raw
+ros2 topic hz /vision/tree_debug_image
+ros2 topic hz /vision/diseased_target_debug_image
+ros2 service type /relay/set
 ```
 
-在 RViz 中确认 AMCL 粒子云收敛（使用 `2D Pose Estimate` 初始化定位）。
+预期日志包括：
 
-### 3.3 执行顺序导航
+```text
+[FIELD_ROUTE] services ready; auto-starting mission=...
+[FIELD_ROUTE] arrived at point_1
+[FIELD_ROUTE] arrived at point_2
+[SPRAY] service mode, relay service=/relay/set channel=2
+[FIELD_ROUTE] arrived at point_3
+[FIELD_ROUTE][SUCCESS] five-point route completed
+```
+
+## 9. 取消与急停
+
+任务取消：
 
 ```bash
-ros2 run wvcsc_bringup nav_validate_sites.py \
-  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
-  --pause-sec 2.0
+ros2 service call /field_route/cancel std_srvs/srv/Trigger "{}"
 ```
 
-**执行流程**：
+机械臂停止/回 HOME：
 
-```
-[1/4] tree_01: navigating to (3.002, 0.498, 0.003)
-[1/4] tree_01: arrived
-[1/4] tree_01: pausing 2.0s...
-[2/4] tree_02: navigating to (5.001, -0.502, 0.001)
-[2/4] tree_02: arrived
-[2/4] tree_02: pausing 2.0s...
-[3/4] tree_03: ...
-[4/4] tree_04: ... arrived
-[4/4] tree_04: last target — done
-[VALIDATE] all 4 targets completed successfully
+```bash
+ros2 topic pub --once /motion_control/command \
+  std_msgs/msg/String "{data: stop}"
+ros2 topic pub --once /motion_control/command \
+  std_msgs/msg/String "{data: reset}"
 ```
 
-关键行为：
-- 逐目标调用 `/navigate_to_pose` Action，超时 120 秒
-- Nav2 返回 `SUCCEEDED` 后原地等 `--pause-sec` 秒
-- 任一目标失败 → 脚本报错退出，不继续后续目标
-- 无需手动触发——全程自动顺序执行
+现场必须保留可触达的车辆物理急停。
 
-### 3.4 验收细节
+## 10. 当前已移除的旧实机入口
 
-在每个 2 秒停留期间：
-1. 观察 RViz 中 `base_footprint` 是否与地图上记录的停靠点重合
-2. 目视或用卷尺确认实际位置误差 ≤ 0.12 m
+以下入口不再安装或用于实车主流程：
 
----
+- `load_site_mission.py`；
+- `nav_validate_sites.py`；
+- `/mission/load_manual` 作为实车任务启动接口；
+- 旧 measured-site mission 逐树自动任务流程。
 
-## 阶段 4：验收标准
-
-| # | 检查项 | 标准 |
-|---|--------|------|
-| 1 | Cartographer 回环闭合 | 地图无重影、无断裂 |
-| 2 | AMCL 初始定位 | 粒子云在 3 秒内收敛 |
-| 3 | 每棵树停稳 | 1 秒内线速度 ≤ 0.03 m/s，角速度 ≤ 0.03 rad/s |
-| 4 | AMCL 协方差 | 执行优先阶段位置/偏航标准差 ≤ 1.00 m/rad |
-| 5 | 位置散布 | 执行优先阶段 30 个样本位置/偏航散布 ≤ 1.00 m/rad |
-| 6 | 重复性 | 同一棵树连续 3 次停靠误差 ≤ 0.12 m |
-| 7 | corn_site.yaml | 4 棵树全部记录，格式校验通过 |
-| 8 | 自动顺序导航 | 4 个目标全部 `SUCCEEDED`，无超时、无跳过 |
-
----
-
-> 验收通过后，下一步启动完整任务：
-> ```bash
-> ros2 launch wvcsc_bringup real_system_mission.launch.py \
->   map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
->   mission_file:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml"
-> ```
-> 参考 [WVCSC_S2Z_UTB_ARM_Codex任务闭环实施方案](WVCSC_S2Z_UTB_ARM_Codex任务闭环实施方案%20copy.md)。
+仿真仍保留 `wvcsc_mission_manager`，因此不要从工作区删除该 ROS 包。

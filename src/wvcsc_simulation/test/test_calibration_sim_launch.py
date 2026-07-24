@@ -161,7 +161,7 @@ def test_coverage_marker_keeps_at_least_fourteen_fixed_poses_in_strict_c10_view(
         if margin >= 60.0 and side_px >= 90.0 and 0.20 <= range_m <= 0.80:
             valid += 1
 
-    assert marker == pytest.approx([0.595, -0.030, 0.002])
+    assert marker == pytest.approx([0.530, -0.030, 0.002])
     assert valid >= config['minimum_samples']
 
 
@@ -193,8 +193,9 @@ def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
     assert config['joint_stationary_max_position_delta_rad'] == pytest.approx(0.0001)
     assert config['joint_stationary_window_sec'] == pytest.approx(0.30)
     assert config['joint_stationary_timeout_sec'] == pytest.approx(5.0)
-    # 固定20姿态覆盖率最优的桌面位置；2 mm 是标定板表面，而非 Gazebo模型中心。
-    assert config['marker_position_base_m'] == pytest.approx([0.595, -0.030, 0.002])
+    # 固定20姿态覆盖率最优的 640x480 桌面位置；2 mm 是标定板表面，
+    # 而非 Gazebo 模型中心。
+    assert config['marker_position_base_m'] == pytest.approx([0.530, -0.030, 0.002])
     assert config['marker_distance_min_m'] == pytest.approx(0.20)
     assert 'minimum_corner_margin_px' not in config
     assert 'use_marker_position_prior_for_candidate_generation' not in config

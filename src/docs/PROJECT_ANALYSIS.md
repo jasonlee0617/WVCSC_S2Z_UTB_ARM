@@ -53,7 +53,7 @@
 | 任务编排 | `wvcsc_mission_manager` | Python | YAML/RViz任务加载与使命管理 |
 | 感知 | `wvcsc_rgb_vision`, `wvcsc_c10_camera` | Python | YOLOv8n 两级推理 + C10 驱动 |
 | 手眼标定 | `wvcsc_calibration` | Python | C10 + ArUco + easy_handeye2 安全采集与部署外参导出 |
-| 执行 | `wvcsc_arm_task`, `wvcsc_visual_servo` | Python | 喷洒状态机 + IBVS 伺服 |
+| 执行 | `wvcsc_arm_task`, `wvcsc_visual_servo`, `controller_pkg` | Python | 喷洒状态机 + IBVS 伺服 + Modbus 继电器 |
 
 **收敛记录**：
 - 删除 `wvcsc_web_ui`（与 Nav2 Qt 重叠）—— 26→25 包
@@ -61,7 +61,8 @@
 - `wvcsc_simulation/data_acquisition/` 解耦离线数据采集与运行时代码
 - 删除 `wvcsc_safety` 与 `wvcsc_uav_gateway`，统一为 YAML/RViz 任务加载
 - `alicia_m_grasp_6d` 移入 experimental/
-- `wvcsc_spray_controller` 保留但默认不构建（真机泵阀接入时启用）
+- `controller_pkg` 提供 `/relay/set`，实机喷洒执行器通过第 2 路继电器控制泵/阀；
+  仿真继续使用 `timer` 模式，不启动继电器驱动。
 
 ## 4. SprayTask 架构
 
@@ -187,7 +188,7 @@ Gazebo / 真实 Alicia-M 电机
 
 | # | 任务 | 状态 |
 |---|------|------|
-| 1 | C10 相机内参标定（棋盘格） | 未开始 |
+| 1 | C10 相机内参标定（OST 640×480 K/D 已接入） | 已完成，仍需现场重投影验收 |
 | 2 | 手眼标定 (tool0→camera_link) | 未开始 |
 | 3 | 统一实机 launch 文件 | 代码已接入，待现场验收 |
 | 4 | 实机配置子目录 (`config/real/`) | 已接入 |
@@ -195,7 +196,7 @@ Gazebo / 真实 Alicia-M 电机
 | 6 | 机械臂低速运动验证 | 未开始 |
 | 7 | YOLO 真实图像推理验证 | 未开始 |
 | 8 | 单树手动闭环 | 未开始 |
-| 9 | 真实喷洒泵阀接入 | 未开始 |
+| 9 | 真实喷洒泵阀接入 | 代码已接入，待串口和现场硬件验收 |
 | 10 | 联合调试与安全验收 | 未开始 |
 
 ## 9. 测试策略

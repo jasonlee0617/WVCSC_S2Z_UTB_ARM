@@ -209,7 +209,7 @@ def test_collector_keeps_c10_qos_cancel_and_stationary_safety_contracts():
 def test_simulation_config_keeps_coverage_marker_and_fixed_minimum():
     config = (Path(__file__).parents[1] / 'config' /
               'auto_handeye_alicia_sim.yaml').read_text(encoding='utf-8')
-    assert 'marker_position_base_m: [0.595, -0.030, 0.002]' in config
+    assert 'marker_position_base_m: [0.530, -0.030, 0.002]' in config
     assert 'minimum_samples: 14' in config
     assert 'minimum_solution_samples: 14' in config
     assert 'ground_truth_max_translation_error_m: 0.003' in config

@@ -100,6 +100,19 @@ def test_capture_quality_keeps_the_amcl_covariance_gate():
     capture_site_pose.SitePoseCapture._validate_quality(quality)
 
 
+def test_relaxed_capture_reports_quality_issues_without_rejecting():
+    quality = {
+        'position_spread_m': 1.1,
+        'yaw_spread_rad': 0.01,
+        'max_position_stddev_m': 0.04,
+        'max_yaw_stddev_rad': 0.04,
+    }
+    issues = capture_site_pose.SitePoseCapture._quality_issues(quality)
+    assert issues
+    capture_site_pose.SitePoseCapture._validate_quality({
+        **quality, 'position_spread_m': 0.01})
+
+
 def test_transient_tf_extrapolation_is_retryable():
     node = _node()
     node._tf_buffer = _TransientTfBuffer()

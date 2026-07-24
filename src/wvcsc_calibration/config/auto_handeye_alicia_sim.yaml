@@ -22,7 +22,9 @@ auto_calibration_collector:
     # 14 样本下限，不降低图像质量标准或重复执行固定姿态表。
     # 坐标在 alicia_base_link 下；z=2 mm 是标定板表面，码面由 launch
     # 以水平、朝上的姿态生成。
-    marker_position_base_m: [0.595, -0.030, 0.002]
+    # 640x480 C10 view: this anchor keeps the complete fixed sequence
+    # visible with the existing 07:21 automatic-collection poses.
+    marker_position_base_m: [0.530, -0.030, 0.002]
     # 仿真允许0.20m的有效PnP距离；距离仍受标记像素尺寸、边缘、稳定性、
     # 共识及最终真值精度门控约束。
     marker_distance_min_m: 0.20

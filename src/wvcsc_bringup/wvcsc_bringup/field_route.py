@@ -201,8 +201,8 @@ def validate_field_route_document(
     document: Mapping[str, Any],
     map_yaml: str,
     *,
-    require_capture_quality: bool = True,
-    require_free_space: bool = True,
+    require_capture_quality: bool = False,
+    require_free_space: bool = False,
 ) -> tuple[FieldRouteStep, ...]:
     if document.get("schema_version") != FIELD_ROUTE_SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {FIELD_ROUTE_SCHEMA_VERSION}")

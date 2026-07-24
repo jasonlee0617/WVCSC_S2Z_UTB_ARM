@@ -181,9 +181,11 @@ local_costmap:
       width: 10 # 宽度（保留，阿克曼可增至8米，扩大感知范围）
       height: 10 # 高度（保留，同上）
       resolution: 0.05 # 分辨率
-      # footprint: "[ [0.6, -0.3], [0.6, 0.3], [-0.6, 0.3], [-0.6, -0.3] ]" 
-      footprint: "[[0.8, -0.4], [0.8, 0.4], [-0.8, 0.4], [-0.8, -0.4] ]"
-      footprint_padding: 0.2 # 安全边距（保留，可增至0.3）
+      # 与 wtb_car.xacro 的 1.45m × 0.75m 碰撞盒一致；原 1.6m × 0.8m
+      # footprint 会把狭窄通道错误判为不可行。
+      # y=±0.50m includes the wheel collision envelope (wheel centers y=±0.43m).
+      footprint: "[[0.725, -0.50], [0.725, 0.50], [-0.725, 0.50], [-0.725, -0.50]]"
+      footprint_padding: 0.05 # 仅保留 5cm 建图/定位误差余量
       plugins: ["obstacle_layer", "inflation_layer"]
       # 障碍物层配置（保留，优化参数）
       obstacle_layer:
@@ -206,13 +208,12 @@ local_costmap:
           obstacle_range: 10.0 # 障碍范围
           raytrace_range: 12.0 # 光线追踪范围
           queue_size: 100 # 队列大小
-      # 膨胀层配置（关键修改：增大膨胀半径适配阿克曼最小转弯半径）
+      # 碰撞边界由 footprint 决定；膨胀层仅提供额外缓冲。
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # 高 cost_scaling_factor → “只有非常靠近障碍物才危险”
-        # 低 cost_scaling_factor → “离障碍物较远也觉得有点危险”
-        cost_scaling_factor: 1.0 # 代价缩放因子
-        inflation_radius: 1.5 
+        # 更快衰减远离障碍物的代价，避免整片区域变成高代价。
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.30
      
       # 静态层配置（保留，虽未在plugins中，但若需全局地图可开启）
       static_layer:
@@ -235,9 +236,9 @@ global_costmap:
       robot_base_frame: base_footprint # 机器人基坐标系
       use_sim_time: False # 关闭模拟时间
       # 与本地代价地图统一footprint
-      # footprint: "[ [0.6, -0.3], [0.6, 0.3], [-0.6, 0.3], [-0.6, -0.3] ]"
-      footprint: "[[0.8, -0.4], [0.8, 0.4], [-0.8, 0.4], [-0.8, -0.4] ]"
-      footprint_padding: 0.2 # 安全边距
+      # 与本地代价地图和实际底盘碰撞盒一致。
+      footprint: "[[0.725, -0.50], [0.725, 0.50], [-0.725, 0.50], [-0.725, -0.50]]"
+      footprint_padding: 0.05 # 安全余量
       resolution: 0.05 # 分辨率
       track_unknown_space: false # 不跟踪未知空间
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"] # 插件
@@ -266,10 +267,8 @@ global_costmap:
       # 膨胀层配置（与本地代价地图统一）
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # 高 cost_scaling_factor → “只有非常靠近障碍物才危险”
-        # 低 cost_scaling_factor → “离障碍物较远也觉得有点危险”
-        cost_scaling_factor: 1.0
-        inflation_radius: 0.8
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.35
       always_send_full_costmap: True # 发送完整代价地图
 
   global_costmap_client:
@@ -305,7 +304,7 @@ planner_server:
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
       tolerance: 0.3 # 目标偏差容忍度
-      footprint_padding: 0.2 # 安全边距
+      footprint_padding: 0.05 # 规划器与代价地图使用同一安全余量
       downsample_costmap: false # 不下采样（保留，高精度场景）
       downsampling_factor: 1 # 下采样因子
       allow_unknown: true # 允许未知空间

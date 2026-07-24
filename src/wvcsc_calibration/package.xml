@@ -28,6 +28,7 @@
   <exec_depend>wvcsc_bringup</exec_depend>
   <exec_depend>wvcsc_arm_task</exec_depend>
   <exec_depend>wvcsc_c10_camera</exec_depend>
+  <exec_depend>wvcsc_rgb_vision</exec_depend>
   <test_depend>ament_pytest</test_depend>
   <test_depend>python3-pytest</test_depend>
   <export><build_type>ament_python</build_type></export>

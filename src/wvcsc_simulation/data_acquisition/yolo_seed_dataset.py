@@ -14,7 +14,7 @@ import yaml
 CLASS_NAMES = {0: 'tree', 1: 'diseased_fruit'}
 FRUIT_SEG_CLASS_NAMES = {0: 'diseased_fruit'}
 TREE_DETECT_CLASS_NAMES = {0: 'tree'}
-IMAGE_SIZE = (1280, 720)
+IMAGE_SIZE = (640, 480)
 
 
 def _sample_name(value):
@@ -86,9 +86,9 @@ def _write_tree_detect_data_yaml(root):
 
 
 def write_unlabeled_sample(root, image, sample_name, metadata):
-    """Write one 1280x720 C10 frame without labels or automatic segmentation."""
+    """Write one 640x480 C10 frame without labels or automatic segmentation."""
     if image is None or image.shape[:2] != (IMAGE_SIZE[1], IMAGE_SIZE[0]):
-        raise ValueError('unlabeled image must be 1280x720')
+        raise ValueError('unlabeled image must be 640x480')
     root = Path(root)
     image_path = root / 'images' / 'unlabeled' / f'{_sample_name(sample_name)}.png'
     image_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +117,7 @@ def write_fruit_seg_sample(root, image, sample_name, split, metadata):
     if split not in ('train', 'val'):
         raise ValueError('split must be train or val')
     if image is None or image.shape[:2] != (IMAGE_SIZE[1], IMAGE_SIZE[0]):
-        raise ValueError('fruit-seg image must be 1280x720')
+        raise ValueError('fruit-seg image must be 640x480')
     root = Path(root)
     image_path = root / 'images' / split / f'{_sample_name(sample_name)}.png'
     image_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,7 +183,7 @@ def validate_unlabeled_dataset(root, expected=30):
     for image_path in images:
         image = cv2.imread(str(image_path))
         if image is None or image.shape[:2] != (IMAGE_SIZE[1], IMAGE_SIZE[0]):
-            errors.append(f'{image_path}: expected 1280x720 image')
+            errors.append(f'{image_path}: expected 640x480 image')
     for forbidden in (root / 'labels', root / 'previews',
                       root / 'images' / 'train', root / 'images' / 'val'):
         if forbidden.exists():
@@ -249,7 +249,7 @@ def _validate_split_dataset(
         for image_path in images:
             image = cv2.imread(str(image_path))
             if image is None or image.shape[:2] != (IMAGE_SIZE[1], IMAGE_SIZE[0]):
-                errors.append(f'{image_path}: expected 1280x720 image')
+                errors.append(f'{image_path}: expected 640x480 image')
         if not (root / 'labels' / split).is_dir():
             errors.append(f'labels/{split}: directory is required')
     if list((root / 'labels').rglob('*.txt')):

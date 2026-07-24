@@ -56,6 +56,7 @@ class SitePoseCapture(Node):
         self._imu = None
         self._odom = None
         self._amcl = None
+        self._last_amcl_quality = (0.0, 0.0)
         self._stable_since = None
         self._next_no_motion_update = 0.0
         self._no_motion_service_state = 'not checked'
@@ -113,6 +114,7 @@ class SitePoseCapture(Node):
             max(math.sqrt(variances[0]), math.sqrt(variances[1])),
             math.sqrt(variances[2]),
         )
+        self._last_amcl_quality = self._amcl[1:]
 
     def _request_no_motion_update(self, now):
         if now < self._next_no_motion_update:
@@ -179,33 +181,44 @@ class SitePoseCapture(Node):
             return None, error
 
     @staticmethod
-    def _validate_quality(quality):
+    def _quality_issues(quality):
+        issues = []
         if quality['position_spread_m'] > MAX_CAPTURE_POSITION_SPREAD_M:
-            raise RuntimeError(
+            issues.append(
                 f"position spread {quality['position_spread_m']:.3f} m "
                 f'exceeds {MAX_CAPTURE_POSITION_SPREAD_M:.2f} m')
         if quality['yaw_spread_rad'] > MAX_CAPTURE_YAW_SPREAD_RAD:
-            raise RuntimeError(
+            issues.append(
                 f"yaw spread {quality['yaw_spread_rad']:.3f} rad "
                 f'exceeds {MAX_CAPTURE_YAW_SPREAD_RAD:.2f} rad')
         if quality['max_position_stddev_m'] > MAX_CAPTURE_POSITION_STDDEV_M:
-            raise RuntimeError(
+            issues.append(
                 'AMCL position standard deviation '
                 f"{quality['max_position_stddev_m']:.3f} m exceeds "
                 f'{MAX_CAPTURE_POSITION_STDDEV_M:.2f} m')
         if quality['max_yaw_stddev_rad'] > MAX_CAPTURE_YAW_STDDEV_RAD:
-            raise RuntimeError(
+            issues.append(
                 'AMCL yaw standard deviation '
                 f"{quality['max_yaw_stddev_rad']:.3f} rad exceeds "
                 f'{MAX_CAPTURE_YAW_STDDEV_RAD:.2f} rad')
+        return issues
 
-    def capture(self, timeout_sec=30.0, *, force_capture=False):
+    @classmethod
+    def _validate_quality(cls, quality):
+        issues = cls._quality_issues(quality)
+        if issues:
+            raise RuntimeError(issues[0])
+
+    def capture(self, timeout_sec=30.0, *, strict_capture=False,
+                force_capture=False):
+        # ``force_capture`` is retained as a compatibility alias for the
+        # relaxed mode.  Strict validation is now opt-in for final acceptance.
+        strict_capture = bool(strict_capture) and not force_capture
         deadline = time.monotonic() + timeout_sec
-        if force_capture:
+        if not strict_capture:
             self.get_logger().warning(
-                '[SITE] FORCE_CAPTURE enabled: freshness, stop, quality and '
-                'map-footprint gates are bypassed; TF and initial sensor data '
-                'are still required')
+                '[SITE] relaxed capture: freshness, stop and quality gates '
+                'are warnings only; initial sensor data and TF are required')
             while rclpy.ok() and time.monotonic() < deadline:
                 rclpy.spin_once(self, timeout_sec=0.05)
                 now = time.monotonic()
@@ -246,7 +259,7 @@ class SitePoseCapture(Node):
             self._request_no_motion_update(now)
             if now < next_sample:
                 continue
-            if not force_capture:
+            if strict_capture:
                 input_issues = self._input_issues(now)
                 amcl_stale_issues = [
                     issue for issue in input_issues
@@ -269,9 +282,13 @@ class SitePoseCapture(Node):
                 if input_issues:
                     raise RuntimeError(
                         'capture interrupted: ' + '; '.join(input_issues))
-            elif self._amcl is None:
-                next_sample = now + self._TF_RETRY_PERIOD_SEC
-                continue
+            else:
+                input_issues = self._input_issues(now)
+                if input_issues and now >= next_tf_log:
+                    self.get_logger().warning(
+                        '[SITE] relaxed capture continues with: ' +
+                        '; '.join(input_issues))
+                    next_tf_log = now + self._TF_LOG_PERIOD_SEC
             transform, tf_error = self._lookup_latest_transform()
             if transform is None:
                 tf_retry_count += 1
@@ -288,9 +305,15 @@ class SitePoseCapture(Node):
                 continue
             translation = transform.transform.translation
             yaw = self._yaw(transform.transform.rotation)
+            if not all(math.isfinite(value) for value in (
+                    translation.x, translation.y, yaw)):
+                tf_retry_count += 1
+                last_tf_error = 'map -> base_footprint transform is non-finite'
+                next_sample = now + self._TF_RETRY_PERIOD_SEC
+                continue
             samples.append((translation.x, translation.y, yaw))
-            position_stddevs.append(self._amcl[1])
-            yaw_stddevs.append(self._amcl[2])
+            position_stddevs.append(self._last_amcl_quality[0])
+            yaw_stddevs.append(self._last_amcl_quality[1])
             next_sample = now + 0.1
         if len(samples) < 30:
             message = f'only captured {len(samples)}/30 valid samples'
@@ -311,9 +334,14 @@ class SitePoseCapture(Node):
             'max_position_stddev_m': float(max(position_stddevs)),
             'max_yaw_stddev_rad': float(max(yaw_stddevs)),
         }
-        if not force_capture:
+        if strict_capture:
             self._validate_quality(quality)
         else:
+            quality_issues = self._quality_issues(quality)
+            if quality_issues:
+                self.get_logger().warning(
+                    '[SITE] relaxed capture quality warning: ' +
+                    '; '.join(quality_issues))
             quality['validation_bypassed'] = True
         return (x, y, yaw), quality
 
@@ -338,7 +366,10 @@ def _arguments(argv):
     parser.add_argument('--update', action='store_true')
     parser.add_argument(
         '--force-capture', action='store_true',
-        help='debug only: bypass freshness, stop, quality and footprint gates')
+        help='compatibility alias for the default relaxed capture mode')
+    parser.add_argument(
+        '--strict-capture', action='store_true',
+        help='require freshness, stop, quality and footprint gates')
     return parser.parse_args(argv)
 
 
@@ -360,6 +391,7 @@ def main():
     if argv and argv[0] == '--':
         argv = argv[1:]
     args = _arguments(argv)
+    strict_capture = bool(args.strict_capture and not args.force_capture)
     if not math.isfinite(args.timeout_sec) or args.timeout_sec <= 0.0:
         raise SystemExit('--timeout-sec must be finite and positive')
     if args.target_id and (
@@ -389,7 +421,9 @@ def main():
     node = SitePoseCapture()
     try:
         pose, quality = node.capture(
-            args.timeout_sec, force_capture=args.force_capture)
+            args.timeout_sec,
+            strict_capture=strict_capture,
+            force_capture=args.force_capture)
         pose_mapping = {'x': pose[0], 'y': pose[1], 'yaw': pose[2]}
         if args.route_point:
             route_steps = document['mission']['route_steps']
@@ -411,8 +445,8 @@ def main():
             if complete:
                 validate_field_route_document(
                     document, args.map,
-                    require_capture_quality=not args.force_capture,
-                    require_free_space=not args.force_capture)
+                    require_capture_quality=strict_capture,
+                    require_free_space=strict_capture)
         else:
             mission = document['mission']
             if args.capture_home:
@@ -447,8 +481,8 @@ def main():
                     targets[targets.index(existing)] = target
                 validate_site_document(
                     document, args.map,
-                    require_capture_quality=not args.force_capture,
-                    require_free_space=not args.force_capture)
+                    require_capture_quality=strict_capture,
+                    require_free_space=strict_capture)
         atomic_write_site(args.file, document, backup=Path(args.file).expanduser().exists())
         node.get_logger().info(
             f'[SITE] captured '

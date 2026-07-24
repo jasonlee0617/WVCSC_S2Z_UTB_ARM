@@ -54,8 +54,8 @@ def generate_launch_description():
         parameters=[{
             'image_topic': '/camera/color/image_raw',
             'camera_info_topic': '/camera/color/camera_info',
-            'expected_width': 1280,          # 期望的分辨率，与标定文件一致
-            'expected_height': 720,
+            'expected_width': 640,           # 期望的分辨率，与标定文件一致
+            'expected_height': 480,
             'expected_fps': 30.0,            # 期望的帧率，与 YOLO 推理节奏保持一致
         }],
         output='screen',

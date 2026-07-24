@@ -40,15 +40,15 @@
     frame_id: camera_color_optical_frame
 
     # 像素格式：`mjpeg2rgb` 表示让 `usb_cam` 读取 MJPG 压缩流后内部转换为 RGB。
-    # 这比 `yuyv` 原始格式带宽占用更小，且能够满足 1280x720@30fps 的需求。
+    # 这比 `yuyv` 原始格式带宽占用更小，且能够满足 640x480@30fps 的需求。
     pixel_format: mjpeg2rgb
 
     # 原始硬件设备格式：部分摄像头指定支持 YUV422 时更稳定。
     av_device_format: YUV422P
 
     # 图像尺寸：必须与标定文件完全一致。
-    image_width: 1280
-    image_height: 720
+    image_width: 640
+    image_height: 480
 
     # ----------------------------------------------------------------------
     # 3. 相机内参与标定文件关联

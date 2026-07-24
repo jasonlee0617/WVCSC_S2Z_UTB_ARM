@@ -350,6 +350,23 @@ ros2 run wvcsc_bringup arm_spray_once -- \
   --spray-duration 5.0
 ```
 
+实机喷洒前必须同时确认继电器服务已启动。`real_arm_spray_test.launch.py` 会自动
+启动 `controller_pkg`，实机执行器使用 `service` 模式调用第 2 路；机械臂串口
+`serial_port` 与继电器配置文件中的 `PortName` 是两条独立串口：
+
+```bash
+ros2 service type /relay/set
+# wvcsc_interfaces/srv/SetRelay
+ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
+  "{channel: 2, enabled: true, duration: 1.0}"
+ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
+  "{channel: 2, enabled: false, duration: 0.0}"
+```
+
+确认第 2 路实际吸合和断开后，再执行 `arm_spray_once`。如果继电器串口不是默认的
+`/dev/ttyUSB0`，复制并修改 `controller_pkg/resource/fault.ini`，然后通过
+`relay_config_file:=/绝对路径/relay_fault.ini` 传给 launch。
+
 检查：
 
 ```bash

@@ -80,6 +80,22 @@ def test_v4_route_rejects_role_order_duplicate_tree_and_duration_drift(tmp_path)
         route_steps(document)
 
 
+def test_v4_default_validation_keeps_geometry_but_not_capture_quality_gates(tmp_path):
+    map_yaml = _map(tmp_path)
+    document = _document(map_yaml)
+    for step in document['mission']['route_steps']:
+        step.pop('capture_quality', None)
+        step['navigation_pose']['x'] = 100.0
+
+    validate_field_route_document(document, map_yaml)
+    with pytest.raises(ValueError, match='capture_quality'):
+        validate_field_route_document(
+            document, map_yaml,
+            require_capture_quality=True,
+            require_free_space=True,
+        )
+
+
 def test_real_field_manager_is_fail_closed_and_keeps_shared_manual_route_untouched():
     manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
         encoding='utf-8')
@@ -95,3 +111,6 @@ def test_real_field_manager_is_fail_closed_and_keeps_shared_manual_route_untouch
     assert 'ExecuteSpray.Result.OK' in manager
     assert "'/field_route/cancel'" in manager
     assert "MissionStatus.ARM_SPRAYING" in manager
+    assert 'VERIFYING_INSPECT_STOP' in manager
+    assert 'VERIFYING_FINISH_STOP' in manager
+    assert 'vehicle stop verification' in manager

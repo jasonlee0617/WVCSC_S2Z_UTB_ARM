@@ -20,8 +20,6 @@ install(PROGRAMS
   scripts/migrate_site_mission.py
   scripts/arm_spray_once.py
   scripts/field_route_manager.py
-  scripts/load_site_mission.py
-  scripts/nav_validate_sites.py
   scripts/validate_field_route.py
   scripts/validate_site_mission.py
   DESTINATION lib/${PROJECT_NAME})

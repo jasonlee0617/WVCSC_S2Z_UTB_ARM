@@ -111,6 +111,14 @@ def test_real_orchestration_uses_real_leaf_and_five_point_route_contract():
     assert "'relay_config_file'" in source
 
 
+def test_real_bringup_does_not_install_legacy_site_task_tools():
+    cmake = (PACKAGE / 'CMakeLists.txt').read_text(encoding='utf-8')
+    assert 'scripts/load_site_mission.py' not in cmake
+    assert 'scripts/nav_validate_sites.py' not in cmake
+    assert not (PACKAGE / 'scripts' / 'load_site_mission.py').exists()
+    assert not (PACKAGE / 'scripts' / 'nav_validate_sites.py').exists()
+
+
 def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     source = _source('real_arm_spray_test.launch.py')
     script = (PACKAGE / 'scripts' / 'arm_spray_once.py').read_text(
