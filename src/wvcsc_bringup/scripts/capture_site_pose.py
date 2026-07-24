@@ -378,12 +378,44 @@ def _document(args):
     if path.exists():
         document = (load_field_route_document(path) if args.route_point
                     else load_site_document(path))
-        if document.get('map') != map_hashes(args.map):
+        selected_map = map_hashes(args.map)
+        if (args.route_point and
+                _can_bind_uninitialized_route_to_map(document)):
+            # The distributed v4 template deliberately contains placeholder
+            # hashes.  Bind it to the selected map on the first capture, but
+            # never rebind a route that already contains a captured pose.
+            document['map'] = selected_map
+        elif document.get('map') != selected_map:
             raise ValueError('existing site file is bound to a different map')
         return document
     return (new_field_route_document(args.site_id, args.mission_id, args.map)
             if args.route_point
             else new_site_document(args.site_id, args.mission_id, args.map))
+
+
+def _can_bind_uninitialized_route_to_map(document):
+    """Return true only for an untouched route template.
+
+    Rebinding a populated route would make its map poses unsafe.  A copied
+    template, however, has no captured poses and uses the documented marker
+    values, so binding it during the first capture is safe and avoids forcing
+    operators to edit hashes by hand.
+    """
+    route_map = document.get('map')
+    if not isinstance(route_map, dict):
+        return False
+    placeholders = {'', None, 'REPLACE_BY_CAPTURE_TOOL'}
+    if (route_map.get('frame_id', 'map') != 'map' or
+            route_map.get('yaml_sha256') not in placeholders or
+            route_map.get('image_sha256') not in placeholders):
+        return False
+    mission = document.get('mission')
+    if not isinstance(mission, dict):
+        return False
+    steps = mission.get('route_steps', [])
+    return bool(steps) and all(
+        isinstance(step, dict) and step.get('navigation_pose') is None
+        for step in steps)
 
 
 def main():

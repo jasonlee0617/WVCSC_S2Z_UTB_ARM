@@ -124,3 +124,24 @@ def test_transient_tf_extrapolation_is_retryable():
     transform, error = node._lookup_latest_transform()
     assert transform is not None
     assert error is None
+
+
+def test_uninitialized_route_template_can_bind_selected_map_once():
+    document = {
+        'map': {
+            'frame_id': 'map',
+            'yaml_sha256': 'REPLACE_BY_CAPTURE_TOOL',
+            'image_sha256': 'REPLACE_BY_CAPTURE_TOOL',
+        },
+        'mission': {
+            'route_steps': [
+                {'navigation_pose': None},
+                {'navigation_pose': None},
+            ],
+        },
+    }
+    assert capture_site_pose._can_bind_uninitialized_route_to_map(document)
+
+    document['mission']['route_steps'][0]['navigation_pose'] = {
+        'x': 0.0, 'y': 0.0, 'yaw': 0.0}
+    assert not capture_site_pose._can_bind_uninitialized_route_to_map(document)

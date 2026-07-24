@@ -81,6 +81,11 @@ MAP_FILE="$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
 cp "$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/field_route_corn.example.yaml" "$ROUTE_FILE"
 ```
 
+模板中的 `REPLACE_BY_CAPTURE_TOOL` 会在第一次采点时自动绑定当前
+`--map` 的 YAML 和地图图像哈希，不需要手动编辑哈希。如果路线文件已经
+包含旧地图的点位，程序会拒绝换绑；此时必须使用当前地图重新创建一个新的
+路线文件，不能用 `--force-capture` 或 `--update` 绕过检查。
+
 小车通过 RViz `Navigation2 Goal` 或遥控器移动到每个点，车辆停止后依次执行：
 
 ```bash
