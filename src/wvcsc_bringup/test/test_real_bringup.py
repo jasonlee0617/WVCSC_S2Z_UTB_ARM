@@ -148,7 +148,7 @@ def test_route_validation_launch_uses_real_navigation_and_fake_arm_only():
 def test_field_route_reopens_wide_relay_after_each_inspect():
     manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
         encoding='utf-8')
-    assert 'if self._index in (0, 2, 3):' in manager
+    assert 'self._index in (0, 1, 2, 3) and not self._wide_relay_enabled' in manager
     assert 'def _advance_after_wide_stop' in manager
     assert 'disable wide spray before final leg' in manager
 
@@ -258,6 +258,25 @@ def test_real_sensor_stack_has_one_unified_robot_state_publisher():
     assert "package='wvcsc_safety'" not in source
     assert "executable='safety_gate'" not in source
     assert "('/twist_cmd', '/wvcsc_bringup/disabled_twist_cmd')" in source
+
+
+def test_real_lidar_uses_one_filtered_scan_for_amcl_and_nav2():
+    real_sensors = _source('real_sensors.launch.py')
+    vehicle_launch = (
+        PACKAGE.parent / 'wtb_car_driver' / 'launch' /
+        'start_wtb_car_fdimu.launch.py').read_text(encoding='utf-8')
+    lidar_driver = (
+        PACKAGE.parent / 'lidar_ros2' / 'lslidar_ros' / 'lslidar_driver' /
+        'src' / 'lslidar_driver.cpp').read_text(encoding='utf-8')
+
+    for source in (real_sensors, vehicle_launch):
+        assert "('scan', '/scan_unfiltered')" in source
+        assert "executable='vehicle_scan_self_filter'" in source
+        assert "'input_topic': '/scan_unfiltered'" in source
+        assert "'output_topic': '/scan'" in source
+        assert "'mask_min_x': -0.825" in source
+        assert "'mask_max_y': 0.60" in source
+    assert 'create_publisher<sensor_msgs::msg::LaserScan>("/scan_raw", 10)' in lidar_driver
 
 
 def test_calibrated_xacro_vectors_are_quoted_for_negative_components():

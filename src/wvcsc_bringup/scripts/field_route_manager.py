@@ -20,9 +20,12 @@ from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.time import Time
 from std_srvs.srv import Trigger
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from wvcsc_bringup.field_route import (
     FieldRouteStep,
@@ -40,6 +43,7 @@ class FieldRouteManager(Node):
 
     STARTING = 'STARTING'
     NAVIGATING = 'NAVIGATING'
+    WAITING_FOR_NAV_MOTION = 'WAITING_FOR_NAV_MOTION'
     VERIFYING_INSPECT_STOP = 'VERIFYING_INSPECT_STOP'
     ARM_SPRAYING = 'ARM_SPRAYING'
     VERIFYING_FINISH_STOP = 'VERIFYING_FINISH_STOP'
@@ -82,7 +86,26 @@ class FieldRouteManager(Node):
         self._initial_pose_received = False
         self._nav_stack_active = False
         self._nav_state_request_active = False
+        self._nav_state_index = 0
         self._last_nav_state_log = 0.0
+        self._last_localization_log = 0.0
+        self._base_frame = str(self.get_parameter('base_frame').value).strip()
+        if not self._base_frame:
+            raise ValueError('base_frame must be non-empty')
+        self._nav_lifecycle_nodes = tuple(
+            self._normalize_lifecycle_node(name)
+            for name in self.get_parameter('nav_lifecycle_nodes').value)
+        if not self._nav_lifecycle_nodes:
+            raise ValueError('nav_lifecycle_nodes must not be empty')
+        self._nav_lifecycle_states = {}
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+        self._last_odom_at = 0.0
+        self._latest_linear_speed = 0.0
+        self._wide_relay_enabled = False
+        self._awaiting_wide_motion = False
+        self._wide_motion_enable_request_active = False
+        self._wide_motion_deadline = 0.0
         self._stop_detector = StopDetector(
             linear_threshold=float(self.get_parameter('linear_stop_threshold').value),
             angular_threshold=float(self.get_parameter('angular_stop_threshold').value),
@@ -95,8 +118,10 @@ class FieldRouteManager(Node):
         self._nav_client = ActionClient(
             self, NavigateToPose,
             str(self.get_parameter('nav_action_name').value))
-        self._nav_state_client = self.create_client(
-            GetState, '/bt_navigator/get_state')
+        self._nav_state_clients = {
+            name: self.create_client(GetState, f'{name}/get_state')
+            for name in self._nav_lifecycle_nodes
+        }
         self._arm_client = ActionClient(
             self, ExecuteSpray,
             str(self.get_parameter('arm_action_name').value))
@@ -115,6 +140,7 @@ class FieldRouteManager(Node):
             'mission_file': '',
             'map_file': '',
             'map_frame': 'map',
+            'base_frame': 'base_footprint',
             'nav_action_name': '/navigate_to_pose',
             'arm_action_name': '/arm/execute_spray',
             'relay_service_name': '/relay/set',
@@ -123,8 +149,16 @@ class FieldRouteManager(Node):
             'auto_start': True,
             'wait_for_initial_pose': False,
             'wait_for_nav_active': False,
+            'nav_lifecycle_nodes': [
+                '/amcl', '/map_server', '/controller_server', '/planner_server',
+                '/smoother_server', '/behavior_server', '/bt_navigator',
+                '/waypoint_follower', '/velocity_smoother',
+            ],
+            'initial_pose_tf_timeout_sec': 0.10,
             'relay_service_timeout_sec': 2.0,
             'nav_goal_timeout_sec': 120.0,
+            'wide_spray_motion_linear_threshold': 0.03,
+            'wide_spray_motion_timeout_sec': 10.0,
             'arm_goal_timeout_sec': 180.0,
             'linear_stop_threshold': 0.03,
             'angular_stop_threshold': 0.03,
@@ -141,14 +175,25 @@ class FieldRouteManager(Node):
             raise ValueError(f'{parameter} must be within 1..255')
         return value
 
+    @staticmethod
+    def _normalize_lifecycle_node(value):
+        node = str(value).strip().rstrip('/')
+        if not node:
+            raise ValueError('nav_lifecycle_nodes must contain non-empty node names')
+        return node if node.startswith('/') else f'/{node}'
+
     @property
     def _step(self) -> FieldRouteStep | None:
         return self._steps[self._index] if self._index < len(self._steps) else None
 
     def _on_odom(self, message):
+        now = time.monotonic()
+        self._last_odom_at = now
+        self._latest_linear_speed = math.hypot(
+            message.twist.twist.linear.x, message.twist.twist.linear.y)
         self._stop_detector.update(
-            time.monotonic(),
-            math.hypot(message.twist.twist.linear.x, message.twist.twist.linear.y),
+            now,
+            self._latest_linear_speed,
             abs(message.twist.twist.angular.z),
         )
 
@@ -156,41 +201,83 @@ class FieldRouteManager(Node):
         self._initial_pose_received = True
 
     def _poll_nav_state(self, now):
-        """Wait until bt_navigator is ACTIVE, not merely discoverable."""
+        """Wait until every Nav2 lifecycle node required by this route is active."""
         if self._nav_stack_active:
             return True
-        if not self._nav_state_client.service_is_ready():
+        if self._nav_state_request_active:
+            return False
+        node_name = self._nav_lifecycle_nodes[
+            self._nav_state_index % len(self._nav_lifecycle_nodes)]
+        client = self._nav_state_clients[node_name]
+        if not client.service_is_ready():
             if now - self._last_nav_state_log >= 5.0:
                 self.get_logger().info(
-                    '[FIELD_ROUTE] waiting for active Nav2 lifecycle state')
+                    f'[FIELD_ROUTE] waiting for Nav2 lifecycle service '
+                    f'{node_name}/get_state')
                 self._last_nav_state_log = now
-            return False
-        if self._nav_state_request_active:
             return False
         self._nav_state_request_active = True
         try:
-            future = self._nav_state_client.call_async(GetState.Request())
+            future = client.call_async(GetState.Request())
         except Exception as error:
             self._nav_state_request_active = False
             self.get_logger().warning(
-                f'[FIELD_ROUTE] Nav2 lifecycle query failed: {error}')
+                f'[FIELD_ROUTE] Nav2 lifecycle query failed for {node_name}: {error}')
             return False
 
         def done(result_future):
             self._nav_state_request_active = False
+            self._nav_state_index = (self._nav_state_index + 1) % len(
+                self._nav_lifecycle_nodes)
             try:
                 response = result_future.result()
-                active = response.current_state.id == 3  # PRIMARY_STATE_ACTIVE
+                self._nav_lifecycle_states[node_name] = response.current_state.id
+                active_nodes = [
+                    name for name in self._nav_lifecycle_nodes
+                    if self._nav_lifecycle_states.get(name) == 3
+                ]
+                active = len(active_nodes) == len(self._nav_lifecycle_nodes)
                 if active and not self._nav_stack_active:
                     self.get_logger().info(
-                        '[FIELD_ROUTE] Nav2 lifecycle is ACTIVE')
+                        '[FIELD_ROUTE] all required Nav2 lifecycle nodes are ACTIVE')
+                elif not active and time.monotonic() - self._last_nav_state_log >= 5.0:
+                    inactive = [
+                        name for name in self._nav_lifecycle_nodes
+                        if name not in active_nodes
+                    ]
+                    self.get_logger().info(
+                        '[FIELD_ROUTE] waiting for active Nav2 lifecycle nodes: '
+                        + ', '.join(inactive))
+                    self._last_nav_state_log = time.monotonic()
                 self._nav_stack_active = active
             except Exception as error:
                 self.get_logger().warning(
-                    f'[FIELD_ROUTE] Nav2 lifecycle response failed: {error}')
+                    f'[FIELD_ROUTE] Nav2 lifecycle response failed for {node_name}: {error}')
 
         future.add_done_callback(done)
         return False
+
+    def _localization_ready(self, now):
+        """Require both the AMCL event and a usable map-to-base transform."""
+        if not self._initial_pose_received:
+            if now - self._last_localization_log >= 5.0:
+                self.get_logger().info(
+                    '[FIELD_ROUTE] waiting for RViz initial pose on /amcl_pose')
+                self._last_localization_log = now
+            return False
+        try:
+            self._tf_buffer.lookup_transform(
+                self._map_frame, self._base_frame, Time(),
+                timeout=Duration(seconds=float(
+                    self.get_parameter('initial_pose_tf_timeout_sec').value)))
+        except TransformException as error:
+            if now - self._last_localization_log >= 5.0:
+                self.get_logger().info(
+                    '[FIELD_ROUTE] waiting for localization TF '
+                    f'{self._map_frame} -> {self._base_frame}: {error}')
+                self._last_localization_log = now
+            return False
+        return True
 
     def _on_cancel(self, _request, response):
         if self._state in (self.COMPLETED, self.FAILED):
@@ -216,9 +303,14 @@ class FieldRouteManager(Node):
             self._relay_request_id += 1
             self._fail('relay service response timed out')
             return
-        if (self._state == self.NAVIGATING and self._nav_active
+        if (self._state in (self.NAVIGATING, self.WAITING_FOR_NAV_MOTION)
+                and self._nav_active
                 and now >= self._nav_deadline):
             self._fail('Nav2 goal timed out')
+            return
+        if (self._state == self.WAITING_FOR_NAV_MOTION
+                and now >= self._wide_motion_deadline):
+            self._fail('vehicle did not begin moving before wide spray timeout')
             return
         if (self._state == self.ARM_SPRAYING and self._arm_active
                 and now >= self._arm_deadline):
@@ -228,11 +320,7 @@ class FieldRouteManager(Node):
             if not bool(self.get_parameter('auto_start').value):
                 return
             if (bool(self.get_parameter('wait_for_initial_pose').value)
-                    and not self._initial_pose_received):
-                if not self._ready_logged:
-                    self.get_logger().info(
-                        '[FIELD_ROUTE] waiting for RViz initial pose on /amcl_pose')
-                    self._ready_logged = True
+                    and not self._localization_ready(now)):
                 return
             if (bool(self.get_parameter('wait_for_nav_active').value)
                     and not self._poll_nav_state(now)):
@@ -247,6 +335,28 @@ class FieldRouteManager(Node):
             self.get_logger().info(
                 f'[FIELD_ROUTE] services ready; auto-starting mission={self._mission_id}')
             self._start_navigation()
+            return
+
+        if self._state == self.WAITING_FOR_NAV_MOTION:
+            if self._wide_motion_enable_request_active:
+                return
+            odom_stale_timeout = float(
+                self.get_parameter('odom_stale_timeout_sec').value)
+            linear_threshold = float(
+                self.get_parameter('wide_spray_motion_linear_threshold').value)
+            if now - self._last_odom_at > odom_stale_timeout:
+                return
+            if self._latest_linear_speed < linear_threshold:
+                return
+            step = self._step
+            if step is None:
+                self._fail('wide spray motion confirmed without a route step')
+                return
+            self._wide_motion_enable_request_active = True
+            self._relay(
+                self._wide_channel, True, 0.0,
+                self._enable_wide_and_resume_navigation,
+                f'{step.point_id}: vehicle motion confirmed; enable wide spray')
             return
 
         if self._state not in (
@@ -330,18 +440,14 @@ class FieldRouteManager(Node):
         if step is None:
             self._fail('route ended before finish step')
             return
-        # Wide spray state is explicit at every transition.  This avoids
-        # relying on the relay's previous latched state after a restart.
-        # The wide-spray relay is on while the vehicle is traversing the
-        # field.  It is re-enabled after each inspect stop and remains on
-        # while driving from point_3 to point_4; point_4 is the stop where it
-        # is turned off before the final leg.
-        if self._index in (0, 2, 3):
-            self._relay(
-                self._wide_channel, True, 0.0, self._send_nav_goal,
-                f'{step.point_id}: enable wide spray')
-        else:
-            self._send_nav_goal()
+        # A rejected or collision-blocked goal must never energize the pump.
+        # The relay is enabled only after Nav2 accepts the goal and odometry
+        # confirms that the vehicle has started moving.
+        self._awaiting_wide_motion = (
+            self._index in (0, 1, 2, 3) and not self._wide_relay_enabled)
+        self._wide_motion_enable_request_active = False
+        self._wide_motion_deadline = 0.0
+        self._send_nav_goal()
 
     def _send_nav_goal(self):
         step = self._step
@@ -379,6 +485,13 @@ class FieldRouteManager(Node):
                 self._fail(f'{step.point_id}: Nav2 rejected goal')
                 return
             self._nav_goal = handle
+            if self._awaiting_wide_motion:
+                self._state = self.WAITING_FOR_NAV_MOTION
+                self._wide_motion_deadline = time.monotonic() + float(
+                    self.get_parameter('wide_spray_motion_timeout_sec').value)
+                self._publish_status(
+                    f'{step.point_id}: navigation accepted; waiting for vehicle motion '
+                    'before wide spray')
             handle.get_result_async().add_done_callback(self._on_nav_result)
 
         future.add_done_callback(accepted)
@@ -399,6 +512,11 @@ class FieldRouteManager(Node):
             self._fail(
                 f'{step.point_id if step else "unknown"}: Nav2 failed with status={wrapped.status}')
             return
+        if self._awaiting_wide_motion:
+            self._fail(
+                f'{step.point_id if step else "unknown"}: Nav2 completed before '
+                'vehicle motion confirmation; wide spray remained off')
+            return
         if step is None:
             self._fail('Nav2 completed with no current route step')
             return
@@ -408,17 +526,17 @@ class FieldRouteManager(Node):
             self._start_navigation()
         elif step.role == 'inspect':
             self._relay(
-                self._wide_channel, False, 0.0, self._begin_inspect_stop,
+                self._wide_channel, False, 0.0, self._disable_wide_for_inspect,
                 f'{step.point_id}: disable wide spray before arm motion')
         elif step.role == 'wide_stop':
             self._relay(
                 self._wide_channel, False, 0.0,
-                self._advance_after_wide_stop,
+                self._disable_wide_and_advance_after_wide_stop,
                 f'{step.point_id}: disable wide spray before final leg')
         elif step.role == 'finish':
             self._relay(
                 self._wide_channel, False, 0.0,
-                self._disable_arm_before_finish,
+                self._disable_wide_before_finish,
                 'finish: ensure wide spray is off')
         else:
             self._fail(f'unsupported route role: {step.role}')
@@ -429,6 +547,20 @@ class FieldRouteManager(Node):
         self._state = self.VERIFYING_INSPECT_STOP
         self._stop_detector.start(time.monotonic())
         self._publish_status('vehicle arrived; verifying stop before arm spray')
+
+    def _enable_wide_and_resume_navigation(self):
+        if self._state in (self.COMPLETED, self.FAILED):
+            return
+        self._wide_relay_enabled = True
+        self._awaiting_wide_motion = False
+        self._wide_motion_enable_request_active = False
+        self._wide_motion_deadline = 0.0
+        self._state = self.NAVIGATING
+        self._publish_status('vehicle motion confirmed; wide spray enabled')
+
+    def _disable_wide_for_inspect(self):
+        self._wide_relay_enabled = False
+        self._begin_inspect_stop()
 
     def _send_arm_goal(self):
         step = self._step
@@ -511,6 +643,14 @@ class FieldRouteManager(Node):
             self._arm_channel, False, 0.0, self._begin_finish_stop,
             'finish: ensure arm spray is off')
 
+    def _disable_wide_before_finish(self):
+        self._wide_relay_enabled = False
+        self._disable_arm_before_finish()
+
+    def _disable_wide_and_advance_after_wide_stop(self):
+        self._wide_relay_enabled = False
+        self._advance_after_wide_stop()
+
     def _advance_after_wide_stop(self):
         """Leave point_4 only after the wide-spray relay is confirmed off."""
         if self._state in (self.COMPLETED, self.FAILED):
@@ -544,6 +684,10 @@ class FieldRouteManager(Node):
             self._arm_goal.cancel_goal_async()
         self._nav_active = False
         self._arm_active = False
+        self._wide_relay_enabled = False
+        self._awaiting_wide_motion = False
+        self._wide_motion_enable_request_active = False
+        self._wide_motion_deadline = 0.0
         self._state = self.FAILED
         self._command_all_off()
         self._publish_status(self._last_error)
@@ -568,6 +712,7 @@ class FieldRouteManager(Node):
         state_map = {
             self.STARTING: MissionStatus.WAITING_FOR_TASKS,
             self.NAVIGATING: MissionStatus.NAVIGATING,
+            self.WAITING_FOR_NAV_MOTION: MissionStatus.NAVIGATING,
             self.VERIFYING_INSPECT_STOP: MissionStatus.VERIFYING_STOP,
             self.ARM_SPRAYING: MissionStatus.ARM_SPRAYING,
             self.VERIFYING_FINISH_STOP: MissionStatus.VERIFYING_STOP,

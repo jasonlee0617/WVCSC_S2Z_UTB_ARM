@@ -114,3 +114,30 @@ def test_real_field_manager_is_fail_closed_and_keeps_shared_manual_route_untouch
     assert 'VERIFYING_INSPECT_STOP' in manager
     assert 'VERIFYING_FINISH_STOP' in manager
     assert 'vehicle stop verification' in manager
+
+
+def test_field_manager_waits_for_full_nav2_and_localization_before_point_one():
+    manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
+        encoding='utf-8')
+
+    for node in (
+            '/amcl', '/map_server', '/controller_server', '/planner_server',
+            '/smoother_server', '/behavior_server', '/bt_navigator',
+            '/waypoint_follower', '/velocity_smoother'):
+        assert repr(node) in manager
+    assert 'all required Nav2 lifecycle nodes are ACTIVE' in manager
+    assert 'lookup_transform(' in manager
+    assert 'self._map_frame, self._base_frame' in manager
+
+
+def test_field_manager_enables_wide_spray_only_after_accepted_motion():
+    manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
+        encoding='utf-8')
+    start_navigation = manager.split('    def _start_navigation(self):', 1)[1].split(
+        '    def _send_nav_goal(self):', 1)[0]
+
+    assert 'self._relay(' not in start_navigation
+    assert 'WAITING_FOR_NAV_MOTION' in manager
+    assert 'wide_spray_motion_linear_threshold' in manager
+    assert 'vehicle motion confirmed; enable wide spray' in manager
+    assert 'vehicle did not begin moving before wide spray timeout' in manager

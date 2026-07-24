@@ -37,6 +37,7 @@ link_directories(
 
 add_executable(wtb_car src/wtb_car.cpp)
 add_executable(wtb_car_only src/wtb_car_only.cpp)
+add_executable(vehicle_scan_self_filter src/vehicle_scan_self_filter.cpp)
 
 
 
@@ -83,6 +84,14 @@ ament_target_dependencies(wtb_car_only
   can_msgs
 )
 
+ament_target_dependencies(vehicle_scan_self_filter
+  rclcpp
+  geometry_msgs
+  tf2
+  tf2_ros
+  sensor_msgs
+)
+
 
 
 
@@ -95,8 +104,12 @@ rosidl_target_interfaces(wtb_car
 # 安装可执行文件
 install(TARGETS 
   wtb_car
-  wtb_car_only 
+  wtb_car_only
+  vehicle_scan_self_filter
   DESTINATION lib/${PROJECT_NAME})
+
+install(DIRECTORY include/
+  DESTINATION include)
 
 # 安装库文件
 install(
@@ -114,6 +127,12 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}/
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_vehicle_scan_self_filter
+    test/test_vehicle_scan_self_filter.cpp)
+  target_include_directories(test_vehicle_scan_self_filter PRIVATE include)
+  ament_target_dependencies(test_vehicle_scan_self_filter sensor_msgs)
+endif()
+
 ament_package()
-
-
