@@ -118,7 +118,7 @@ def generate_launch_description():
             package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
             remappings=[
                          ('cloud_in', '/point_cloud_raw'),
-                        ('scan', '/scan_unfiltered')],
+                        ('scan', '/scan')],
             parameters=[{
                 'target_frame': 'laser',
                 'min_height': -0.75,
@@ -135,21 +135,6 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
             }],
             name='pointcloud_to_laserscan'
-    )
-    vehicle_scan_self_filter = Node(
-            package='wtb_car_driver', executable='vehicle_scan_self_filter',
-            name='vehicle_scan_self_filter',
-            parameters=[{
-                'input_topic': '/scan_unfiltered',
-                'output_topic': '/scan',
-                'base_frame': 'base_footprint',
-                'mask_min_x': -0.825,
-                'mask_max_x': 0.825,
-                'mask_min_y': -0.60,
-                'mask_max_y': 0.60,
-                'use_sim_time': use_sim_time,
-            }],
-            output='screen'
     )
 
     # 旧版 FDI IMU 已停用，仅保留注释用于回滚。
@@ -229,7 +214,7 @@ def generate_launch_description():
     ld.add_action(
         GroupAction(
             condition=IfCondition(enable_pointcloud_to_laserscan),
-            actions=[pointcloud_to_laserscan, vehicle_scan_self_filter]
+            actions=[pointcloud_to_laserscan]
         )
     )
     ld.add_action(ekf_node)

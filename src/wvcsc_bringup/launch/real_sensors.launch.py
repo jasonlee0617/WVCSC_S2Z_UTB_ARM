@@ -112,7 +112,7 @@ def generate_launch_description():
             name='pointcloud_to_laserscan',
             remappings=[
                 ('cloud_in', '/point_cloud_raw'),
-                ('scan', '/scan_unfiltered'),
+                ('scan', '/scan'),
             ],
             parameters=[{
                 'target_frame': 'laser',
@@ -127,20 +127,6 @@ def generate_launch_description():
                 'range_max': 50.0,
                 'use_inf': True,
                 'inf_epsilon': 50.0,
-                'use_sim_time': False,
-            }],
-            output='screen'),
-        Node(
-            package='wtb_car_driver', executable='vehicle_scan_self_filter',
-            name='vehicle_scan_self_filter',
-            parameters=[{
-                'input_topic': '/scan_unfiltered',
-                'output_topic': '/scan',
-                'base_frame': 'base_footprint',
-                'mask_min_x': -0.825,
-                'mask_max_x': 0.825,
-                'mask_min_y': -0.60,
-                'mask_max_y': 0.60,
                 'use_sim_time': False,
             }],
             output='screen'),

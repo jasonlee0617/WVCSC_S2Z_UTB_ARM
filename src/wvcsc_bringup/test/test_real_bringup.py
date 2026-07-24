@@ -87,7 +87,7 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "'relay_config_file'" in source
     assert "'--relay-config', relay_config" in source
     assert "'--operation', 'field_route'" in source
-    assert "'use_nav_rviz', default_value='false'" in source
+    assert "'use_nav_rviz', default_value='true'" in source
     assert "'use_moveit_rviz', default_value='false'" in source
 
 
@@ -260,7 +260,7 @@ def test_real_sensor_stack_has_one_unified_robot_state_publisher():
     assert "('/twist_cmd', '/wvcsc_bringup/disabled_twist_cmd')" in source
 
 
-def test_real_lidar_uses_one_filtered_scan_for_amcl_and_nav2():
+def test_real_lidar_publishes_one_direct_scan_for_amcl_and_nav2():
     real_sensors = _source('real_sensors.launch.py')
     vehicle_launch = (
         PACKAGE.parent / 'wtb_car_driver' / 'launch' /
@@ -270,12 +270,9 @@ def test_real_lidar_uses_one_filtered_scan_for_amcl_and_nav2():
         'src' / 'lslidar_driver.cpp').read_text(encoding='utf-8')
 
     for source in (real_sensors, vehicle_launch):
-        assert "('scan', '/scan_unfiltered')" in source
-        assert "executable='vehicle_scan_self_filter'" in source
-        assert "'input_topic': '/scan_unfiltered'" in source
-        assert "'output_topic': '/scan'" in source
-        assert "'mask_min_x': -0.825" in source
-        assert "'mask_max_y': 0.60" in source
+        assert "('scan', '/scan')" in source
+        assert 'vehicle_scan_self_filter' not in source
+        assert '/scan_unfiltered' not in source
     assert 'create_publisher<sensor_msgs::msg::LaserScan>("/scan_raw", 10)' in lidar_driver
 
 
