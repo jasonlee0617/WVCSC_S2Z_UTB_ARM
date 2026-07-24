@@ -17,7 +17,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            'video_device', default_value='/dev/video4',
+            'video_device', default_value='/dev/video2',
             description='C10 V4L2 device (current JR0037 index0).'),
         DeclareLaunchArgument(
             'camera_info_url',

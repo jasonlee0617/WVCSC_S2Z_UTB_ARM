@@ -3,7 +3,7 @@ moveit_hardware.launch.py - MoveIt2 + 真实硬件
 
 用法:
   ros2 launch alicia_m_bringup moveit_hardware.launch.py
-  ros2 launch alicia_m_bringup moveit_hardware.launch.py serial_port:=/dev/ttyACM1
+  ros2 launch alicia_m_bringup moveit_hardware.launch.py serial_port:=/dev/ttyACM0
   ros2 launch alicia_m_bringup moveit_hardware.launch.py control_mode:=mit mit_kp:=30.0 mit_kd:=1.5
 """
 
@@ -51,8 +51,8 @@ def _print_launch_config(context):
 def generate_launch_description():
     declared_args = [
         DeclareLaunchArgument(
-            'serial_port', default_value='/dev/ttyACM1',
-            choices=['/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2', '/dev/ttyACM3'],
+            'serial_port', default_value='/dev/ttyACM0',
+            choices=['/dev/ttyACM0', '/dev/ttyACM0', '/dev/ttyACM2', '/dev/ttyACM3'],
             description='Serial port'),
         DeclareLaunchArgument(
             'control_mode', default_value='pv',

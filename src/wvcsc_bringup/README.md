@@ -152,8 +152,8 @@ ros2 run wvcsc_bringup validate_field_route -- --file "$ROUTE_FILE" --map "$MAP_
 
 | 项目 | 开发机常用覆盖值 | 小车默认值 |
 | --- | --- | --- |
-| C10 V4L2 | `/dev/video0` | `/dev/video4` |
-| Alicia-M | `/dev/ttyACM0` | `/dev/ttyACM1` |
+| C10 V4L2 | `/dev/video0` | `/dev/video2` |
+| Alicia-M | `/dev/ttyACM0` | `/dev/ttyACM0` |
 | 继电器配置 | `fault_dev.ini` | `controller_pkg/config/fault.ini` |
 | 实机手眼标定 | config 下最新 `c10_handeye_*.calib` | 同左 |
 | 仿真手眼标定 | config 下最新 `c10_handeye_sim_*.calib` | 不使用实机文件 |
@@ -240,7 +240,7 @@ ros2 topic echo /spray/simulated_active
 仿真的 `timer` 模式。启动前必须确认 `controller_pkg/config/fault.ini` 的继电器
 串口、波特率和从站地址与实际设备一致；小车默认继电器路径为
 `/dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0`。这里的继电器串口与上面的机械臂
-`serial_port` 是两条独立串口，不能因为机械臂使用 `/dev/ttyACM1` 就把继电器也改成
+`serial_port` 是两条独立串口，不能因为机械臂使用 `/dev/ttyACM0` 就把继电器也改成
 同一个设备。
 
 在小车工控机上先验证服务和继电器，再启动完整测试：
@@ -260,7 +260,7 @@ ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
 ```bash
 ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python" \
-  serial_port:=/dev/ttyACM1 \
+  serial_port:=/dev/ttyACM0 \
   relay_config_file:="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini"
 ```
 

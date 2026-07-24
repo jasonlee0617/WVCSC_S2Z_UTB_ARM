@@ -12,7 +12,7 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
     return LaunchDescription([
-        DeclareLaunchArgument('video_device', default_value='/dev/video4'),
+        DeclareLaunchArgument('video_device', default_value='/dev/video2'),
         DeclareLaunchArgument(
             'camera_info_url', default_value=(
                 'package://wvcsc_c10_camera/config/c10_intrinsics.yaml')),

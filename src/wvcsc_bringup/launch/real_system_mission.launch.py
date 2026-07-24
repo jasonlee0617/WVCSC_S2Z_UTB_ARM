@@ -357,8 +357,8 @@ def generate_launch_description():
                 bringup_share, 'scripts', 'preflight_check.py')),
         DeclareLaunchArgument(
             'c10_device',
-            default_value='/dev/video4'),
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM1'),
+            default_value='/dev/video2'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('control_mode', default_value='pv'),
         DeclareLaunchArgument('default_speed', default_value='0.5'),

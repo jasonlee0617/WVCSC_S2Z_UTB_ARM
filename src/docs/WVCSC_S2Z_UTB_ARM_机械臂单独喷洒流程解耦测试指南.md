@@ -119,7 +119,7 @@ ls -l /dev/v4l/by-id/
 默认设备为：
 
 ```text
-/dev/video4
+/dev/video2
 ```
 
 如果现场设备名不同，启动时用 `c10_device:=...` 显式传入。
@@ -133,7 +133,7 @@ ls -l /dev/ttyACM* /dev/ttyUSB*
 默认机械臂串口为：
 
 ```text
-/dev/ttyACM1
+/dev/ttyACM0
 ```
 
 如果不同，启动时用 `serial_port:=...` 显式传入。
@@ -146,7 +146,7 @@ sed -n '1,20p' ~/WVCSC_S2Z_UTB_ARM/src/controller_pkg/config/fault.ini
 
 `fault.ini` 中的 `PortName` 必须指向继电器 Modbus 串口（默认
 `/dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0`），`serial_port` 只指向 Alicia-M
-机械臂串口（默认 `/dev/ttyACM1`）。现场建议使用 `/dev/serial/by-id/` 或
+机械臂串口（默认 `/dev/ttyACM0`）。现场建议使用 `/dev/serial/by-id/` 或
 `/dev/serial/by-path/` 下的稳定设备名，并确认当前用户
 具有串口访问权限。
 
@@ -174,8 +174,8 @@ ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
 ```bash
 ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python" \
-  c10_device:=/dev/video4 \
-  serial_port:=/dev/ttyACM1 \
+  c10_device:=/dev/video2 \
+  serial_port:=/dev/ttyACM0 \
   relay_config_file:="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini" \
   arm_velocity_scaling:=0.20 \
   arm_acceleration_scaling:=0.20 \

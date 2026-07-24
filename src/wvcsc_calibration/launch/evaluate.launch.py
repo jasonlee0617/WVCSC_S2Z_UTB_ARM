@@ -80,7 +80,7 @@ def generate_launch_description():
         # ── C10 camera ──────────────────────────────────────────
         DeclareLaunchArgument(
             'video_device',
-            default_value='/dev/video4'),
+            default_value='/dev/video2'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(
@@ -102,7 +102,7 @@ def generate_launch_description():
                        'base_link', 'alicia_base_link']),
 
         # ── Alicia-M arm (MoveIt + ros2_control, arm-only URDF) ──
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM1'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 alicia_bringup_share, 'launch', 'moveit_hardware.launch.py')),

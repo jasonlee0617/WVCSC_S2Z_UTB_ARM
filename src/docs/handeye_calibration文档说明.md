@@ -106,7 +106,7 @@ OpenCV 的 Park/Horaud/Tsai-Lenz 闭式解首先提供确定性初值；随后�
 
 ```bash
 ros2 launch wvcsc_calibration auto_handeye.launch.py \
-  video_device:=/dev/video4 serial_port:=/dev/ttyACM1
+  video_device:=/dev/video2 serial_port:=/dev/ttyACM0
 ```
 
 该入口只编排 C10、Alicia-M、MoveIt、ArUco、marker TF、easy_handeye2 与
