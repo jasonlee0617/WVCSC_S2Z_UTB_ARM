@@ -15,13 +15,13 @@ ros2 launch wvcsc_bringup real_cartographer.launch.py
 
 此命令复用已验证的底盘、LiDAR、IMU、EKF 链，启动 Cartographer 和
 `wvcsc_bringup/rviz/real_cartographer.rviz`，不启动 C10、Nav2、机械臂或任务节点。完成建图后保存为
-`${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.{yaml,pgm}`：
+`maps/map_YYYYMMDD_HHMMSS/orchard.{yaml,pgm}`：
 
 ```bash
 bash $(ros2 pkg prefix wvcsc_bringup)/share/wvcsc_bringup/scripts/save_corn_map.sh
 ```
 
-脚本默认使用上述路径；也可将其他输出基名作为第一个参数传入。
+脚本默认创建时间戳目录；也可将其他输出基名作为第一个参数传入。
 
 ## 2. 实机导航
 
@@ -31,12 +31,11 @@ bash $(ros2 pkg prefix wvcsc_bringup)/share/wvcsc_bringup/scripts/save_corn_map.
 ros2 launch wvcsc_bringup real_navigation.launch.py
 ```
 
-默认地图为 `${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml`。
-使用其他地图时显式传入绝对路径：
+默认自动选择最新时间戳地图。使用其他地图时显式传入绝对路径：
 
 ```bash
 ros2 launch wvcsc_bringup real_navigation.launch.py \
-  map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/other.yaml"
+  map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/map_YYYYMMDD_HHMMSS/other.yaml"
 ```
 
 该启动链与已通过实机验证的
@@ -74,21 +73,28 @@ AMCL稳定后，人工驾驶并停稳。卷尺必须从机械臂基座物理原�
 
 已有的 schema-v2 站点文件可迁移，schema-v1 文件必须重新采集：
 
+旧共享站点必须由操作者显式指定；地图默认取最新时间戳地图：
+
+```bash
+SITE_FILE="<existing-schema-v2-site.yaml>"
+MAP_FILE="$(python3 -c 'from wvcsc_bringup.path_defaults import latest_map_yaml; print(latest_map_yaml())')"
+```
+
 ```bash
 ros2 run wvcsc_bringup migrate_site_mission -- \
-  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
-  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
+  --file "$SITE_FILE" \
+  --map "$MAP_FILE"
 ```
 
 ```bash
 ros2 run wvcsc_bringup capture_site_pose -- \
-  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
-  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
+  --file "$SITE_FILE" \
+  --map "$MAP_FILE" \
   --capture-home
 
 ros2 run wvcsc_bringup capture_site_pose -- \
-  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
-  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
+  --file "$SITE_FILE" \
+  --map "$MAP_FILE" \
   --target-id corn_01 \
   --tree-x-m 0.0 --tree-y-m <带符号实测值> \
   --spray-duration 5.0
@@ -98,8 +104,8 @@ ros2 run wvcsc_bringup capture_site_pose -- \
 
 ```bash
 ros2 run wvcsc_bringup validate_site_mission -- \
-  --file ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/corn_site.yaml \
-  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
+  --file "$SITE_FILE" \
+  --map "$MAP_FILE"
 ```
 
 任务文件使用schema v2，并与地图YAML及图片SHA256绑定；地图改变后旧任务会被拒绝。
@@ -117,7 +123,7 @@ AMCL 位置/偏航标准差 ≤ 1.00 m/rad。门限集中定义在
 
 ```bash
 ros2 run wvcsc_bringup capture_site_pose -- \
-  --map "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml" \
+  --map "$MAP_FILE" \
   --target-id tree_01 --tree-x-m 0.0 --tree-y-m 1.60 \
   --timeout-sec 60 --force-capture
 ```
@@ -132,8 +138,11 @@ ros2 run wvcsc_bringup capture_site_pose -- \
 仍以 `alicia_base_link` 为原点：`+X` 向车头、`+Y` 向左；两点喷洒时长固定为 3.0 s。
 
 ```bash
-ROUTE_FILE="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/field_route_corn.yaml"
-MAP_FILE="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
+MISSION_DIR="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/mission_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$MISSION_DIR"
+ROUTE_FILE="$MISSION_DIR/field_route_corn.yaml"
+MAP_FILE="$(python3 -c 'from wvcsc_bringup.path_defaults import latest_map_yaml; print(latest_map_yaml())')"
+cp "${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/field_route_corn.example.yaml" "$ROUTE_FILE"
 
 ros2 run wvcsc_bringup capture_site_pose -- --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_1
 ros2 run wvcsc_bringup capture_site_pose -- --file "$ROUTE_FILE" --map "$MAP_FILE" --route-point point_2 --tree-id corn_01 --tree-x-m 0.0 --tree-y-m 1.20
@@ -273,8 +282,7 @@ ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
 
 ```bash
 ros2 launch wvcsc_bringup real_system_mission.launch.py \
-  mission_file:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/wvcsc_sites/field_route_corn.yaml" \
-  map:="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/maps/orchard.yaml"
+  yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python"
 ```
 
 启动前检查会在任何硬件节点运行之前验证：
@@ -288,7 +296,7 @@ ros2 launch wvcsc_bringup real_system_mission.launch.py \
 - `wvcsc_c10_camera/config/c10_intrinsics.yaml`；
 - `$HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config` 中最新的
   `c10_handeye_YYYYMMDD_HHMMSS.calib`；
-- `~/.ros/wvcsc_calibration/nozzle.yaml`。
+- `${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/nozzle.example.yaml`。
 
 实机权重需由用户放入
 `wvcsc_rgb_vision/models/`。权重缺失或类别契约不匹配时，整个实机启动会
@@ -360,14 +368,13 @@ ros2 run wvcsc_arm_task motion_control_keyboard
 再清空上一轮服务端样本，逐候选执行碰撞IK、Jacobian条件数、关节余量和OMPL
 门控，并以Park/Horaud/Tsai-Lenz共识及离群剔除后结果原子写入。
 
-随后根据实际喷嘴安装填写并验证：
+当前临时联调直接使用工作区中的 tool0 零偏置配置：
 
 ```bash
-mkdir -p ~/.ros/wvcsc_calibration
-cp $(ros2 pkg prefix wvcsc_calibration)/share/wvcsc_calibration/config/\
-nozzle.example.yaml ~/.ros/wvcsc_calibration/nozzle.yaml
+NOZZLE_FILE="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/nozzle.example.yaml"
+test -f "$NOZZLE_FILE"
 ```
 
-`nozzle.yaml`描述`tool0→spray_nozzle_link`、固定工距`1.00±0.05m`和湿喷
-落点微调`pixel_trim`。实机任务默认要求三份标定均存在；任一缺失时前置检查
-会阻止任务栈启动，不会用名义外参自动喷洒。
+`nozzle.example.yaml`描述`tool0→spray_nozzle_link`，当前平移为零、旋转为单位旋转，
+固定工距为`1.00±0.05m`。它只是临时 tool0 假设，不代表真实喷嘴外参；完成真实喷嘴
+标定后应替换该文件。

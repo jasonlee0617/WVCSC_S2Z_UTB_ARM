@@ -32,7 +32,8 @@ source ~/WVCSC_S2Z_UTB_ARM/install/setup.bash
 机械臂串口和继电器串口是独立设备：
 
 ```text
-serial_port       → Alicia-M，默认 /dev/ttyACM1
+serial_port       → Alicia-M，默认 /dev/ttyACM0
+video_device      → C10 相机，默认 /dev/video2
 fault.ini PortName → Modbus 继电器，默认 /dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0
 ```
 

@@ -1,3 +1,5 @@
+# Temporary commissioning profile: spray_nozzle_link is coincident with tool0.
+# Replace this file with measured nozzle extrinsics before precision spraying.
 schema_version: 1
 parent_frame: tool0
 child_frame: spray_nozzle_link

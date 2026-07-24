@@ -146,7 +146,7 @@ sed -n '1,20p' ~/WVCSC_S2Z_UTB_ARM/src/controller_pkg/config/fault.ini
 
 `fault.ini` 中的 `PortName` 必须指向继电器 Modbus 串口（默认
 `/dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0`），`serial_port` 只指向 Alicia-M
-机械臂串口（默认 `/dev/ttyACM0`）。现场建议使用 `/dev/serial/by-id/` 或
+机械臂串口（小车默认 `/dev/ttyACM0`）。现场建议使用 `/dev/serial/by-id/` 或
 `/dev/serial/by-path/` 下的稳定设备名，并确认当前用户
 具有串口访问权限。
 

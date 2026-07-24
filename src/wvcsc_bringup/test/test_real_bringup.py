@@ -355,6 +355,35 @@ def test_real_launches_use_timestamped_defaults_not_legacy_paths():
     assert not (PACKAGE / 'config' / 'real' / 'field_route_corn.yaml').exists()
 
 
+def test_real_hardware_defaults_match_field_computer():
+    for launch_name in (
+            'real_arm_spray_test.launch.py',
+            'real_sensors.launch.py',
+            'real_system_mission.launch.py'):
+        source = _source(launch_name)
+        assert "default_value='/dev/video2'" in source
+        assert "default_value='/dev/ttyACM0'" in source
+    for launch_name in ('real_arm.launch.py', 'real_orchestration.launch.py'):
+        source = _source(launch_name)
+        assert "default_value='/dev/ttyACM0'" in source
+    source = (PACKAGE.parent / 'wvcsc_calibration' / 'launch' /
+              'real_vision_test.launch.py').read_text(encoding='utf-8')
+    assert "default_value='/dev/video2'" in source
+    for launch_name in (
+            'auto_handeye.launch.py', 'c10_handeye.launch.py',
+            'calibrate.launch.py', 'evaluate.launch.py'):
+        source = (PACKAGE.parent / 'wvcsc_calibration' / 'launch' /
+                  launch_name).read_text(encoding='utf-8')
+        assert "default_value='/dev/video2'" in source
+        assert "default_value='/dev/ttyACM0'" in source
+    assert "default_value='/dev/video2'" in (
+        PACKAGE.parent / 'wvcsc_c10_camera' / 'launch' /
+        'c10_camera.launch.py').read_text(encoding='utf-8')
+    assert 'video_device: /dev/video2' in (
+        PACKAGE.parent / 'wvcsc_c10_camera' / 'config' /
+        'c10_usb_cam.yaml').read_text(encoding='utf-8')
+
+
 def test_tool0_coincident_nozzle_example_is_valid():
     data = yaml.safe_load((PACKAGE.parent / 'wvcsc_calibration' / 'config' /
                            'nozzle.example.yaml').read_text(encoding='utf-8'))
