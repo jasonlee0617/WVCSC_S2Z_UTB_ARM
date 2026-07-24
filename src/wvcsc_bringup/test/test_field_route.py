@@ -4,6 +4,7 @@ import pytest
 import yaml
 
 from wvcsc_bringup.field_route import (
+    ALICIA_ARM_BASE_YAW_RAD,
     ARM_SPRAY_DURATION_SEC,
     ROUTE_POINT_IDS,
     ROUTE_ROLES,
@@ -60,6 +61,20 @@ def test_v4_route_requires_exact_five_point_order_and_two_three_second_inspects(
     assert tuple(step.point_id for step in steps) == ROUTE_POINT_IDS
     assert tuple(step.role for step in steps) == ROUTE_ROLES
     assert [step.arm_spray_duration for step in steps if step.role == 'inspect'] == [3.0, 3.0]
+
+
+def test_v4_route_records_alicia_mount_yaw_and_accepts_legacy_missing_value(tmp_path):
+    map_yaml = _map(tmp_path)
+    document = _document(map_yaml)
+    assert document['arm_base_mount']['yaw_rad'] == pytest.approx(
+        ALICIA_ARM_BASE_YAW_RAD)
+
+    document['arm_base_mount'].pop('yaw_rad')
+    validate_field_route_document(document, map_yaml)
+
+    document['arm_base_mount']['yaw_rad'] = 0.0
+    with pytest.raises(ValueError, match='arm_base_mount does not match robot geometry'):
+        validate_field_route_document(document, map_yaml)
 
 
 def test_v4_route_rejects_role_order_duplicate_tree_and_duration_drift(tmp_path):
@@ -141,3 +156,20 @@ def test_field_manager_enables_wide_spray_only_after_accepted_motion():
     assert 'wide_spray_motion_linear_threshold' in manager
     assert 'vehicle motion confirmed; enable wide spray' in manager
     assert 'vehicle did not begin moving before wide spray timeout' in manager
+
+
+def test_current_field_routes_keep_positive_arm_y_and_record_mount_yaw():
+    routes = sorted((PACKAGE / 'config' / 'real').glob(
+        'mission_*/field_route_corn.yaml'))
+    assert routes
+    for route_path in routes:
+        document = yaml.safe_load(route_path.read_text(encoding='utf-8'))
+        assert document['arm_base_mount']['yaw_rad'] == pytest.approx(
+            ALICIA_ARM_BASE_YAW_RAD)
+        inspect_steps = [
+            step for step in document['mission']['route_steps']
+            if step['role'] == 'inspect'
+        ]
+        assert len(inspect_steps) == 2
+        assert all(step['tree_offset_arm_base_m'][1] > 0.0
+                   for step in inspect_steps)

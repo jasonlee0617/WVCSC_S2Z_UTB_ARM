@@ -122,12 +122,15 @@ ros2 run wvcsc_bringup capture_site_pose -- \
 坐标约定：
 
 ```text
-+X：车头方向
-+Y：车体左侧
--Y：车体右侧
+tree_offset_arm_base_m 使用 alicia_base_link 坐标，不能直接套用车体坐标。
+当前 alicia_mount_joint 相对车体绕 Z 轴旋转 pi：
+alicia +X = 车体 -X，alicia +Y = 车体 -Y。
 ```
 
 `point_2` 和 `point_3` 的树坐标必须使用机械臂基座坐标系下的带符号 X/Y。
+关节预设观察模式只接受 `tree-y-m > 0`；这是 `alicia_base_link` 的正 Y，
+不是车体正 Y。当前安装下，不能因为树位于车体某一侧而手工把该值改成负数；
+路线管理器会应用安装偏航 `yaw_rad: pi` 后再生成 map 中的树提示。
 
 ### 4.1 采点门控说明
 

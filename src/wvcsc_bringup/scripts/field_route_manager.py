@@ -28,6 +28,7 @@ from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from wvcsc_bringup.field_route import (
+    ALICIA_ARM_BASE_YAW_RAD,
     FieldRouteStep,
     load_field_route_document,
     validate_field_route_document,
@@ -61,6 +62,8 @@ class FieldRouteManager(Node):
         mount = document['arm_base_mount']
         self._arm_base_forward = float(mount['x_m'])
         self._arm_base_left = float(mount['y_m'])
+        self._arm_base_yaw = float(
+            mount.get('yaw_rad', ALICIA_ARM_BASE_YAW_RAD))
 
         self._wide_channel = self._positive_channel('wide_relay_channel')
         self._arm_channel = self._positive_channel('arm_relay_channel')
@@ -572,7 +575,8 @@ class FieldRouteManager(Node):
         hint_x, hint_y, hint_z = tree_hint_from_arm_base_offset(
             (step.navigation_pose['x'], step.navigation_pose['y'], step.navigation_pose['yaw']),
             step.tree_offset_arm_base_m[0], step.tree_offset_arm_base_m[1],
-            step.tree_base_z_m, self._arm_base_forward, self._arm_base_left)
+            step.tree_base_z_m, self._arm_base_forward, self._arm_base_left,
+            self._arm_base_yaw)
         goal = ExecuteSpray.Goal()
         goal.mission_id = self._mission_id
         goal.tree_id = step.tree_id

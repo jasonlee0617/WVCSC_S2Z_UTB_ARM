@@ -29,6 +29,7 @@ from wvcsc_bringup.site_mission import (
     validate_site_document,
 )
 from wvcsc_bringup.field_route import (
+    ALICIA_ARM_BASE_YAW_RAD,
     ARM_SPRAY_DURATION_SEC,
     INSPECT_POINT_IDS,
     ROUTE_POINT_IDS,
@@ -387,6 +388,12 @@ def _document(args):
             document['map'] = selected_map
         elif document.get('map') != selected_map:
             raise ValueError('existing site file is bound to a different map')
+        if args.route_point:
+            # Persist the fixed Alicia installation rotation when an older
+            # schema-v4 route is touched, while the validator still accepts
+            # such files for backward compatibility.
+            document.setdefault('arm_base_mount', {}).setdefault(
+                'yaw_rad', ALICIA_ARM_BASE_YAW_RAD)
         return document
     return (new_field_route_document(args.site_id, args.mission_id, args.map)
             if args.route_point

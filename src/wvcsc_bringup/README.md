@@ -135,7 +135,9 @@ ros2 run wvcsc_bringup capture_site_pose -- \
 
 实机完整作业只接受 schema-v4 的五点路线，不会读取上面的 `corn_site.yaml`。
 现场逐点停稳后，用同一个文件依次采集 `point_1` 至 `point_5`。点 2、3 的树位置
-仍以 `alicia_base_link` 为原点：`+X` 向车头、`+Y` 向左；两点喷洒时长固定为 3.0 s。
+树偏移以 `alicia_base_link` 为原点，而不是车体坐标。当前 `alicia_mount_joint`
+相对车体绕 Z 轴旋转 `pi`，因此 `alicia +X = 车体 -X`、`alicia +Y = 车体 -Y`。
+关节预设模式要求 `tree-y-m > 0`；不要按车体左右方向手工反转符号。两点喷洒时长固定为 3.0 s。
 
 ```bash
 MISSION_DIR="${HOME}/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/config/real/mission_$(date +%Y%m%d_%H%M%S)"

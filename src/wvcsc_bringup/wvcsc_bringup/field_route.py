@@ -36,6 +36,9 @@ ROUTE_POINT_IDS = ("point_1", "point_2", "point_3", "point_4", "point_5")
 ROUTE_ROLES = ("wide_start", "inspect", "inspect", "wide_stop", "finish")
 INSPECT_POINT_IDS = frozenset(("point_2", "point_3"))
 ARM_SPRAY_DURATION_SEC = 3.0
+# ``alicia_mount_joint`` is installed with rpy="0 0 pi" relative to the
+# vehicle base.  Five-point route offsets stay in alicia_base_link axes.
+ALICIA_ARM_BASE_YAW_RAD = math.pi
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,7 @@ def new_field_route_document(site_id: str, mission_id: str, map_yaml: str) -> di
         "arm_base_mount": {
             "x_m": DEFAULT_ARM_BASE_FORWARD_OFFSET,
             "y_m": DEFAULT_ARM_BASE_LEFT_OFFSET,
+            "yaw_rad": ALICIA_ARM_BASE_YAW_RAD,
         },
         "mission": {
             "mission_id": mission_id.strip(),
@@ -226,8 +230,14 @@ def validate_field_route_document(
         raise ValueError("arm_base_mount must be a mapping")
     arm_x = _finite_number(mount.get("x_m"), "arm_base_mount.x_m")
     arm_y = _finite_number(mount.get("y_m"), "arm_base_mount.y_m")
+    # Older schema-v4 routes did not record this fixed installation angle.
+    # They remain valid and acquire the explicit field on their next capture.
+    arm_yaw = _finite_number(
+        mount.get("yaw_rad", ALICIA_ARM_BASE_YAW_RAD),
+        "arm_base_mount.yaw_rad")
     if (not math.isclose(arm_x, DEFAULT_ARM_BASE_FORWARD_OFFSET, abs_tol=1e-9)
-            or not math.isclose(arm_y, DEFAULT_ARM_BASE_LEFT_OFFSET, abs_tol=1e-9)):
+            or not math.isclose(arm_y, DEFAULT_ARM_BASE_LEFT_OFFSET, abs_tol=1e-9)
+            or not math.isclose(arm_yaw, ALICIA_ARM_BASE_YAW_RAD, abs_tol=1e-9)):
         raise ValueError("arm_base_mount does not match robot geometry")
 
     steps = route_steps(document)

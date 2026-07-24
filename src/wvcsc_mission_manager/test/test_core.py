@@ -66,6 +66,19 @@ def test_tree_hint_uses_signed_arm_base_xy_and_round_trips():
         (0.0, -1.5))
 
 
+def test_tree_hint_round_trips_with_alicia_mount_yaw():
+    docking = (3.0, 0.5, 0.0)
+    hint = tree_hint_from_arm_base_offset(
+        docking, 0.0, 1.5,
+        arm_base_yaw_rad=math.pi)
+
+    # The actual Alicia installation rotates its base by pi.  Positive arm Y
+    # must remain positive when the map hint is transformed back into arm axes.
+    assert hint == pytest.approx((2.6, -1.0, 0.0))
+    assert tree_offset_from_docking(
+        docking, hint, arm_base_yaw_rad=math.pi) == pytest.approx((0.0, 1.5))
+
+
 def test_docking_pose_aligns_arm_base_with_tree_for_rotated_road():
     target = Target('tree', 3.0, 2.0, 0.0, 0.9, 2.0)
     docking = docking_pose(target, road_yaw=math.pi / 2.0)

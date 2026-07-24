@@ -1,7 +1,9 @@
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import yaml
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'capture_site_pose.py'
@@ -145,3 +147,24 @@ def test_uninitialized_route_template_can_bind_selected_map_once():
     document['mission']['route_steps'][0]['navigation_pose'] = {
         'x': 0.0, 'y': 0.0, 'yaw': 0.0}
     assert not capture_site_pose._can_bind_uninitialized_route_to_map(document)
+
+
+def test_capture_persists_default_alicia_mount_yaw_for_legacy_route(tmp_path):
+    map_file = tmp_path / 'map.yaml'
+    image_file = tmp_path / 'map.pgm'
+    image_file.write_bytes(b'P5\n1 1\n255\n\xff')
+    map_file.write_text(
+        'image: map.pgm\nresolution: 0.1\norigin: [0.0, 0.0, 0.0]\n'
+        'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n',
+        encoding='utf-8')
+    route_file = tmp_path / 'route.yaml'
+    document = capture_site_pose.new_field_route_document(
+        'site', 'mission', str(map_file))
+    document['arm_base_mount'].pop('yaw_rad')
+    route_file.write_text(yaml.safe_dump(document), encoding='utf-8')
+
+    loaded = capture_site_pose._document(SimpleNamespace(
+        file=str(route_file), route_point='point_1', map=str(map_file),
+        site_id='site', mission_id='mission'))
+    assert loaded['arm_base_mount']['yaw_rad'] == pytest.approx(
+        capture_site_pose.ALICIA_ARM_BASE_YAW_RAD)

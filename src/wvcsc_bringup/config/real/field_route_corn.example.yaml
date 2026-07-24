@@ -9,6 +9,7 @@ map:
 arm_base_mount:
   x_m: -0.4
   y_m: 0.0
+  yaw_rad: 3.141592653589793
 mission:
   mission_id: corn_field_five_point_001
   route_steps:

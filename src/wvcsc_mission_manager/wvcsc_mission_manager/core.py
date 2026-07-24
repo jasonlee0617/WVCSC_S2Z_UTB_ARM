@@ -305,7 +305,8 @@ def navigation_pose(
 def tree_hint_from_arm_base_offset(
         docking, tree_x_m, tree_y_m, tree_base_z=0.0,
         arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
-        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
+        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET,
+        arm_base_yaw_rad=0.0):
     """Transform a signed alicia_base_link XY offset into a map tree hint."""
     x, y, yaw = (float(value) for value in docking)
     tree_x_m = float(tree_x_m)
@@ -313,14 +314,21 @@ def tree_hint_from_arm_base_offset(
     tree_base_z = float(tree_base_z)
     if not all(math.isfinite(value) for value in (
             x, y, yaw, tree_x_m, tree_y_m, tree_base_z,
-            arm_base_forward_offset, arm_base_left_offset)):
+            arm_base_forward_offset, arm_base_left_offset,
+            arm_base_yaw_rad)):
         raise ValueError('tree offset values must be finite')
     cosine, sine = math.cos(yaw), math.sin(yaw)
+    arm_x = (
+        x + cosine * arm_base_forward_offset -
+        sine * arm_base_left_offset)
+    arm_y = (
+        y + sine * arm_base_forward_offset +
+        cosine * arm_base_left_offset)
+    arm_yaw = yaw + arm_base_yaw_rad
+    arm_cosine, arm_sine = math.cos(arm_yaw), math.sin(arm_yaw)
     return (
-        x + cosine * (arm_base_forward_offset + tree_x_m) -
-        sine * (arm_base_left_offset + tree_y_m),
-        y + sine * (arm_base_forward_offset + tree_x_m) +
-        cosine * (arm_base_left_offset + tree_y_m),
+        arm_x + arm_cosine * tree_x_m - arm_sine * tree_y_m,
+        arm_y + arm_sine * tree_x_m + arm_cosine * tree_y_m,
         tree_base_z,
     )
 
@@ -328,19 +336,29 @@ def tree_hint_from_arm_base_offset(
 def tree_offset_from_docking(
         docking, tree_hint,
         arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
-        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
+        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET,
+        arm_base_yaw_rad=0.0):
     """Return signed alicia_base_link XY coordinates for a map tree hint."""
     x, y, yaw = (float(value) for value in docking)
     tree_x, tree_y, _tree_z = (float(value) for value in tree_hint)
     if not all(math.isfinite(value) for value in (
             x, y, yaw, tree_x, tree_y,
-            arm_base_forward_offset, arm_base_left_offset)):
+            arm_base_forward_offset, arm_base_left_offset,
+            arm_base_yaw_rad)):
         raise ValueError('tree offset values must be finite')
     cosine, sine = math.cos(yaw), math.sin(yaw)
-    dx, dy = tree_x - x, tree_y - y
+    arm_x = (
+        x + cosine * arm_base_forward_offset -
+        sine * arm_base_left_offset)
+    arm_y = (
+        y + sine * arm_base_forward_offset +
+        cosine * arm_base_left_offset)
+    arm_yaw = yaw + arm_base_yaw_rad
+    arm_cosine, arm_sine = math.cos(arm_yaw), math.sin(arm_yaw)
+    dx, dy = tree_x - arm_x, tree_y - arm_y
     return (
-        cosine * dx + sine * dy - arm_base_forward_offset,
-        -sine * dx + cosine * dy - arm_base_left_offset,
+        arm_cosine * dx + arm_sine * dy,
+        -arm_sine * dx + arm_cosine * dy,
     )
 
 
