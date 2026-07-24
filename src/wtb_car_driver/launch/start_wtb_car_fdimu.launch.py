@@ -16,6 +16,7 @@ def generate_launch_description():
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='False') 
     enable_pointcloud_to_laserscan = LaunchConfiguration('enable_pointcloud_to_laserscan')
+    enable_ackermann = LaunchConfiguration('enable_ackermann')
 
     # 创建启动描述
     ld = LaunchDescription()
@@ -30,6 +31,12 @@ def generate_launch_description():
         'enable_pointcloud_to_laserscan',
         default_value='true',
         description='Whether to run pointcloud_to_laserscan'
+    )
+
+    enable_ackermann_arg = DeclareLaunchArgument(
+        'enable_ackermann',
+        default_value='true',
+        description='Whether to include the vehicle wheel and steering joints'
     )
     
     # 找到待包含的 launch 文件
@@ -62,7 +69,8 @@ def generate_launch_description():
             FindPackageShare('wtb_car_driver'),
             'urdf',
             'wtb_car.xacro'
-        ])
+        ]),
+        ' enable_ackermann:=', enable_ackermann,
     ])
     
     # 声明robot_description参数
@@ -194,6 +202,7 @@ def generate_launch_description():
     # 添加参数声明
     ld.add_action(open_rviz_arg)
     ld.add_action(enable_pointcloud_to_laserscan_arg)
+    ld.add_action(enable_ackermann_arg)
 
     # 添加节点
     ld.add_action(can_launch)

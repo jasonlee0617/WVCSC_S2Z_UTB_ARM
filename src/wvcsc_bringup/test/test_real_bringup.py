@@ -288,6 +288,16 @@ def test_arm_only_bringup_does_not_require_unpublished_wheel_states():
     assert '<xacro:if value="$(arg enable_ackermann)">' in car_xacro
 
 
+def test_vehicle_mapping_launch_declares_and_passes_ackermann_switch():
+    vehicle_launch = (PACKAGE.parent / 'wtb_car_driver' / 'launch' /
+                      'start_wtb_car_fdimu.launch.py').read_text(encoding='utf-8')
+    cartographer = _source('real_cartographer.launch.py')
+    assert "LaunchConfiguration('enable_ackermann')" in vehicle_launch
+    assert "'enable_ackermann'," in vehicle_launch
+    assert 'enable_ackermann:=' in vehicle_launch
+    assert "'enable_ackermann': 'true'" in cartographer
+
+
 def test_real_mission_uses_portable_handeye_and_c10_calibration_paths():
     source = _source('real_system_mission.launch.py')
     assert 'def _expand_path(path):' in source

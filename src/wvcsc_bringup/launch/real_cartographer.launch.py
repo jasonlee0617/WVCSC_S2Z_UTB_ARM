@@ -31,6 +31,7 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'open_rviz': 'false',
             'enable_pointcloud_to_laserscan': 'true',
+            'enable_ackermann': 'true',
         }.items(),
     )
 
