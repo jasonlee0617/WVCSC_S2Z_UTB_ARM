@@ -16,6 +16,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PointStamped
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseWithCovarianceStamped
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
@@ -95,6 +96,10 @@ class FieldRouteManager(Node):
         self._relay_client = self.create_client(
             SetRelay, str(self.get_parameter('relay_service_name').value))
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
+        self._initial_pose_received = False
+        self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose',
+            self._on_initial_pose, 10)
         self.create_service(Trigger, '/field_route/cancel', self._on_cancel)
         self._timer = self.create_timer(0.10, self._tick)
         self._publish_status('waiting for Nav2, arm action and relay service')
@@ -110,6 +115,7 @@ class FieldRouteManager(Node):
             'wide_relay_channel': 1,
             'arm_relay_channel': 2,
             'auto_start': True,
+            'wait_for_initial_pose': False,
             'relay_service_timeout_sec': 2.0,
             'nav_goal_timeout_sec': 120.0,
             'arm_goal_timeout_sec': 180.0,
@@ -138,6 +144,9 @@ class FieldRouteManager(Node):
             math.hypot(message.twist.twist.linear.x, message.twist.twist.linear.y),
             abs(message.twist.twist.angular.z),
         )
+
+    def _on_initial_pose(self, _message):
+        self._initial_pose_received = True
 
     def _on_cancel(self, _request, response):
         if self._state in (self.COMPLETED, self.FAILED):
@@ -173,6 +182,13 @@ class FieldRouteManager(Node):
             return
         if self._state == self.STARTING:
             if not bool(self.get_parameter('auto_start').value):
+                return
+            if (bool(self.get_parameter('wait_for_initial_pose').value)
+                    and not self._initial_pose_received):
+                if not self._ready_logged:
+                    self.get_logger().info(
+                        '[FIELD_ROUTE] waiting for RViz initial pose on /amcl_pose')
+                    self._ready_logged = True
                 return
             if not self._clients_ready():
                 if not self._ready_logged:

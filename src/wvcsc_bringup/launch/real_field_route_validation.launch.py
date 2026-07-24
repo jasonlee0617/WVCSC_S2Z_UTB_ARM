@@ -56,6 +56,10 @@ def generate_launch_description():
             'mission_file': LaunchConfiguration('mission_file'),
             'map_file': LaunchConfiguration('map'),
             'auto_start': True,
+            # Do not send the first Nav2 goal until the operator has set the
+            # AMCL initial pose in RViz.  This also prevents relay activation
+            # while localization is still uninitialized.
+            'wait_for_initial_pose': True,
             'wide_relay_channel': 1,
             'arm_relay_channel': 2,
         }],

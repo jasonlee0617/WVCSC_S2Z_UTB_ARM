@@ -171,6 +171,16 @@ ros2 run wvcsc_bringup validate_field_route.py -- \
 
 采点时启动的 `real_navigation.launch.py` 必须先停止。联调入口会重新启动 Nav2；同时运行两个 Nav2、AMCL 或 map server 会造成节点、TF 和导航 Action 冲突。
 
+注意：`real_navigation.launch.py` 只提供底盘、定位和 Nav2，不启动
+`controller_pkg`，因此单独运行它时不存在 `/relay/set` 是正常现象。继电器单测应单独启动
+`controller_pkg/launch/controller.launch.py`，完整联调应使用下面的
+`real_field_route_validation.launch.py`。
+
+这两种启动方式不能同时运行：`real_field_route_validation.launch.py` 已经内置
+`controller.launch.py`。如果先启动了单独的 `controller.launch.py`，必须先在该终端
+按 `Ctrl+C` 退出，再启动联调入口；否则两个进程会同时打开同一个 Modbus 串口，造成
+`应答长度错误`、继电器控制失败或两个节点争抢 `/relay/set`。
+
 ### 6.1 单独验证继电器
 
 ```bash
@@ -223,6 +233,11 @@ ros2 launch wvcsc_bringup real_field_route_validation.launch.py \
   relay_config_file:="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini" \
   use_rviz:=true
 ```
+
+联调入口启动后不要再次执行 `ros2 launch controller_pkg controller.launch.py`。
+它会自动启动唯一的继电器节点，并等待操作者在 RViz 设置 `2D Pose Estimate`。
+在收到 `/amcl_pose` 之前不会打开第1路，也不会发送第一个导航目标；初始定位完成
+后由路线管理器自动开始五点流程。
 
 该入口启动真实底盘、LiDAR、IMU、EKF、Nav2、真实 `/relay/set` 和同一个 `field_route_manager`，但不启动真实机械臂、MoveIt、C10、YOLO 或 Visual Servo。`fake_arm_spray_action.py` 在 `point_2`、`point_3` 模拟机械臂完成，并真实驱动第2路各 3 秒。
 
