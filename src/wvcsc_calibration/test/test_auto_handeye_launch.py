@@ -13,11 +13,11 @@ REAL_CONFIG = (PACKAGE_ROOT / 'config' / 'auto_handeye_alicia.yaml').read_text(
     encoding='utf-8')
 
 
-def test_auto_handeye_launch_reuses_the_existing_c10_handeye_stack_and_collector():
+def test_auto_handeye_launch_reuses_the_existing_c10_handeye_stack_only():
     assert "'c10_handeye.launch.py'" in LAUNCH_SOURCE
-    assert "executable='auto_calibration_collector'" in LAUNCH_SOURCE
-    assert "'auto_handeye_alicia.yaml'" in LAUNCH_SOURCE
-    assert "'auto_start': False" in LAUNCH_SOURCE
+    assert "executable='auto_calibration_collector'" not in LAUNCH_SOURCE
+    assert "'auto_handeye_alicia.yaml'" not in LAUNCH_SOURCE
+    assert "SetEnvironmentVariable('PYTHONNOUSERSITE', '1')" in LAUNCH_SOURCE
     assert "executable='auto_handeye'" not in LAUNCH_SOURCE
     assert 'pymoveit2' not in LAUNCH_SOURCE
 

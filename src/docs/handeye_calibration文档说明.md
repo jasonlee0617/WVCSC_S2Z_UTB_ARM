@@ -98,20 +98,50 @@ OpenCV 的 Park/Horaud/Tsai-Lenz 闭式解首先提供确定性初值；随后�
 
 ## 3. 实机自动标定
 
-实机标定只启动机械臂和相机最小链路：Alicia-M 驱动、MoveIt、统一 TF、C10、ArUco、ArUco 可视化、marker TF、easy_handeye2、motion_control 和采集器。
+实机标定分为两个终端：终端 A 启动机械臂和相机最小链路（Alicia-M 驱动、MoveIt、统一 TF、C10、ArUco、ArUco 可视化、marker TF、easy_handeye2、motion_control）；终端 B 启动需要人工确认的采集器。
 
 不启动底盘 CAN、底盘驱动、LiDAR、IMU、EKF、Nav2 或 MissionManager。车辆必须停稳、制动并禁止任何 `/cmd_vel` 输入。
 
-启动一条完整的最小链路：
+两个终端都必须隔离用户目录 Python 包。系统 `transforms3d` 仍使用
+`np.float`，若 `/home/eisa/.local` 的新版 NumPy 被导入，ArUco 与
+easy_handeye2 会直接崩溃。先在终端 A 执行：
 
 ```bash
+cd "$HOME/WVCSC_S2Z_UTB_ARM"
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+unset PYTHONPATH
+export PYTHONNOUSERSITE=1
+
+python3 - <<'PY'
+import numpy
+import transforms3d
+print(numpy.__file__)
+print(transforms3d.__file__)
+PY
+
 ros2 launch wvcsc_calibration auto_handeye.launch.py \
   video_device:=/dev/video2 serial_port:=/dev/ttyACM0
 ```
 
-该入口只编排 C10、Alicia-M、MoveIt、ArUco、marker TF、easy_handeye2 与
-现有的安全采集器；不另建 IK、轨迹或直接关节控制路径。所有服务和图像
-就绪后，采集器仍等待操作者按 `s` 或 Enter 才开始运动；按 `q` 取消。可选安全终端：
+上面的 Python 检查中，NumPy 路径不得位于 `/home/eisa/.local`。终端 A
+只编排 C10、Alicia-M、MoveIt、ArUco、marker TF 与 easy_handeye2；它不会
+启动采集器，因为 `ros2 launch` 的子进程没有交互 TTY，无法安全接收 `s/Enter`。
+
+在所有服务和图像就绪后，另开终端 B，执行相同的环境隔离并启动采集器：
+
+```bash
+cd "$HOME/WVCSC_S2Z_UTB_ARM"
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+unset PYTHONPATH
+export PYTHONNOUSERSITE=1
+
+ros2 run wvcsc_calibration auto_calibration_collector --ros-args \
+  --params-file "$(ros2 pkg prefix wvcsc_calibration)/share/wvcsc_calibration/config/auto_handeye_alicia.yaml"
+```
+
+终端 B 中由操作者按 `s` 或 Enter 才开始运动；按 `q` 取消。可选安全终端：
 
 ```bash
 ros2 run wvcsc_arm_task motion_control_keyboard
