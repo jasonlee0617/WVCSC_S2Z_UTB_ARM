@@ -11,7 +11,8 @@ from wvcsc_arm_task.spray_task import SprayTask
 from wvcsc_arm_task.target_flow import (
     FruitTarget, TargetAttempt, completion_feedback_allowed,
     deduplicate_candidates, detection_candidates, final_spray_outcome,
-    spray_summary, target_accounting, target_accounting_is_complete,
+    limit_targets_per_tree, spray_summary, target_accounting,
+    target_accounting_is_complete,
     target_requires_recenter)
 from wvcsc_arm_task.observation import ObservationCandidate
 
@@ -61,6 +62,20 @@ def test_queue_keeps_only_the_highest_confidence_duplicate():
 
     assert deduplicate_candidates([weaker, stronger]) == [stronger]
     assert task._queue([weaker, stronger], []) == [stronger]
+
+
+def test_real_target_limit_keeps_the_initial_two_highest_confidence_targets():
+    task = _QueueHarness()
+    low = _target('low', 200.0, 200.0, confidence=0.30)
+    medium = _target('medium', 400.0, 200.0, confidence=0.70)
+    high = _target('high', 600.0, 200.0, confidence=0.90)
+
+    selected = limit_targets_per_tree(
+        [], [low, medium, high], 2, task._same_target)
+
+    assert [target.target_id for target in selected] == ['high', 'medium']
+    assert limit_targets_per_tree(
+        selected, [low], 2, task._same_target) == []
 
 
 def test_target_ledger_merges_reidentified_fruit_by_geometry():
@@ -277,7 +292,8 @@ class _ClosedLoopSequenceHarness:
     _mark_unresolved = SprayTask._mark_unresolved
 
     def __init__(self, *, alignment_ok=True, fallback_enabled=True,
-                 recenter_ok=True, alignment_code=None):
+                 recenter_ok=True, alignment_code=None, targets=None,
+                 failed_target_ids=()):
         self._active_mission = ''
         self._active_tree = ''
         self._spray_on_alignment_failure = fallback_enabled
@@ -287,10 +303,11 @@ class _ClosedLoopSequenceHarness:
         self._vision_timeout = 30.0
         self._active_aim = (640.0, 388.0, 1280, 720, 1.0)
         self._tree_in_base = (0.0, 1.6, 0.0)
-        self._observed_target = _target('target-1', 200.0, 200.0)
+        self._observed_targets = targets or [_target('target-1', 200.0, 200.0)]
         self._fruit_calls = 0
         self._alignment_ok = alignment_ok
         self._alignment_code = alignment_code
+        self._failed_target_ids = set(failed_target_ids)
         self._recenter_ok = recenter_ok
         self.calls = []
 
@@ -300,6 +317,7 @@ class _ClosedLoopSequenceHarness:
             'detection_timeout_sec': 2.0,
             'confirmation_frames': 3,
             'max_alignment_attempts': 2,
+            'max_targets_per_tree': 0,
             'processed_iou_threshold': 0.30,
             'processed_center_distance_px': 40.0,
             'image_width': 1280,
@@ -333,7 +351,7 @@ class _ClosedLoopSequenceHarness:
 
     def _wait_for_fruits(self, _cancel_requested):
         self._fruit_calls += 1
-        return [self._observed_target] if self._fruit_calls == 1 else []
+        return self._observed_targets if self._fruit_calls <= 2 else []
 
     def _request_spray_aim(self, _cancel_requested):
         self.calls.append('request_aim')
@@ -341,7 +359,8 @@ class _ClosedLoopSequenceHarness:
 
     def _lock_target(self, target_id, _cancel_requested):
         self.calls.append(f'lock:{target_id}')
-        return self._observed_target
+        return next(target for target in self._observed_targets
+                    if target.target_id == target_id)
 
     def _recenter_target(self, target, _attempt, _cancel_requested):
         self.calls.append(f'recenter:{target.target_id}')
@@ -356,12 +375,13 @@ class _ClosedLoopSequenceHarness:
         if feedback_callback is not None:
             feedback_callback(SimpleNamespace(feedback=SimpleNamespace(
                 phase=0, error_u=2.0, error_v=-3.0)))
+        ok = self._alignment_ok and target_id not in self._failed_target_ids
         return (
-            self._alignment_ok,
+            ok,
             False,
-            (AlignTarget.Result.OK if self._alignment_ok else
+            (AlignTarget.Result.OK if ok else
              (self._alignment_code or AlignTarget.Result.TIMEOUT)),
-            'alignment timeout' if not self._alignment_ok else '')
+            'alignment timeout' if not ok else '')
 
     def _alignment_fallback_target(self, target, _cancel_requested):
         self.calls.append(f'fallback:{target.target_id}')
@@ -441,7 +461,7 @@ def test_completed_queue_returns_home_without_an_extra_observation_scan():
     assert task.calls[-1] == 'return_home'
 
 
-def test_real_alignment_timeout_sprays_from_current_pose_then_homes():
+def test_real_alignment_timeout_sprays_from_current_pose_then_rechecks_before_home():
     task = _ClosedLoopSequenceHarness(alignment_ok=False, fallback_enabled=True)
     request = SimpleNamespace(
         mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
@@ -455,7 +475,7 @@ def test_real_alignment_timeout_sprays_from_current_pose_then_homes():
     assert 'servo:target-1' in task.calls
     assert not any(call.startswith('fallback:') for call in task.calls)
     assert task.calls.count('spray') == 1
-    assert task.calls.count('return_to_observation') == 0
+    assert task.calls.count('return_to_observation') == 1
     assert task.calls[-1] == 'return_home'
     assert any(item[0] == ExecuteSpray.Feedback.ALIGNING for item in feedbacks)
 
@@ -473,7 +493,26 @@ def test_servo_singularity_sprays_from_current_pose_then_homes():
 
     assert code == ExecuteSpray.Result.OK
     assert task.calls.count('spray') == 1
-    assert task.calls.count('return_to_observation') == 0
+    assert task.calls.count('return_to_observation') == 1
+
+
+def test_endpoint_fallback_rechecks_and_sprays_the_remaining_target_before_home():
+    first = _target('target-1', 620.0, 360.0)
+    second = _target('target-2', 900.0, 200.0)
+    task = _ClosedLoopSequenceHarness(
+        targets=[first, second], failed_target_ids={'target-1'})
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.OK
+    assert 'detected=2 sprayed=2 unresolved=0' in message
+    assert task.calls.count('spray') == 2
+    assert task.calls.index('return_to_observation') < task.calls.index('lock:target-2')
+    assert task.calls[-1] == 'return_home'
 
 
 def test_servo_safety_stop_locks_without_spraying():

@@ -107,8 +107,11 @@ def test_real_system_rviz_processes_have_separate_explicit_controls_and_names():
 
 def test_real_orchestration_uses_the_qt_mission_manager_only():
     source = _source('real_orchestration.launch.py')
-    vision = (PACKAGE.parent / 'wvcsc_rgb_vision' / 'config' /
-              'vision_real.yaml').read_text(encoding='utf-8')
+    vision_path = (PACKAGE.parent / 'wvcsc_rgb_vision' / 'config' /
+                   'vision_real.yaml')
+    vision = vision_path.read_text(encoding='utf-8')
+    vision_parameters = yaml.safe_load(vision)[
+        'wvcsc_two_stage_yolo']['ros__parameters']
 
     assert "package='wvcsc_mission_manager', executable='mission_manager'" in source
     assert "executable='field_route_manager.py'" not in source
@@ -125,6 +128,7 @@ def test_real_orchestration_uses_the_qt_mission_manager_only():
     assert 'target_class_name: diseased_target' in vision
     assert 'target_id_prefix: target' in vision
     assert 'strict_model_classes: true' in vision
+    assert vision_parameters['max_diseased_targets'] == 2
     assert "get_package_share_directory('controller_pkg')" in source
     assert 'spray_actuator_real.yaml' in source
     assert "'relay_config_file'" in source
@@ -219,6 +223,7 @@ def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
     parameters = real_config['wvcsc_spray_task']['ros__parameters']
     assert parameters['observation_mode'] == 'joint_presets'
     assert parameters['spray_on_alignment_failure'] is True
+    assert parameters['max_targets_per_tree'] == 2
     assert parameters['target_recenter_workspace_px'] == 128.0
     assert parameters['visual_servo_entry_max_error_px'] == 128.0
     assert parameters['target_recenter_max_angle_deg'] == 45.0
@@ -245,6 +250,7 @@ def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
                          'arm_task.yaml').read_text(encoding='utf-8')
     assert 'joint_preset_center_deg' not in simulation_config
     assert 'spray_on_alignment_failure' not in simulation_config
+    assert 'max_targets_per_tree: 0' in simulation_config
     task_source = (PACKAGE.parent / 'wvcsc_arm_task' / 'wvcsc_arm_task' /
                    'spray_task.py').read_text(encoding='utf-8')
     assert "'spray_on_alignment_failure': False" in task_source

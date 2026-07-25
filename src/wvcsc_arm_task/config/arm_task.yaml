@@ -72,6 +72,8 @@ wvcsc_spray_task:
     tree_confidence: 0.10    # 树检测置信度阈值
     fruit_confidence: 0.20   # 病果分割置信度阈值
     target_class_name: diseased_target
+    # 仿真保留一个或多个目标的完整队列。
+    max_targets_per_tree: 0
     # 仅用于喷嘴轴线在图像中的标定投影，不作为实际喷洒距离门控。
     spray_working_distance_m: 1.30
 

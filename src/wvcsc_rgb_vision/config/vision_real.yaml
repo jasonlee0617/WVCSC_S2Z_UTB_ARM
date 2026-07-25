@@ -23,6 +23,8 @@ wvcsc_two_stage_yolo:
 
     tree_confidence: 0.25
     fruit_confidence: 0.25
+    # 实机仅发布置信度最高的两个病叶目标。
+    max_diseased_targets: 2
     roi_padding: 0.10
     track_iou_threshold: 0.20
     track_center_distance_px: 50.0

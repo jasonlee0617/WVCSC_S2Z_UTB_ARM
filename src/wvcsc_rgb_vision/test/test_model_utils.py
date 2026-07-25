@@ -669,3 +669,15 @@ def test_stage_visualizations_follow_the_inference_mode():
     node._on_image(SimpleNamespace())
     assert published == ['tree', 'tree', 'fruit', 'tree', 'fruit']
     assert len(node._fruit_pub.messages) == 2
+
+
+def test_real_disease_target_limit_publishes_the_two_highest_confidences():
+    node = object.__new__(TwoStageYolo)
+    node._max_diseased_targets = 2
+    low = Instance('target-1', 'diseased_target', 0.30, 0, 0, 10, 10, 5, 5)
+    medium = Instance('target-2', 'diseased_target', 0.70, 20, 0, 30, 10, 25, 5)
+    high = Instance('target-3', 'diseased_target', 0.90, 40, 0, 50, 10, 45, 5)
+
+    selected = node._limit_diseased_targets([low, medium, high])
+
+    assert [target.target_id for target in selected] == ['target-3', 'target-2']

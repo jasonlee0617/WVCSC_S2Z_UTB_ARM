@@ -34,7 +34,7 @@ from .node_parameters import create_alicia_moveit
 from .observation import ObservationFlowMixin, ObservationOptimizer
 from .target_flow import (TargetAttempt, TargetFlowMixin,
                           completion_feedback_allowed, final_spray_outcome,
-                          spray_summary, target_accounting,
+                          limit_targets_per_tree, spray_summary, target_accounting,
                           target_accounting_is_complete)
 
 
@@ -104,6 +104,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
 
         if int(self.get_parameter('max_alignment_attempts').value) <= 0:
             raise ValueError('max_alignment_attempts must be positive')
+        if int(self.get_parameter('max_targets_per_tree').value) < 0:
+            raise ValueError('max_targets_per_tree must be non-negative')
 
         # 核心组件 2：状态机安全锁与运动适配器
         self.state = MotionControlState()
@@ -237,6 +239,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'fruit_confidence': 0.20,
             # 仿真病果与实机病叶共用同一个外部类别名。
             'target_class_name': 'diseased_target',
+            # 0 keeps simulation's one-or-more target behavior.
+            'max_targets_per_tree': 0,
             # Calibrated nozzle-aim plane; this is not a measured-distance
             # acceptance gate for the task state machine.
             'spray_working_distance_m': 1.0,
@@ -659,6 +663,10 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 return self._recover_failure(
                     ExecuteSpray.Result.VISION_FAILED,
                     'fruit detector did not provide frames', cancel_requested)
+            candidates = limit_targets_per_tree(
+                known_targets, candidates,
+                int(self.get_parameter('max_targets_per_tree').value),
+                self._same_target)
             saw_disease = saw_disease or bool(candidates)
 
             # 阶段 4: QUEUING (基于 IoU 和中心距离去重排序)

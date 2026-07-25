@@ -62,6 +62,8 @@ wvcsc_two_stage_yolo:
     tree_confidence: 0.10
     # 病果分割的最低置信度 (YOLO 的分割掩膜即使置信度低，仍具有较好的边界特征)
     fruit_confidence: 0.10
+    # 仿真输出所有病果目标。
+    max_diseased_targets: 0
 
     # 当在树区域内进行果实分割时，ROI 放大比例。
     # 0.10 表示在树框外扩大 10% 的范围，确保边缘的病果不会被切掉。

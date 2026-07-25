@@ -4,12 +4,14 @@ wvcsc_spray_task:
     target_class_name: diseased_target
     tree_confidence: 0.25
     fruit_confidence: 0.25
+    # One real-tree task may spray only the two highest-confidence leaves.
+    max_targets_per_tree: 2
     target_post_recenter_min_confidence: 0.30
     # 仅用于已标定喷嘴轴线投影，不作为实际喷洒距离门控。
     spray_working_distance_m: 1.00
     # Real hardware follows the same coarse-MoveIt + Visual Servo path as
     # simulation.  A completed Servo TIMEOUT, TARGET_STALE, or singularity
-    # result sprays once from the current servo pose, then returns HOME;
+    # result sprays once from the current servo pose, then rechecks pending targets;
     # collision, limit, direction, and safety-stop gates still prohibit that
     # endpoint spray and require a separately preflighted recovery path.
     spray_on_alignment_failure: true

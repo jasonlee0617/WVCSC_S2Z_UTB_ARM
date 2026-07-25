@@ -162,6 +162,23 @@ def target_accounting(known, processed, exhausted, same_target):
     return len(groups), sprayed, unresolved, pending
 
 
+def limit_targets_per_tree(known, candidates, maximum, same_target):
+    """Keep the initial highest-confidence targets while allowing re-detection."""
+    candidates = deduplicate_candidates(candidates)
+    if maximum <= 0:
+        return candidates
+
+    accepted = []
+    new_targets = 0
+    for candidate in candidates:
+        if any(same_target(candidate, previous) for previous in known):
+            accepted.append(candidate)
+        elif len(known) + new_targets < maximum:
+            accepted.append(candidate)
+            new_targets += 1
+    return accepted
+
+
 def final_spray_outcome(sprayed, unresolved, saw_disease, summary):
     """根据统计结果返回最终的 ExecuteSpray 结果码。"""
     if sprayed and unresolved:

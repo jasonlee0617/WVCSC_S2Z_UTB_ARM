@@ -458,8 +458,11 @@ class TwoStageYolo(Node):
             self._target_class_name}
         self._target_id_prefix = str(
             self.get_parameter('target_id_prefix').value).strip()
+        self._max_diseased_targets = int(
+            self.get_parameter('max_diseased_targets').value)
         if (not self._target_class_name or not self._target_id_prefix or
-                min(self._tree_class_names) < 0 or min(self._target_class_names) < 0):
+                min(self._tree_class_names) < 0 or min(self._target_class_names) < 0 or
+                self._max_diseased_targets < 0):
             raise ValueError('YOLO class names/prefix must be non-empty and IDs non-negative')
         self._bridge = CvBridge()
         self._mission_id = 'standalone' if self._standalone_mode else ''
@@ -564,6 +567,8 @@ class TwoStageYolo(Node):
             'inference_mode_topic': '/vision/inference_mode',
             'tree_confidence': 0.10,
             'fruit_confidence': 0.10,
+            # 0 publishes every detected diseased target.
+            'max_diseased_targets': 0,
             'roi_padding': 0.10,
             'track_iou_threshold': 0.20,
             'track_center_distance_px': 50.0,
@@ -678,6 +683,7 @@ class TwoStageYolo(Node):
             ran_fruit_inference = tree is not None
             fruits = self._assign_track_ids(
                 self._fruit_instances(image, tree) if ran_fruit_inference else [])
+            fruits = self._limit_diseased_targets(fruits)
             self._fruit_pub.publish(self._array(message, fruits))
             if bool(self.get_parameter('publish_visualization').value):
                 self._publish_fruit_visualization(message, image, fruits)
@@ -808,6 +814,12 @@ class TwoStageYolo(Node):
                 retained.append(track)
         self._tracks = retained + [Track(instance) for instance in assigned]
         return assigned
+
+    def _limit_diseased_targets(self, instances):
+        maximum = getattr(self, '_max_diseased_targets', 0)
+        if maximum <= 0:
+            return instances
+        return sorted(instances, key=lambda item: item.confidence, reverse=True)[:maximum]
 
     def _reset_tracking(self):
         self._tracks = []
