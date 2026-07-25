@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-fast checks for mutually exclusive WVCSC real operating modes."""
+"""Fail-fast checks for WVCSC mapping and Qt-created real missions."""
 
 import argparse
 import configparser
@@ -49,9 +49,7 @@ def _arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', required=True, choices=('localization', 'mapping'))
     parser.add_argument(
-        '--operation', default='mission',
-        choices=('survey', 'mission', 'field_route', 'qt_mission'))
-    parser.add_argument('--mission-file', default='')
+        '--operation', default='qt_mission', choices=('survey', 'qt_mission'))
     parser.add_argument('--camera-device', default='')
     parser.add_argument('--arm-device', default='')
     parser.add_argument('--map', default='')
@@ -201,7 +199,7 @@ def main():
         _packages(LOCALIZATION_PACKAGES, failures)
         _exists('C10 camera', args.camera_device, failures)
         _exists('map YAML', args.map, failures)
-        if args.operation in ('mission', 'field_route', 'qt_mission'):
+        if args.operation == 'qt_mission':
             _packages(MISSION_PACKAGES, failures)
             _exists('Alicia-M serial', args.arm_device, failures)
             _yolo_runtime(args.yolo_python, failures)
@@ -215,34 +213,8 @@ def main():
             _yolo_contracts(args.yolo_python, model_dir, failures)
             _calibration_checks(args, failures)
             _relay_config(args.relay_config, failures)
-            # Qt missions are created interactively after Nav2 and AMCL are
-            # ready, so there is deliberately no route file to validate at
-            # launch time.  File-backed modes retain their existing strict
-            # route-file checks below.
-            if args.operation != 'qt_mission':
-                route_label = (
-                    'five-point field route' if args.operation == 'field_route'
-                    else 'measured site mission')
-                _exists(route_label, args.mission_file, failures)
-                if Path(args.mission_file).expanduser().is_file():
-                    try:
-                        if args.operation == 'field_route':
-                            from wvcsc_bringup.field_route import (
-                                load_field_route_document,
-                                validate_field_route_document)
-                            validate_field_route_document(
-                                load_field_route_document(args.mission_file), args.map)
-                            print('  [OK]   five-point field route contract')
-                        else:
-                            from wvcsc_bringup.site_mission import (
-                                load_site_document, validate_site_document)
-                            validate_site_document(
-                                load_site_document(args.mission_file), args.map)
-                            print('  [OK]   measured site mission contract')
-                    except (ImportError, ValueError) as error:
-                        failures.append(
-                            f'{route_label} validation failed: {error}')
-                        print(f'  [FAIL] {route_label}: {error}')
+            # The operator creates the route in Qt only after AMCL is ready.
+            # There is deliberately no file-backed route contract at launch.
 
     if failures:
         print('\n[ABORT] Real bringup prerequisites failed:')

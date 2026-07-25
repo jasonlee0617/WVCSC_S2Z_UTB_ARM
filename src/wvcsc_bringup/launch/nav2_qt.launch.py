@@ -16,7 +16,7 @@ def generate_launch_description():
         DeclareLaunchArgument('base_frame', default_value='base_footprint'),
         DeclareLaunchArgument('goal_pose_topic', default_value='/manual_goal_pose'),
         Node(
-            package='my_navigation2',
+            package='wvcsc_bringup',
             executable='nav2_qt.py',
             parameters=[{
                 'use_sim_time': ParameterValue(use_sim_time, value_type=bool),

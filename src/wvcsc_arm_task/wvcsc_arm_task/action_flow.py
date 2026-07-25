@@ -24,7 +24,7 @@ class DownstreamActionMixin:
 
     def _align_target(
             self, mission_id, tree_id, target_id, nozzle_aim,
-            cancel_requested):
+            cancel_requested, feedback_callback=None):
         """
         调用下游的视觉伺服 Action (`AlignTarget`) 进行 IBVS 对准。
         
@@ -57,13 +57,18 @@ class DownstreamActionMixin:
 
         # 发送 Action 目标，设置的结果超时时间 = 伺服超时 + 下游缓冲余量
         # 这种设计确保即便视觉伺服节点处于高负载，通信层也不会过早判定超时
-        wrapped, canceled, error = self._run_downstream_action(
+        action_args = (
             self._vision_client,
             goal,
             self._vision_timeout + self._downstream_margin,
             cancel_requested,
-            'vision alignment'
+            'vision alignment',
         )
+        if feedback_callback is None:
+            wrapped, canceled, error = self._run_downstream_action(*action_args)
+        else:
+            wrapped, canceled, error = self._run_downstream_action(
+                *action_args, feedback_callback=feedback_callback)
 
         if wrapped is None:
             # Action 目标未被接受，或出现网络/超时错误
@@ -122,7 +127,9 @@ class DownstreamActionMixin:
         ok = wrapped.status == GoalStatus.STATUS_SUCCEEDED and result.success
         return ok, False, result.message or f'spray status={wrapped.status}'
 
-    def _run_downstream_action(self, client, goal, result_timeout, cancel_requested, label):
+    def _run_downstream_action(
+            self, client, goal, result_timeout, cancel_requested, label,
+            feedback_callback=None):
         """
         下游 Action 发送的核心执行与状态机守卫函数。
 
@@ -158,7 +165,11 @@ class DownstreamActionMixin:
             time.sleep(0.02)
 
         # 2. 异步发送 Action 目标
-        response_future = client.send_goal_async(goal)
+        if feedback_callback is None:
+            response_future = client.send_goal_async(goal)
+        else:
+            response_future = client.send_goal_async(
+                goal, feedback_callback=feedback_callback)
         # 等待服务器响应（接受或拒绝），超时时间使用下游连接超时
         response, canceled = self._wait_future(
             response_future, self._downstream_server_timeout, cancel_requested

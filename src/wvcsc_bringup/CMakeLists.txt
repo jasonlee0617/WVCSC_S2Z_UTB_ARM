@@ -16,23 +16,10 @@ install(PROGRAMS
   scripts/save_corn_map.sh
   DESTINATION share/${PROJECT_NAME}/scripts)
 install(PROGRAMS
-  scripts/capture_site_pose.py
-  scripts/migrate_site_mission.py
-  scripts/arm_spray_once.py
-  scripts/field_route_manager.py
   scripts/fake_arm_spray_action.py
-  scripts/validate_field_route.py
-  scripts/validate_site_mission.py
+  scripts/nav2_qt.py
+  scripts/arm_spray_test_qt.py
   DESTINATION lib/${PROJECT_NAME})
-install(PROGRAMS scripts/capture_site_pose.py
-  DESTINATION lib/${PROJECT_NAME}
-  RENAME capture_site_pose)
-install(PROGRAMS scripts/arm_spray_once.py
-  DESTINATION lib/${PROJECT_NAME}
-  RENAME arm_spray_once)
-install(PROGRAMS scripts/migrate_site_mission.py
-  DESTINATION lib/${PROJECT_NAME}
-  RENAME migrate_site_mission)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
@@ -41,11 +28,13 @@ if(BUILD_TESTING)
   set(ENV{PYTEST_DISABLE_PLUGIN_AUTOLOAD} "1")
   ament_add_pytest_test(test_real_bringup test/test_real_bringup.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
-  ament_add_pytest_test(test_capture_site_pose test/test_capture_site_pose.py
+  ament_add_pytest_test(test_path_defaults test/test_path_defaults.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
-  ament_add_pytest_test(test_site_mission test/test_site_mission.py
+  ament_add_pytest_test(test_nav2_qt_model test/test_nav2_qt_model.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
-  ament_add_pytest_test(test_field_route test/test_field_route.py
+  ament_add_pytest_test(test_qt_image_viewer test/test_qt_image_viewer.py
+    ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
+  ament_add_pytest_test(test_arm_spray_test_qt test/test_arm_spray_test_qt.py
     ENV "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1")
 endif()
 

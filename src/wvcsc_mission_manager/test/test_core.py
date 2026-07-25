@@ -230,6 +230,21 @@ def test_duplicate_pause_cancel_and_reset_semantics():
     assert core.state == MissionState.WAITING_FOR_TASKS
 
 
+def test_recovery_pause_resumes_navigation_or_home_intent():
+    core = MissionCore()
+    assert core.load('demo', _targets()) == 'accepted'
+    assert core.start()
+    assert core.pause_for_recovery()
+    assert core.resume()
+    assert core.state == MissionState.NAVIGATING
+
+    assert core.pause()
+    assert core.return_home()
+    assert core.pause_for_recovery()
+    assert core.resume(returning_home=True)
+    assert core.state == MissionState.RETURNING_HOME
+
+
 def test_failure_is_terminal_and_does_not_advance_target():
     core = MissionCore()
     core.load('demo', _targets())

@@ -352,15 +352,8 @@ ros2 topic hz /camera/color/image_raw
 ros2 topic list | grep /vision
 ```
 
-发送一次机械臂目标后：
-
-```bash
-ros2 run wvcsc_bringup arm_spray_once -- \
-  --target-id corn_01 \
-  --tree-x-m 0.0 \
-  --tree-y-m 1.50 \
-  --spray-duration 5.0
-```
+在单臂 Qt 填写树 X/Y/Z 与喷洒时长，点击“执行单目标喷洒”。Action 阶段、进度、结果以及
+`/camera/color/image_raw`、YOLO 调试图像都在同一窗口显示。
 
 实机喷洒前必须同时确认继电器服务已启动。`real_arm_spray_test.launch.py` 会自动
 启动 `controller_pkg`，实机执行器使用 `service` 模式调用第 2 路；机械臂串口
@@ -375,7 +368,7 @@ ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
   "{channel: 2, enabled: false, duration: 0.0}"
 ```
 
-确认第 2 路实际吸合和断开后，再执行 `arm_spray_once`。如果继电器串口不是默认的
+确认第 2 路实际吸合和断开后，再通过单臂 Qt 执行喷洒。如果继电器串口不是默认的
 `/dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0`，复制并修改
 `controller_pkg/config/fault.ini`，然后通过
 `relay_config_file:=/绝对路径/relay_fault.ini` 传给 launch。

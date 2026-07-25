@@ -623,6 +623,21 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         attempts = []
         pending_attempt = None
         sprayed = 0
+        last_alignment_feedback_at = 0.0
+
+        def relay_alignment_feedback(message):
+            """Keep the parent Action alive while the child Servo is active."""
+            nonlocal last_alignment_feedback_at
+            now = time.monotonic()
+            if now - last_alignment_feedback_at < 1.0:
+                return
+            last_alignment_feedback_at = now
+            downstream = message.feedback
+            feedback(
+                ExecuteSpray.Feedback.ALIGNING, 0.45,
+                'ALIGNING '
+                f'phase={downstream.phase} '
+                f'error_px=({downstream.error_u:.1f},{downstream.error_v:.1f})')
         saw_disease = False
         alignment_failures = 0
         recenter_attempts = 0
@@ -730,6 +745,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                         locked_target, attempt, cancel_requested)
 
             fallback_spray = False
+            endpoint_spray = False
             if not recentered:
                 if self._aborted(cancel_requested):
                     return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
@@ -790,7 +806,8 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                     f'observation_mode={self._observation_mode}')
                 ok, canceled, align_code, message = self._align_target(
                     request.mission_id, request.tree_id, target.target_id,
-                    self._active_aim, cancel_requested)
+                    self._active_aim, cancel_requested,
+                    feedback_callback=relay_alignment_feedback)
 
                 self.get_logger().debug(
                     f'[ARM][ALIGN] result target={target.target_id} '
@@ -804,27 +821,37 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                     self._set_inference_mode('idle')
                     self._request_motion_stop()
                     return (
-                        ExecuteSpray.Result.VISION_FAILED,
+                        ExecuteSpray.Result.LOCKED,
                         f'visual alignment hard safety stop: {message}')
-                fallback_target, fallback_message = (
-                    self._alignment_fallback_target(
-                        locked_target, cancel_requested)
-                    if self._alignment_code_allows_fallback(align_code)
-                    else (None, f'visual alignment code={align_code}'))
-                if fallback_target is not None:
-                    target = fallback_target
-                    attempt.target = target
-                    fallback_spray = True
+                if (self._spray_on_alignment_failure and
+                        self._alignment_code_allows_endpoint_spray(align_code)):
+                    endpoint_spray = True
                     self.get_logger().warn(
                         f'[ARM][ALIGN_FALLBACK] target={target.target_id} '
                         f'alignment_failed={message}; '
-                        'spraying_from_safe_pose')
+                        'spraying_from_current_servo_pose')
                 else:
-                    self._select_target('')
-                    self._set_inference_mode('idle')
-                    self.get_logger().warn(
-                        f'[ARM][ALIGN_FALLBACK] target={target.target_id} '
-                        f'blocked={fallback_message}')
+                    fallback_target, fallback_message = (
+                        self._alignment_fallback_target(
+                            locked_target, cancel_requested)
+                        if self._alignment_code_allows_fallback(align_code)
+                        else (None, f'visual alignment code={align_code}'))
+                    if fallback_target is not None:
+                        target = fallback_target
+                        attempt.target = target
+                        fallback_spray = True
+                        self.get_logger().warn(
+                            f'[ARM][ALIGN_FALLBACK] target={target.target_id} '
+                            f'alignment_failed={message}; '
+                            'spraying_from_safe_pose')
+                    else:
+                        self._select_target('')
+                        self._set_inference_mode('idle')
+                        self.get_logger().warn(
+                            f'[ARM][ALIGN_FALLBACK] target={target.target_id} '
+                            f'blocked={fallback_message}')
+                if endpoint_spray:
+                    fallback_spray = True
                 if not fallback_spray:
                     recoverable = self._is_recoverable_alignment_code(align_code)
                     if not recoverable:
@@ -886,6 +913,11 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             sprayed += 1
             processed.append(target)
             self._select_target('')
+
+            if endpoint_spray:
+                self.get_logger().info(
+                    f'[ARM][{tree}] endpoint fallback sprayed; returning HOME')
+                break
 
             # 阶段 7: RETURNING_TO_OBSERVE (回到观察位，准备复检)
             feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.75,
@@ -952,6 +984,14 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
     def _alignment_retry_allowed(self, attempt_count):
         return attempt_count < int(
             self.get_parameter('max_alignment_attempts').value)
+
+    @staticmethod
+    def _alignment_code_allows_endpoint_spray(align_code):
+        return align_code in {
+            AlignTarget.Result.TIMEOUT,
+            AlignTarget.Result.TARGET_STALE,
+            AlignTarget.Result.SERVO_SINGULARITY,
+        }
 
     @staticmethod
     def _alignment_code_allows_fallback(align_code):

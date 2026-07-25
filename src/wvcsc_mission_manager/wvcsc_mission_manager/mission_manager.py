@@ -203,6 +203,10 @@ class MissionManager(Node):
         self._abort_and_home_requested = False
         self._abort_reset_sent = False
         self._motion_control_state = ''
+        self._recovery_return_home = False
+        self._recovery_pause = False
+        self._nav_timeout_canceling = False
+        self._nav_timeout_cancel_deadline = None
 
         # 对外暴露的高层操作服务
         self.create_service(Trigger, '/mission/start', self._start)
@@ -253,7 +257,7 @@ class MissionManager(Node):
             'nav_startup_retry_timeout_sec': 30.0,
             'nav_startup_retry_interval_sec': 0.5,
             'spray_goal_timeout_sec': 180.0,
-            'spray_progress_timeout_sec': 30.0,
+            'spray_progress_timeout_sec': 40.0,
             'relay_service_name': '/relay/set',
             'wide_relay_channel': 1,
             'arm_relay_channel': 2,
@@ -306,6 +310,10 @@ class MissionManager(Node):
         self._manual_return_home = False
         self._abort_and_home_requested = False
         self._abort_reset_sent = False
+        self._recovery_return_home = False
+        self._recovery_pause = False
+        self._nav_timeout_canceling = False
+        self._nav_timeout_cancel_deadline = None
         self._clear_nav_startup_retry()
         self._reset_docking_verification()
         self.get_logger().info(
@@ -516,7 +524,14 @@ class MissionManager(Node):
             return self._reply(response, False, 'previous navigation goal is still canceling')
         if not self._nav_client.server_is_ready():
             return self._reply(response, False, 'Nav2 Action server is not ready')
-        self.core.resume()
+        if (self._recovery_pause and
+                not self._localization_ready_for_resume()):
+            return self._reply(
+                response, False,
+                'fresh, confident AMCL localization is required before resume')
+        self.core.resume(returning_home=self._recovery_return_home)
+        self._recovery_return_home = False
+        self._recovery_pause = False
         self._start_navigation()
         return self._reply(response, True, 'mission resumed')
 
@@ -536,9 +551,14 @@ class MissionManager(Node):
         ``motion_control`` owns the physical arm reset.  This node only
         sequences its request after the Nav2 and arm Actions have settled.
         """
-        if self.core.state not in self.core.ACTIVE | {MissionState.READY}:
-            return self._reply(response, False, 'mission cannot be aborted in this state')
-        self.core.cancel()
+        if self._abort_and_home_requested:
+            if self._motion_control_state == 'RESET_FAILED':
+                self._abort_reset_sent = False
+                self._advance_abort_and_home()
+                return self._reply(response, True, 'arm HOME reset retry requested')
+            return self._reply(response, True, 'abort and HOME reset is already in progress')
+        if self.core.state in self.core.ACTIVE | {MissionState.READY}:
+            self.core.cancel()
         self._abort_and_home_requested = True
         self._abort_reset_sent = False
         self._stop_detector.stop()
@@ -547,7 +567,11 @@ class MissionManager(Node):
         self._cancel_spray_goal()
         self._command_all_relays_off()
         self._publish_motion_command('stop')
-        self.core.last_error = 'abort requested; waiting for active actions before HOME reset'
+        prior_error = self.core.last_error
+        self.core.last_error = (
+            f'{prior_error}; abort requested; waiting for active actions before HOME reset'
+            if prior_error else
+            'abort requested; waiting for active actions before HOME reset')
         self._publish_status()
         self._advance_abort_and_home()
         return self._reply(response, True, 'abort requested; arm HOME will start after actions settle')
@@ -601,6 +625,10 @@ class MissionManager(Node):
         self._manual_return_home = False
         self._abort_and_home_requested = False
         self._abort_reset_sent = False
+        self._recovery_return_home = False
+        self._recovery_pause = False
+        self._nav_timeout_canceling = False
+        self._nav_timeout_cancel_deadline = None
         self._clear_nav_startup_retry()
         self._reset_docking_verification()
         self._publish_plan()
@@ -846,25 +874,60 @@ class MissionManager(Node):
         self.core.last_error = 'abort_and_home: motion_control reset requested'
         self._publish_status()
 
+    def _pause_for_recovery(self, message):
+        returning_home = self.core.state == MissionState.RETURNING_HOME
+        if not self.core.pause_for_recovery():
+            self._fail(message)
+            return
+        self._recovery_return_home = returning_home
+        self._recovery_pause = True
+        self._stop_detector.stop()
+        self._clear_nav_startup_retry()
+        self._cancel_nav_goal()
+        self._command_all_relays_off()
+        self.core.last_error = str(message)
+        self._publish_status()
+
+    def _localization_ready_for_resume(self):
+        localization = self._localization_pose
+        if localization is None:
+            return False
+        received_at, _x, _y, _yaw, position_stddev, yaw_stddev = localization
+        now = self._now()
+        return (
+            now - received_at <= self._localization_max_age and
+            position_stddev <= self._max_localization_position_stddev and
+            yaw_stddev <= self._max_localization_yaw_stddev)
+
     def _nav_goal_response(self, future):
         self._nav_pending = False
         try:
             handle = future.result()
         except Exception as error:
+            self._nav_timeout_canceling = False
+            self._nav_timeout_cancel_deadline = None
             if self._navigation_active():
-                self._fail(f'Nav2 goal send failed: {error}')
+                if self.core.state == MissionState.RETURNING_HOME:
+                    self._pause_for_recovery(f'Nav2 HOME goal send failed: {error}')
+                else:
+                    self._skip_navigation_point(f'Nav2 goal send failed: {error}')
             self._advance_abort_and_home()
             return
         if handle is None or not handle.accepted:
+            self._nav_timeout_canceling = False
+            self._nav_timeout_cancel_deadline = None
             if self._schedule_initial_nav_retry():
                 return
             if self._navigation_active():
-                self._skip_navigation_point('Nav2 rejected the goal')
+                if self.core.state == MissionState.RETURNING_HOME:
+                    self._pause_for_recovery('Nav2 rejected the HOME goal')
+                else:
+                    self._skip_navigation_point('Nav2 rejected the goal')
             self._advance_abort_and_home()
             return
         self._nav_handle = handle
         self._clear_nav_startup_retry()
-        if not self._navigation_active():
+        if self._nav_timeout_canceling or not self._navigation_active():
             self._cancel_nav_goal()
         elif (self.core.state == MissionState.NAVIGATING and
               self.core.current_target is not None and
@@ -877,11 +940,16 @@ class MissionManager(Node):
 
     def _nav_result(self, future):
         self._nav_handle = None
+        self._nav_timeout_canceling = False
+        self._nav_timeout_cancel_deadline = None
         try:
             wrapped = future.result()
         except Exception as error:
             if self._navigation_active():
-                self._fail(f'Nav2 result failed: {error}')
+                if self.core.state == MissionState.RETURNING_HOME:
+                    self._pause_for_recovery(f'Nav2 HOME result failed: {error}')
+                else:
+                    self._skip_navigation_point(f'Nav2 result failed: {error}')
             self._advance_abort_and_home()
             return
         if not self._navigation_active():
@@ -889,6 +957,10 @@ class MissionManager(Node):
             self._advance_abort_and_home()
             return
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
+            if self.core.state == MissionState.RETURNING_HOME:
+                self._pause_for_recovery(
+                    f'Nav2 HOME failed with status {wrapped.status}')
+                return
             self._skip_navigation_point(
                 f'Nav2 failed with status {wrapped.status}')
             return
@@ -1052,7 +1124,7 @@ class MissionManager(Node):
                 self._localization_recovery_started = now
             elif (now - self._localization_recovery_started >=
                   self._localization_recovery_timeout):
-                self._fail(
+                self._pause_for_recovery(
                     f'docking localization did not recover: {status}')
             return False
         self._localization_recovery_started = None
@@ -1069,7 +1141,7 @@ class MissionManager(Node):
                 f'{self._docking_retry_limit + 1}')
             self._send_nav_goal()
             return False
-        self._fail(
+        self._pause_for_recovery(
             'docking pose remains outside tolerance after retry')
         return False
 
@@ -1227,8 +1299,22 @@ class MissionManager(Node):
             return
         if self._navigation_active() and self._phase_started is not None:
             if now - self._phase_started >= self._nav_timeout:
-                self._fail('Nav2 goal timed out')
-        elif self.core.state == MissionState.VERIFYING_STOP:
+                if not self._nav_timeout_canceling:
+                    self._nav_timeout_canceling = True
+                    self._nav_timeout_cancel_deadline = now + 5.0
+                    self._phase_started = None
+                    self._cancel_nav_goal()
+                    self.get_logger().warning(
+                        '[NAV] goal timed out; canceling before skipping point')
+        if self._nav_timeout_canceling:
+            if (self._nav_timeout_cancel_deadline is not None and
+                    now >= self._nav_timeout_cancel_deadline):
+                self._nav_timeout_canceling = False
+                self._nav_timeout_cancel_deadline = None
+                self._pause_for_recovery(
+                    'Nav2 timeout cancellation did not settle; relocalize and resume')
+            return
+        if self.core.state == MissionState.VERIFYING_STOP:
             status = self._stop_detector.status(now)
             if status == StopDetector.STABLE:
                 target = self.core.current_target
@@ -1258,7 +1344,8 @@ class MissionManager(Node):
                     self._skip_arm_point(
                         f'odom stop verification failed: {status}')
                 else:
-                    self._fail(f'odom stop verification failed: {status}')
+                    self._skip_navigation_point(
+                        f'odom stop verification failed: {status}')
         elif self.core.state == MissionState.DWELLING:
             target = self.core.current_target
             if target is None:

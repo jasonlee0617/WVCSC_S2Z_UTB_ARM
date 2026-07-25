@@ -43,6 +43,7 @@
   <exec_depend>wvcsc_description</exec_depend>
   <exec_depend>wvcsc_calibration</exec_depend>
   <exec_depend>wvcsc_arm_task</exec_depend>
+  <exec_depend>wvcsc_bringup</exec_depend>
   <exec_depend>wvcsc_interfaces</exec_depend>
   <exec_depend>wvcsc_mission_manager</exec_depend>
   <exec_depend>wvcsc_rgb_vision</exec_depend>

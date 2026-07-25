@@ -6,6 +6,7 @@ import importlib.util
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
@@ -171,6 +172,14 @@ def _launch(context, *, launch_dir):
                 {'use_sim_time': False},
             ],
             output='screen'),
+        Node(
+            package='wvcsc_bringup', executable='arm_spray_test_qt.py',
+            condition=IfCondition(LaunchConfiguration('use_qt_gui')),
+            parameters=[{
+                'use_sim_time': False,
+                'base_frame': 'alicia_base_link',
+            }],
+            output='screen'),
     ]
 
 
@@ -205,5 +214,6 @@ def generate_launch_description():
             default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
         DeclareLaunchArgument('use_moveit_rviz', default_value='false'),
+        DeclareLaunchArgument('use_qt_gui', default_value='true'),
         OpaqueFunction(function=partial(_launch, launch_dir=launch_dir)),
     ])

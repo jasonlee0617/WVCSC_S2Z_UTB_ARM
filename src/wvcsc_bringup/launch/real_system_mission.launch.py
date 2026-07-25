@@ -24,9 +24,9 @@ from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration
 
-from wvcsc_bringup.path_defaults import latest_field_route, latest_map_yaml
+from wvcsc_bringup.path_defaults import latest_map_yaml
 
 
 def _include(launch_dir, filename, arguments=None):
@@ -34,14 +34,6 @@ def _include(launch_dir, filename, arguments=None):
         PythonLaunchDescriptionSource(os.path.join(launch_dir, filename)),
         launch_arguments=(arguments or {}).items(),
     )
-
-
-def _optional_latest_field_route():
-    """Qt route editing must work before a field-route YAML exists."""
-    try:
-        return latest_field_route()
-    except RuntimeError:
-        return ''
 
 
 def _expand_path(path):
@@ -205,10 +197,6 @@ def _resolve_calibrations(context, *, launch_dir):
     """Load hand-eye, nozzle and camera calibrations; block if missing."""
 
     initial_actions = []
-    mission_mode = LaunchConfiguration('mission_mode').perform(context)
-    if mission_mode not in ('qt', 'file'):
-        raise RuntimeError("mission_mode must be 'qt' or 'file'")
-
     # --- hand-eye calibration ---
     calibration_path = _resolve_handeye_calibration(
         LaunchConfiguration('handeye_calibration').perform(context))
@@ -276,9 +264,7 @@ def _resolve_calibrations(context, *, launch_dir):
         cmd=[
             LaunchConfiguration('preflight_script').perform(context),
             '--mode', 'localization',
-            '--operation', (
-                'qt_mission' if mission_mode == 'qt' else 'field_route'),
-            '--mission-file', LaunchConfiguration('mission_file').perform(context),
+            '--operation', 'qt_mission',
             '--camera-device', LaunchConfiguration('c10_device').perform(context),
             '--arm-device', LaunchConfiguration('serial_port').perform(context),
             '--map', LaunchConfiguration('map').perform(context),
@@ -306,12 +292,9 @@ def _resolve_calibrations(context, *, launch_dir):
     }
     qt_editor = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
-            get_package_share_directory('my_navigation2'), 'launch',
+            get_package_share_directory('wvcsc_bringup'), 'launch',
             'nav2_qt.launch.py')),
-        condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('mission_mode'), "' == 'qt' and '",
-            LaunchConfiguration('use_qt_gui'), "' == 'true'",
-        ])),
+        condition=IfCondition(LaunchConfiguration('use_qt_gui')),
         launch_arguments={
             'use_sim_time': 'false',
             'map_frame': 'map',
@@ -320,8 +303,7 @@ def _resolve_calibrations(context, *, launch_dir):
         }.items())
     success_actions = [
         LogInfo(msg=(
-            '[BRINGUP] preflight passed; starting full mission stack '
-            f'(mode={mission_mode})')),
+            '[BRINGUP] preflight passed; starting Qt mission stack')),
         _include(launch_dir, 'real_sensors.launch.py', {
             **shared_description_args,
             'c10_device': LaunchConfiguration('c10_device'),
@@ -342,8 +324,6 @@ def _resolve_calibrations(context, *, launch_dir):
         _include(launch_dir, 'real_orchestration.launch.py', {
             **shared_description_args,
             'map': LaunchConfiguration('map'),
-            'mission_file': LaunchConfiguration('mission_file'),
-            'mission_mode': LaunchConfiguration('mission_mode'),
             'yolo_python_executable': LaunchConfiguration(
                 'yolo_python_executable'),
             'use_keyboard': LaunchConfiguration('use_keyboard'),
@@ -388,11 +368,6 @@ def generate_launch_description():
     launch_dir = os.path.join(bringup_share, 'launch')
 
     return LaunchDescription([
-        DeclareLaunchArgument(
-            'mission_file', default_value=_optional_latest_field_route()),
-        DeclareLaunchArgument(
-            'mission_mode', default_value='qt',
-            description='qt: interactive route editing; file: fixed field-route YAML'),
         DeclareLaunchArgument(
             'map', default_value=latest_map_yaml()),
         DeclareLaunchArgument(

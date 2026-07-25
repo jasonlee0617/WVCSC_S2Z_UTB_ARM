@@ -88,6 +88,12 @@ class _Harness:
         self._stop_detector = _Detector()
         self._nav_client = _NavClient()
         self._abort_and_home_requested = False
+        self._abort_reset_sent = False
+        self._motion_control_state = ''
+        self._recovery_return_home = False
+        self._recovery_pause = False
+        self._nav_timeout_canceling = False
+        self._nav_timeout_cancel_deadline = None
         self._wide_motion_pending = False
         self.failures = []
         self.nav_cancels = 0
@@ -95,6 +101,7 @@ class _Harness:
         self.status_updates = 0
         self._navigation_active = MissionManager._navigation_active.__get__(
             self, _Harness)
+        self._nav_result = MissionManager._nav_result.__get__(self, _Harness)
         self._clear_nav_startup_retry = (
             MissionManager._clear_nav_startup_retry.__get__(self, _Harness))
         self._schedule_initial_nav_retry = (
@@ -302,10 +309,12 @@ def test_partial_success_marks_tree_incomplete_but_completes_route():
     assert harness.core.target_outcomes == [MissionCore.PARTIAL]
 
 
-def test_nav_and_spray_timeouts_stay_blocking_but_inspect_stop_timeout_skips():
+def test_nav_timeout_cancels_for_skip_while_spray_timeout_stays_blocking():
     navigating = _Harness(MissionState.NAVIGATING)
     MissionManager._tick(navigating)
-    assert navigating.failures == ['Nav2 goal timed out']
+    assert navigating.failures == []
+    assert navigating.nav_cancels == 1
+    assert navigating._nav_timeout_canceling
 
     spraying = _Harness(MissionState.ARM_SPRAYING)
     MissionManager._tick(spraying)
@@ -317,6 +326,31 @@ def test_nav_and_spray_timeouts_stay_blocking_but_inspect_stop_timeout_skips():
     assert stale.failures == []
     assert stale.core.state == MissionState.MISSION_COMPLETED
     assert stale.core.skipped_targets == 1
+
+
+def test_late_nav_goal_acceptance_stays_canceled_after_timeout():
+    class PendingResult:
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+    class AcceptedHandle:
+        accepted = True
+
+        def __init__(self):
+            self.result_future = PendingResult()
+
+        def get_result_async(self):
+            return self.result_future
+
+    harness = _Harness(MissionState.NAVIGATING)
+    harness._nav_timeout_canceling = True
+    handle = AcceptedHandle()
+
+    MissionManager._nav_goal_response(harness, _Future(handle))
+
+    assert harness._nav_timeout_canceling
+    assert harness.nav_cancels == 1
+    assert harness._nav_handle is handle
 
 
 def test_spray_feedback_prevents_the_progress_watchdog_from_canceling_work():
@@ -444,7 +478,11 @@ def _docking_harness(actual, *, state=MissionState.VERIFYING_STOP):
         harness, _Harness)
     harness._verify_docking_quality = (
         MissionManager._verify_docking_quality.__get__(harness, _Harness))
+    harness._pause_for_recovery = (
+        MissionManager._pause_for_recovery.__get__(harness, _Harness))
     harness._angle_error = MissionManager._angle_error
+    harness._recovery_return_home = False
+    harness._recovery_pause = False
     return harness
 
 
@@ -476,9 +514,9 @@ def test_outside_docking_tolerance_retries_once_without_spraying():
     harness.core.nav_succeeded()
     harness._localization_pose = (6.1, 3.8, 0.2, 0.0, 0.05, 0.05)
     assert not MissionManager._verify_docking_quality(harness, 6.2)
-    assert harness.core.state == MissionState.FAILED
-    assert harness.failures == [
-        'docking pose remains outside tolerance after retry']
+    assert harness.core.state == MissionState.PAUSED
+    assert harness.failures == []
+    assert harness._recovery_pause
 
 
 def test_start_rejects_when_action_servers_are_absent():
@@ -505,6 +543,31 @@ def test_cancel_stops_both_active_children():
     assert harness._stop_detector.stopped
     assert harness.nav_cancels == 1
     assert harness.spray_cancels == 1
+
+
+def test_abort_and_home_accepts_failed_state_and_is_idempotent():
+    harness = _Harness(MissionState.FAILED)
+    harness._reply = MissionManager._reply
+    harness._nav_pending = False
+    harness._spray_pending = False
+    harness._nav_handle = None
+    harness._spray_handle = None
+    commands = []
+    harness._publish_motion_command = commands.append
+    harness._advance_abort_and_home = MissionManager._advance_abort_and_home.__get__(
+        harness, _Harness)
+    response = SimpleNamespace(success=None, message='')
+
+    MissionManager._abort_and_home(harness, None, response)
+
+    assert response.success
+    assert harness.core.state == MissionState.FAILED
+    assert commands == ['stop', 'reset']
+
+    MissionManager._abort_and_home(harness, None, response)
+
+    assert response.success
+    assert commands == ['stop', 'reset']
 
 
 def test_last_target_can_require_return_home_navigation():

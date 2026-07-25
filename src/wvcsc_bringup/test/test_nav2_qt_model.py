@@ -127,6 +127,8 @@ class _GuiProbe:
     _copy_work_point = staticmethod(nav2_qt.Nav2Gui._copy_work_point)
     _consume_completed_single_target = (
         nav2_qt.Nav2Gui._consume_completed_single_target)
+    _record_start = nav2_qt.Nav2Gui._record_start
+    _relocalize_and_clear = nav2_qt.Nav2Gui._relocalize_and_clear
 
 
 def _gui(editor):
@@ -134,6 +136,8 @@ def _gui(editor):
     gui.node = SimpleNamespace(
         goal_sequence=0,
         latest_goal_pose=None,
+        initial_pose_sequence=0,
+        latest_initial_pose=None,
         status=None,
     )
     gui.editor = editor
@@ -144,18 +148,40 @@ def _gui(editor):
     gui.pending_dock_sequence = 0
     gui.single_mission_id = None
     gui.pending = False
+    gui.required_initial_pose_sequence = 0
+    gui.relocalization_ready = True
     for name in (
             'record_start_button', 'add_point_button', 'single_button',
             'multi_button', 'delete_button', 'up_button', 'down_button',
             'clear_button', 'save_button', 'load_button', 'pause_button',
             'resume_button', 'skip_button', 'cancel_button', 'home_button',
             'reset_button', 'abort_home_button', 'point_type_combo',
-            'capture_tree_button', 'candidate_label', 'status_label'):
+            'capture_tree_button', 'candidate_label', 'status_label',
+            'start_label', 'capture_label', 'relocalize_button'):
         setattr(gui, name, _Widget())
     gui._publish_markers = lambda: None
     gui._update_table = lambda: None
     gui._log = lambda _message: None
     return gui
+
+
+class _ImmediateFuture:
+    @staticmethod
+    def result():
+        return None
+
+    def add_done_callback(self, callback):
+        callback(self)
+
+
+class _ServiceClient:
+    @staticmethod
+    def service_is_ready():
+        return True
+
+    @staticmethod
+    def call_async(_request):
+        return _ImmediateFuture()
 
 
 def test_gui_buttons_require_one_or_two_queued_targets():
@@ -176,6 +202,34 @@ def test_gui_buttons_require_one_or_two_queued_targets():
     gui._refresh()
     assert not gui.single_button.enabled
     assert gui.multi_button.enabled
+
+
+def test_relocalize_clears_editor_and_requires_a_new_tf_backed_start():
+    editor = nav2_qt.MissionEditor()
+    editor.start_pose = _pose(1.0, 2.0)
+    editor.add_point(_pose(3.0, 0.5))
+    gui = _gui(editor)
+    gui.node.service_clients = {
+        'reinitialize_global_localization': _ServiceClient(),
+    }
+    gui.node.current_pose = lambda: _pose(7.0, 8.0, 0.3)
+
+    gui._relocalize_and_clear()
+
+    assert editor.start_pose is None
+    assert editor.points == []
+    assert gui.required_initial_pose_sequence == 0
+    assert gui.relocalization_ready
+    gui._refresh()
+    assert not gui.record_start_button.enabled
+
+    gui.node.initial_pose_sequence = 1
+    gui.node.latest_initial_pose = _pose(0.0, 0.0)
+    gui._refresh()
+    assert gui.record_start_button.enabled
+    gui._record_start()
+    assert editor.start_pose.position.x == pytest.approx(7.0)
+    assert editor.start_pose.position.y == pytest.approx(8.0)
 
 
 def test_single_uses_queued_target_and_removes_it_only_after_completion():

@@ -1,25 +1,23 @@
-"""Real Nav2 + relay integration test with a simulated arm action.
+"""Qt-selected route validation with real vehicle/relay and a fake arm."""
 
-This entry point intentionally omits Alicia-M, C10, YOLO, MoveIt and Servo.
-It drives the vehicle and physical relay controller, while the fake arm Action
-server pulses relay channel 2 and returns successful results at inspect stops.
-"""
-
+import math
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from wvcsc_bringup.path_defaults import latest_field_route, latest_map_yaml
+from wvcsc_bringup.path_defaults import latest_map_yaml
 
 
 def generate_launch_description():
     bringup_share = get_package_share_directory('wvcsc_bringup')
     controller_share = get_package_share_directory('controller_pkg')
+    mission_share = get_package_share_directory('wvcsc_mission_manager')
 
     navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
@@ -38,6 +36,33 @@ def generate_launch_description():
             'config_file': LaunchConfiguration('relay_config_file'),
         }.items(),
     )
+    mission_manager = Node(
+        package='wvcsc_mission_manager', executable='mission_manager',
+        parameters=[
+            os.path.join(mission_share, 'config', 'mission_manager.yaml'),
+            {
+                'use_sim_time': False,
+                'auto_start': False,
+                'arm_base_yaw_rad': math.pi,
+                'wide_relay_channel': 1,
+                'arm_relay_channel': 2,
+                'relay_service_name': '/relay/set',
+            },
+        ],
+        remappings=[('/odom', '/ekf_odom')],
+        output='screen',
+    )
+    qt_editor = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            bringup_share, 'launch', 'nav2_qt.launch.py')),
+        condition=IfCondition(LaunchConfiguration('use_qt_gui')),
+        launch_arguments={
+            'use_sim_time': 'false',
+            'map_frame': 'map',
+            'base_frame': 'base_footprint',
+            'goal_pose_topic': '/manual_goal_pose',
+        }.items(),
+    )
     fake_arm = Node(
         package='wvcsc_bringup',
         executable='fake_arm_spray_action.py',
@@ -49,43 +74,18 @@ def generate_launch_description():
         }],
         output='screen',
     )
-    route_manager = Node(
-        package='wvcsc_bringup',
-        executable='field_route_manager.py',
-        name='wvcsc_field_route_manager',
-        parameters=[{
-            'use_sim_time': False,
-            'mission_file': LaunchConfiguration('mission_file'),
-            'map_file': LaunchConfiguration('map'),
-            'auto_start': True,
-            # Do not send the first Nav2 goal until the operator has set the
-            # AMCL initial pose in RViz.  This also prevents relay activation
-            # while localization is still uninitialized.
-            'wait_for_initial_pose': True,
-            # The action server can be discoverable while Nav2 is still
-            # configuring.  Do not send point_1 until bt_navigator is active.
-            'wait_for_nav_active': True,
-            'wide_relay_channel': 1,
-            'arm_relay_channel': 2,
-        }],
-        remappings=[('/odom', '/ekf_odom')],
-        output='screen',
-    )
 
     return LaunchDescription([
-        DeclareLaunchArgument(
-            'mission_file',
-            default_value=latest_field_route()),
-        DeclareLaunchArgument(
-            'map',
-            default_value=latest_map_yaml()),
+        DeclareLaunchArgument('map', default_value=latest_map_yaml()),
         DeclareLaunchArgument(
             'relay_config_file',
             default_value=os.path.join(
                 controller_share, 'config', 'fault.ini')),
         DeclareLaunchArgument('use_rviz', default_value='true'),
+        DeclareLaunchArgument('use_qt_gui', default_value='true'),
         navigation,
         relay_controller,
+        mission_manager,
         fake_arm,
-        route_manager,
+        qt_editor,
     ])

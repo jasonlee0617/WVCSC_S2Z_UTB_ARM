@@ -28,12 +28,13 @@ from PyQt5.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_srvs.srv import Trigger
+from std_srvs.srv import Empty, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 from wvcsc_interfaces.msg import (
@@ -42,6 +43,7 @@ from wvcsc_interfaces.msg import (
     MissionStatus,
 )
 from wvcsc_interfaces.srv import LoadManualMission
+from wvcsc_bringup.qt_image_viewer import RosImagePanel
 
 
 DEFAULT_SAVE_PATH = os.path.expanduser('~/navigation_points.json')
@@ -303,6 +305,7 @@ class Nav2QtNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.latest_initial_pose = None
+        self.initial_pose_sequence = 0
         self.latest_goal_pose = None
         self.goal_sequence = 0
         self.status = None
@@ -337,13 +340,22 @@ class Nav2QtNode(Node):
             'cancel': self.create_client(Trigger, '/mission/cancel'),
             'abort_and_home': self.create_client(
                 Trigger, '/mission/abort_and_home'),
+            'reinitialize_global_localization': self.create_client(
+                Empty, '/reinitialize_global_localization'),
             'return_home': self.create_client(Trigger, '/mission/return_home'),
             'reset': self.create_client(Trigger, '/mission/reset'),
         }
 
     def _on_initial_pose(self, message):
-        if message.header.frame_id == self.map_frame:
-            self.latest_initial_pose = copy_pose(message.pose.pose)
+        pose = message.pose.pose
+        values = (
+            pose.position.x, pose.position.y, pose.position.z,
+            pose.orientation.x, pose.orientation.y,
+            pose.orientation.z, pose.orientation.w)
+        if (message.header.frame_id == self.map_frame and
+                all(math.isfinite(value) for value in values)):
+            self.latest_initial_pose = copy_pose(pose)
+            self.initial_pose_sequence += 1
 
     def _on_goal_pose(self, message):
         if message.header.frame_id != self.map_frame:
@@ -558,6 +570,8 @@ class Nav2Gui(QWidget):
         self.pending_dock_sequence = 0
         self.single_mission_id = None
         self.pending = False
+        self.required_initial_pose_sequence = 0
+        self.relocalization_ready = True
         self._build_ui()
         self.ros_timer = QTimer(self)
         self.ros_timer.timeout.connect(self._spin_ros)
@@ -566,11 +580,12 @@ class Nav2Gui(QWidget):
 
     def _build_ui(self):
         self.setWindowTitle('WVCSC 导航喷洒控制器')
-        self.setGeometry(220, 160, 1220, 720)
+        self.setGeometry(180, 100, 1360, 900)
         layout = QVBoxLayout()
 
         task_layout = QGridLayout()
-        self.record_start_button = QPushButton('记录起点')
+        self.record_start_button = QPushButton('确认当前起点')
+        self.relocalize_button = QPushButton('重新定位并清空任务')
         self.point_type_combo = QComboBox()
         self.point_type_combo.addItem('通行点', POINT_TRANSIT)
         self.point_type_combo.addItem('病株检查点', POINT_INSPECT)
@@ -586,6 +601,7 @@ class Nav2Gui(QWidget):
         task_layout.addWidget(self.capture_tree_button, 0, 4)
         task_layout.addWidget(self.single_button, 0, 5)
         task_layout.addWidget(self.multi_button, 0, 6)
+        task_layout.addWidget(self.relocalize_button, 0, 7)
         task_layout.addWidget(QLabel('病株默认喷洒时长 (s):'), 1, 0)
         self.duration_spin = QDoubleSpinBox()
         self.duration_spin.setRange(0.2, 10.0)
@@ -655,11 +671,19 @@ class Nav2Gui(QWidget):
         self.status_label.setAlignment(Qt.AlignCenter)
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.log_area)
+        manager_panel = QWidget()
+        manager_layout = QVBoxLayout(manager_panel)
+        manager_layout.addWidget(self.status_label)
+        manager_layout.addWidget(self.log_area, 1)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(manager_panel)
+        splitter.addWidget(RosImagePanel(self.node))
+        splitter.setSizes([520, 780])
+        layout.addWidget(splitter, 1)
         self.setLayout(layout)
 
         self.record_start_button.clicked.connect(self._record_start)
+        self.relocalize_button.clicked.connect(self._relocalize_and_clear)
         self.add_point_button.clicked.connect(self._add_point)
         self.capture_tree_button.clicked.connect(self._capture_tree_center)
         self.single_button.clicked.connect(self._start_single)
@@ -705,8 +729,12 @@ class Nav2Gui(QWidget):
         busy = state in self.ACTIVE
         editable = not self.pending and not busy
         has_start = self.editor.start_pose is not None
+        fresh_initial = (
+            self.node.initial_pose_sequence > self.required_initial_pose_sequence)
         point_count = len(self.editor.points)
-        self.record_start_button.setEnabled(editable)
+        self.record_start_button.setEnabled(
+            editable and not has_start and self.relocalization_ready and fresh_initial)
+        self.relocalize_button.setEnabled(editable)
         self.point_type_combo.setEnabled(editable)
         self.add_point_button.setEnabled(
             editable and self.candidate is not None
@@ -735,18 +763,69 @@ class Nav2Gui(QWidget):
             MissionStatus.READY, MissionStatus.PAUSED,
             MissionStatus.VERIFYING_STOP, MissionStatus.MISSION_COMPLETED})
         self.reset_button.setEnabled(not self.pending and state in self.TERMINAL)
+        if not has_start:
+            if not self.relocalization_ready:
+                self.start_label.setText('起点: 等待 AMCL 全局重定位服务成功')
+            elif fresh_initial and self.node.latest_initial_pose is not None:
+                pose = self.node.latest_initial_pose
+                self.start_label.setText(
+                    '起点候选: RViz 已重新定位，等待确认 '
+                    f'x={pose.position.x:.2f}, y={pose.position.y:.2f}, '
+                    f'yaw={pose_yaw(pose):.2f}')
 
     def _record_start(self):
-        pose = self.node.latest_initial_pose or self.node.current_pose()
+        if not self.relocalization_ready:
+            self._log('记录起点失败：AMCL 全局重定位服务尚未成功')
+            return
+        if self.node.initial_pose_sequence <= self.required_initial_pose_sequence:
+            self._log('记录起点失败：请先在 RViz 重新点击 2D Estimate Pose')
+            return
+        pose = self.node.current_pose()
         if pose is None:
-            self._log('记录起点失败：请先在RViz点击 2D Estimate Pose，或确认TF可用')
+            self._log('记录起点失败：请等待 AMCL 的 map→base TF 可用')
             return
         self.editor.start_pose = copy_pose(pose)
         self.start_label.setText(
             f'起点: x={pose.position.x:.2f}, y={pose.position.y:.2f}, '
             f'yaw={pose_yaw(pose):.2f}')
-        self._log('已记录起点')
+        self._log('已确认当前 AMCL 起点')
         self._publish_markers()
+
+    def _relocalize_and_clear(self):
+        self.editor.start_pose = None
+        self.editor.points.clear()
+        self.candidate = None
+        self.candidate_sequence = self.node.goal_sequence
+        self.consumed_goal_sequence = self.node.goal_sequence
+        self.pending_dock_pose = None
+        self.pending_dock_sequence = self.node.goal_sequence
+        self.single_mission_id = None
+        self.required_initial_pose_sequence = self.node.initial_pose_sequence
+        self.relocalization_ready = False
+        self.start_label.setText('起点: 正在请求 AMCL 全局重定位')
+        self.capture_label.setText('采集状态: 任务点已清空；请重新定位后设置任务点')
+        self.candidate_label.setText('最新RViz终点: 等待新的 2D Goal')
+        self._update_table()
+        self._publish_markers()
+
+        client = self.node.service_clients['reinitialize_global_localization']
+        if not client.service_is_ready():
+            self._log('AMCL 全局重定位服务不可用；任务已清空，请稍后重新点击此按钮')
+            return
+        self.pending = True
+        future = client.call_async(Empty.Request())
+
+        def finished(done):
+            self.pending = False
+            try:
+                done.result()
+            except Exception as error:
+                self._log(f'AMCL 全局重定位请求失败：{error}')
+                return
+            self.relocalization_ready = True
+            self._log('AMCL 已全局重定位；请在 RViz 点击 2D Estimate Pose 后确认起点')
+
+        future.add_done_callback(finished)
 
     def _add_point(self):
         if self.candidate is None:
@@ -1062,6 +1141,9 @@ class Nav2Gui(QWidget):
                 f'起点: x={self.editor.start_pose.position.x:.2f}, '
                 f'y={self.editor.start_pose.position.y:.2f}, '
                 f'yaw={pose_yaw(self.editor.start_pose):.2f}')
+        else:
+            self.required_initial_pose_sequence = self.node.initial_pose_sequence
+            self.relocalization_ready = True
         self._update_table()
         self._publish_markers()
         self._log(f'已加载任务: {path}')

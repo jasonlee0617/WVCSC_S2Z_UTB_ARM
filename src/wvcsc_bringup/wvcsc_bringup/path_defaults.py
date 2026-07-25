@@ -1,4 +1,4 @@
-"""Default timestamped map and field-route paths for real bringup."""
+"""Default timestamped map paths for real bringup."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import re
 from ament_index_python.packages import get_package_share_directory
 
 
-_TIMESTAMP = re.compile(r'^(?:map|mission)_(\d{8}_\d{6})$')
+_TIMESTAMP = re.compile(r'^map_(\d{8}_\d{6})$')
 
 
 def _workspace_source_root() -> Path:
@@ -57,16 +57,3 @@ def latest_map_yaml() -> str:
     raise RuntimeError(
         f'no timestamped map found; expected map_YYYYMMDD_HHMMSS/orchard.yaml '
         f'in: {searched}')
-
-
-def latest_field_route() -> str:
-    """Return the newest timestamped field-route YAML path."""
-    for root in _candidate_roots('wvcsc_bringup', 'config/real'):
-        path = _latest_timestamp_file(root, 'mission', 'field_route_*.yaml')
-        if path is not None:
-            return str(path)
-    searched = ', '.join(str(root) for root in _candidate_roots(
-        'wvcsc_bringup', 'config/real'))
-    raise RuntimeError(
-        f'no timestamped field route found; expected '
-        f'mission_YYYYMMDD_HHMMSS/field_route_*.yaml in: {searched}')

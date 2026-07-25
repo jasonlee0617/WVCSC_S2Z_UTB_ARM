@@ -270,8 +270,22 @@ class MissionCore:
     def pause(self):
         return self._transition(MissionState.NAVIGATING, MissionState.PAUSED)
 
-    def resume(self):
-        return self._transition(MissionState.PAUSED, MissionState.NAVIGATING)
+    def pause_for_recovery(self):
+        if self.state not in {
+                MissionState.NAVIGATING,
+                MissionState.VERIFYING_STOP,
+                MissionState.RETURNING_HOME}:
+            return False
+        self.state = MissionState.PAUSED
+        return True
+
+    def resume(self, returning_home=False):
+        if self.state != MissionState.PAUSED:
+            return False
+        self.state = (
+            MissionState.RETURNING_HOME if returning_home
+            else MissionState.NAVIGATING)
+        return True
 
     def cancel(self):
         if self.state not in self.ACTIVE | {MissionState.READY}:

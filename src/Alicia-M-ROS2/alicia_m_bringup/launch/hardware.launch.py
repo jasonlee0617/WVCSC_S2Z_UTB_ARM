@@ -39,7 +39,7 @@ def generate_launch_description():
     declared_args = [
         DeclareLaunchArgument(
             'serial_port', default_value='/dev/ttyACM0',
-            choices=['/dev/ttyACM0', '/dev/ttyACM0', '/dev/ttyACM2', '/dev/ttyACM3'],
+            choices=['/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2', '/dev/ttyACM3'],
             description='Serial port'),
         DeclareLaunchArgument(
             'control_mode', default_value='pv',

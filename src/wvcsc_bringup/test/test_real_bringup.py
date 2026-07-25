@@ -86,8 +86,9 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "'aim_fixed_range_m'" in source
     assert "'relay_config_file'" in source
     assert "'--relay-config', relay_config" in source
-    assert "'qt_mission' if mission_mode == 'qt' else 'field_route'" in source
-    assert "'mission_mode', default_value='qt'" in source
+    assert "'--operation', 'qt_mission'" in source
+    assert 'mission_mode' not in source
+    assert 'mission_file' not in source
     assert "'use_qt_gui', default_value='true'" in source
     assert 'nav2_qt.launch.py' in source
     assert "'use_nav_rviz', default_value='true'" in source
@@ -104,20 +105,17 @@ def test_real_system_rviz_processes_have_separate_explicit_controls_and_names():
     assert "name='moveit_rviz'" in arm
 
 
-def test_real_orchestration_uses_qt_by_default_and_keeps_file_route_compatibility():
+def test_real_orchestration_uses_the_qt_mission_manager_only():
     source = _source('real_orchestration.launch.py')
     vision = (PACKAGE.parent / 'wvcsc_rgb_vision' / 'config' /
               'vision_real.yaml').read_text(encoding='utf-8')
 
-    assert "executable='field_route_manager.py'" in source
     assert "package='wvcsc_mission_manager', executable='mission_manager'" in source
-    assert "'mission_mode', default_value='qt'" in source
-    assert "' == 'qt'" in source
-    assert "' == 'file'" in source
-    assert "executable='load_site_mission.py'" not in source
+    assert "executable='field_route_manager.py'" not in source
+    assert 'mission_mode' not in source
+    assert 'mission_file' not in source
     assert 'mission_source' not in source
     assert 'wvcsc_uav_gateway' not in source
-    assert "'map_file': LaunchConfiguration('map')" in source
     assert "'wide_relay_channel': 1" in source
     assert "'arm_relay_channel': 2" in source
     assert "'arm_base_yaw_rad': 3.141592653589793" in source
@@ -139,22 +137,25 @@ def test_qt_real_mode_never_autostarts_or_requires_a_file_route():
         encoding='utf-8')
 
     assert "'auto_start': False" in orchestration
-    assert 'def _optional_latest_field_route()' in system
-    assert "args.operation != 'qt_mission'" in preflight
-    assert "'qt_mission' if mission_mode == 'qt' else 'field_route'" in system
+    assert 'latest_field_route' not in system
+    assert 'mission_file' not in system
+    assert 'mission_mode' not in system
+    assert "choices=('survey', 'qt_mission')" in preflight
 
 
-def test_route_validation_launch_uses_real_navigation_and_fake_arm_only():
-    source = _source('real_field_route_validation.launch.py')
+def test_vehicle_relay_qt_test_uses_real_navigation_and_fake_arm_only():
+    source = _source('real_vehicle_relay_qt_test.launch.py')
     fake = (PACKAGE / 'scripts' / 'fake_arm_spray_action.py').read_text(
         encoding='utf-8')
 
     assert 'real_navigation.launch.py' in source
     assert "controller.launch.py" in source
-    assert "'wait_for_initial_pose': True" in source
-    assert "'wait_for_nav_active': True" in source
     assert "executable='fake_arm_spray_action.py'" in source
-    assert "executable='field_route_manager.py'" in source
+    assert "package='wvcsc_mission_manager', executable='mission_manager'" in source
+    assert 'nav2_qt.launch.py' in source
+    assert "'auto_start': False" in source
+    assert "'arm_base_yaw_rad': math.pi" in source
+    assert 'mission_file' not in source
     for forbidden in (
             'real_arm.launch.py', 'spray_task', 'two_stage_yolo',
             'c10_camera.launch.py', 'visual_servo'):
@@ -164,25 +165,21 @@ def test_route_validation_launch_uses_real_navigation_and_fake_arm_only():
     assert 'self._relay_channel = 2' not in fake
 
 
-def test_field_route_reopens_wide_relay_after_each_inspect():
-    manager = (PACKAGE / 'scripts' / 'field_route_manager.py').read_text(
-        encoding='utf-8')
-    assert 'self._index in (0, 1, 2, 3) and not self._wide_relay_enabled' in manager
-    assert 'def _advance_after_wide_stop' in manager
-    assert 'disable wide spray before final leg' in manager
-
-
-def test_real_bringup_does_not_install_legacy_site_task_tools():
+def test_real_bringup_removes_file_route_and_cli_tools():
     cmake = (PACKAGE / 'CMakeLists.txt').read_text(encoding='utf-8')
-    assert 'scripts/load_site_mission.py' not in cmake
-    assert 'scripts/nav_validate_sites.py' not in cmake
-    assert not (PACKAGE / 'scripts' / 'load_site_mission.py').exists()
-    assert not (PACKAGE / 'scripts' / 'nav_validate_sites.py').exists()
+    for name in (
+            'capture_site_pose.py', 'migrate_site_mission.py',
+            'validate_site_mission.py', 'validate_field_route.py',
+            'field_route_manager.py', 'arm_spray_once.py'):
+        assert name not in cmake
+        assert not (PACKAGE / 'scripts' / name).exists()
+    assert not (PACKAGE / 'wvcsc_bringup' / 'site_mission.py').exists()
+    assert not (PACKAGE / 'wvcsc_bringup' / 'field_route.py').exists()
 
 
 def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     source = _source('real_arm_spray_test.launch.py')
-    script = (PACKAGE / 'scripts' / 'arm_spray_once.py').read_text(
+    script = (PACKAGE / 'scripts' / 'arm_spray_test_qt.py').read_text(
         encoding='utf-8')
 
     assert 'real_navigation.launch.py' not in source
@@ -205,9 +202,13 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     assert "get_package_share_directory('controller_pkg')" in source
     assert "'relay_config_file'" in source
 
+    assert "executable='arm_spray_test_qt.py'" in source
+    assert "'use_qt_gui', default_value='true'" in source
     assert 'MissionStatus.ARM_SPRAYING' in script
-    assert "default='alicia_base_link'" in script
-    assert 'tree_hint.header.frame_id = self.args.frame_id' in script
+    assert "self.declare_parameter('base_frame', 'alicia_base_link')" in script
+    assert "String(data='stop')" in script
+    assert "String(data='reset')" in script
+    assert "String(data='resume')" in script
     assert 'ActionClient(self, ExecuteSpray, \'/arm/execute_spray\')' in script
 
 
@@ -392,7 +393,7 @@ def test_real_mission_uses_portable_handeye_and_c10_calibration_paths():
     assert "def _latest_handeye_calibration" in source
     assert "default_value='latest_real'" in source
     assert "c10_share, 'config', 'c10_intrinsics.yaml'" in source
-    assert 'latest_field_route' in source
+    assert 'latest_field_route' not in source
     assert 'latest_map_yaml' in source
     assert 'wvcsc_calibration/config/' in source
     assert 'nozzle.example.yaml' in source
@@ -402,7 +403,7 @@ def test_real_mission_uses_portable_handeye_and_c10_calibration_paths():
 def test_real_launches_use_timestamped_defaults_not_legacy_paths():
     for launch_name in (
             'real_navigation.launch.py',
-            'real_field_route_validation.launch.py',
+            'real_vehicle_relay_qt_test.launch.py',
             'real_orchestration.launch.py',
             'real_system_mission.launch.py'):
         source = _source(launch_name)
@@ -410,7 +411,7 @@ def test_real_launches_use_timestamped_defaults_not_legacy_paths():
         assert 'maps/orchard.yaml' not in source
     assert not (PACKAGE / 'maps' / 'orchard.yaml').exists()
     assert not (PACKAGE / 'maps' / 'orchard.pgm').exists()
-    assert not (PACKAGE / 'config' / 'real' / 'field_route_corn.yaml').exists()
+    assert not (PACKAGE / 'config' / 'real' / 'field_route_corn.example.yaml').exists()
 
 
 def test_real_hardware_defaults_match_field_computer():

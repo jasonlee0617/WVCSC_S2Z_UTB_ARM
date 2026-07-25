@@ -194,7 +194,7 @@ def generate_launch_description():
     moveit_share = get_package_share_directory('alicia_m_moveit_config')
     gazebo_share = get_package_share_directory('gazebo_ros')
     nav2_share = get_package_share_directory('nav2_bringup')
-    navigation_share = get_package_share_directory('my_navigation2')
+    bringup_share = get_package_share_directory('wvcsc_bringup')
 
     # Gazebo 模型路径设置
     alicia_model_root = os.path.dirname(
@@ -566,14 +566,12 @@ def generate_launch_description():
     )
     nav2_qt = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(navigation_share, 'launch', 'nav2_qt.launch.py')),
+            os.path.join(bringup_share, 'launch', 'nav2_qt.launch.py')),
         launch_arguments={
             'use_sim_time': 'True',
             'map_frame': 'map',
             'base_frame': 'base_footprint',
             'goal_pose_topic': '/manual_goal_pose',
-            'road_center_y': '0.0',
-            'road_yaw': '0.0',
         }.items(),
         condition=IfCondition(use_nav2_qt),
     )

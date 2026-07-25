@@ -63,8 +63,8 @@ mission_manager:
 
     # 机械臂喷洒 Action 的超时时间。
     spray_goal_timeout_sec: 180.0
-    # 如果机械臂 Action 在 30 秒内没有发布任何进度反馈 (Feedback)，则认为卡死。
-    spray_progress_timeout_sec: 30.0
+    # 对准过程会转发视觉伺服反馈；40 秒无反馈才认为子 Action 真正失联。
+    spray_progress_timeout_sec: 40.0
 
     # 第 1 路广域喷洒。继电器失败只记录告警，路线继续执行。
     relay_service_name: /relay/set

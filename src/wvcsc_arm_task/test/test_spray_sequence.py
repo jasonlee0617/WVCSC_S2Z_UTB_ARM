@@ -277,7 +277,7 @@ class _ClosedLoopSequenceHarness:
     _mark_unresolved = SprayTask._mark_unresolved
 
     def __init__(self, *, alignment_ok=True, fallback_enabled=True,
-                 recenter_ok=True):
+                 recenter_ok=True, alignment_code=None):
         self._active_mission = ''
         self._active_tree = ''
         self._spray_on_alignment_failure = fallback_enabled
@@ -290,6 +290,7 @@ class _ClosedLoopSequenceHarness:
         self._observed_target = _target('target-1', 200.0, 200.0)
         self._fruit_calls = 0
         self._alignment_ok = alignment_ok
+        self._alignment_code = alignment_code
         self._recenter_ok = recenter_ok
         self.calls = []
 
@@ -348,13 +349,18 @@ class _ClosedLoopSequenceHarness:
             self._recenter_ok,
             '' if self._recenter_ok else 'target recenter rejected: joint_limit_margin')
 
-    def _align_target(self, _mission, _tree, target_id, _aim, _cancel_requested):
+    def _align_target(
+            self, _mission, _tree, target_id, _aim, _cancel_requested,
+            feedback_callback=None):
         self.calls.append(f'servo:{target_id}')
+        if feedback_callback is not None:
+            feedback_callback(SimpleNamespace(feedback=SimpleNamespace(
+                phase=0, error_u=2.0, error_v=-3.0)))
         return (
             self._alignment_ok,
             False,
-            (AlignTarget.Result.OK if self._alignment_ok
-             else AlignTarget.Result.TIMEOUT),
+            (AlignTarget.Result.OK if self._alignment_ok else
+             (self._alignment_code or AlignTarget.Result.TIMEOUT)),
             'alignment timeout' if not self._alignment_ok else '')
 
     def _alignment_fallback_target(self, target, _cancel_requested):
@@ -365,6 +371,8 @@ class _ClosedLoopSequenceHarness:
 
     _alignment_code_allows_fallback = staticmethod(
         SprayTask._alignment_code_allows_fallback)
+    _alignment_code_allows_endpoint_spray = staticmethod(
+        SprayTask._alignment_code_allows_endpoint_spray)
     _is_recoverable_alignment_code = staticmethod(
         SprayTask._is_recoverable_alignment_code)
 
@@ -387,6 +395,9 @@ class _ClosedLoopSequenceHarness:
     def _return_home(self, _cancel_requested):
         self.calls.append('return_home')
         return True
+
+    def _request_motion_stop(self):
+        self.calls.append('motion_stop')
 
     @staticmethod
     def _reset_fruit_tracking():
@@ -430,8 +441,29 @@ def test_completed_queue_returns_home_without_an_extra_observation_scan():
     assert task.calls[-1] == 'return_home'
 
 
-def test_real_alignment_timeout_reconfirms_safe_pose_then_sprays():
+def test_real_alignment_timeout_sprays_from_current_pose_then_homes():
     task = _ClosedLoopSequenceHarness(alignment_ok=False, fallback_enabled=True)
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    feedbacks = []
+    code, _message = task._run_sequence(
+        request, lambda: False, lambda *args: feedbacks.append(args))
+
+    assert code == ExecuteSpray.Result.OK
+    assert 'servo:target-1' in task.calls
+    assert not any(call.startswith('fallback:') for call in task.calls)
+    assert task.calls.count('spray') == 1
+    assert task.calls.count('return_to_observation') == 0
+    assert task.calls[-1] == 'return_home'
+    assert any(item[0] == ExecuteSpray.Feedback.ALIGNING for item in feedbacks)
+
+
+def test_servo_singularity_sprays_from_current_pose_then_homes():
+    task = _ClosedLoopSequenceHarness(
+        alignment_ok=False, fallback_enabled=True,
+        alignment_code=AlignTarget.Result.SERVO_SINGULARITY)
     request = SimpleNamespace(
         mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
         tree_hint=object())
@@ -440,9 +472,24 @@ def test_real_alignment_timeout_reconfirms_safe_pose_then_sprays():
         request, lambda: False, lambda *_args: None)
 
     assert code == ExecuteSpray.Result.OK
-    assert 'servo:target-1' in task.calls
-    assert 'fallback:target-1' in task.calls
     assert task.calls.count('spray') == 1
+    assert task.calls.count('return_to_observation') == 0
+
+
+def test_servo_safety_stop_locks_without_spraying():
+    task = _ClosedLoopSequenceHarness(
+        alignment_ok=False, fallback_enabled=True,
+        alignment_code=AlignTarget.Result.SERVO_SAFETY_STOP)
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, _message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.LOCKED
+    assert 'motion_stop' in task.calls
+    assert 'spray' not in task.calls
 
 
 def test_real_joint_limit_recenter_rejection_falls_back_to_safe_pose_spray():
@@ -1408,7 +1455,7 @@ class _AlignHarness:
     _downstream_margin = 2.0
     _vision_client = object()
 
-    def _run_downstream_action(self, *_args):
+    def _run_downstream_action(self, *_args, **_kwargs):
         result = SimpleNamespace(
             success=False,
             error_code=AlignTarget.Result.SERVO_SINGULARITY,
@@ -1425,6 +1472,25 @@ def test_alignment_result_code_and_message_are_not_replaced_by_canceled_text():
     assert not canceled
     assert code == AlignTarget.Result.SERVO_SINGULARITY
     assert message == 'MoveIt Servo recoverable status 2'
+
+
+def test_alignment_feedback_callback_is_forwarded_to_the_action_client():
+    callback = lambda _message: None
+    task = _AlignHarness()
+    task._run_downstream_action = lambda *_args, **kwargs: (
+        setattr(task, 'feedback_callback', kwargs['feedback_callback']) or
+        (SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(
+                success=True, error_code=AlignTarget.Result.OK, message='ok')),
+         False, ''))
+
+    task._align_target(
+        'mission-1', 'tree-1', 'fruit-1',
+        (640.0, 388.0, 1280, 720, 1.30), lambda: False,
+        feedback_callback=callback)
+
+    assert task.feedback_callback is callback
 
 
 def test_new_target_can_wrap_to_an_untried_earlier_observation():
