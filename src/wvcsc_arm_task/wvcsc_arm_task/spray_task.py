@@ -916,8 +916,11 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
 
             if endpoint_spray:
                 self.get_logger().info(
-                    f'[ARM][{tree}] endpoint fallback sprayed; returning HOME')
-                break
+                    f'[ARM][{tree}] endpoint fallback sprayed; '
+                    'returning to observation for remaining targets')
+                # Fall through to RETURNING_TO_OBSERVE below
+                # instead of breaking the while loop, so remaining
+                # queued targets are still processed.
 
             # 阶段 7: RETURNING_TO_OBSERVE (回到观察位，准备复检)
             feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.75,
