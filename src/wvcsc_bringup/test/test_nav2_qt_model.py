@@ -84,6 +84,20 @@ def test_tree_click_is_converted_to_signed_arm_base_coordinates():
     assert nav2_qt.work_side_from_tree_y(tree_y) == nav2_qt.WORK_SIDE_LEFT
 
 
+def test_opencv_qt_plugin_override_is_removed_without_touching_other_paths():
+    environment = {
+        'QT_QPA_PLATFORM_PLUGIN_PATH': (
+            '/home/eisa/.local/lib/python3.10/site-packages/cv2/qt/plugins'),
+        'QT_QPA_FONTDIR': (
+            '/home/eisa/.local/lib/python3.10/site-packages/cv2/qt/fonts'),
+        'QT_PLUGIN_PATH': '/opt/custom/plugins',
+    }
+    nav2_qt.remove_opencv_qt_plugin_override(environment)
+    assert 'QT_QPA_PLATFORM_PLUGIN_PATH' not in environment
+    assert 'QT_QPA_FONTDIR' not in environment
+    assert environment['QT_PLUGIN_PATH'] == '/opt/custom/plugins'
+
+
 def test_inspect_side_mismatch_is_rejected_before_mission_submission():
     point = nav2_qt.WorkPoint(
         _pose(0.0, 0.0), tree_y_m=-1.0,

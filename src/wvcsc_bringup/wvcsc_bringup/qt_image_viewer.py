@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cv_bridge import CvBridge
+import numpy as np
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
@@ -15,6 +15,64 @@ PREFERRED_IMAGE_TOPICS = (
     '/vision/tree_debug_image',
     '/vision/diseased_target_debug_image',
 )
+
+
+def image_to_qimage(message):
+    """Convert the common raw ROS image encodings without importing OpenCV.
+
+    Importing ``cv_bridge`` loads the user's OpenCV wheel on some field
+    computers.  That wheel may redirect Qt to its bundled platform plugin
+    before ``QApplication`` starts, which conflicts with PyQt5's ``xcb``
+    plugin.  The navigation panel only needs raw 8-bit camera/debug images,
+    so convert those bytes directly and keep the Qt process OpenCV-free.
+    """
+    encoding = str(message.encoding).lower()
+    channels_by_encoding = {
+        'bgr8': 3,
+        'rgb8': 3,
+        'bgra8': 4,
+        'rgba8': 4,
+        'mono8': 1,
+    }
+    channels = channels_by_encoding.get(encoding)
+    if channels is None:
+        raise ValueError(f'unsupported image encoding: {message.encoding}')
+
+    height = int(message.height)
+    width = int(message.width)
+    step = int(message.step)
+    if height <= 0 or width <= 0 or step < width * channels:
+        raise ValueError('invalid image dimensions or row stride')
+
+    expected_size = height * step
+    raw = np.frombuffer(message.data, dtype=np.uint8)
+    if raw.size < expected_size:
+        raise ValueError('image data is shorter than its declared row stride')
+    pixels = raw[:expected_size].reshape(height, step)
+    pixels = pixels[:, :width * channels].reshape(height, width, channels)
+
+    if encoding == 'bgr8':
+        rgb = pixels[:, :, ::-1].copy()
+        return QImage(
+            rgb.data, width, height, rgb.strides[0], QImage.Format_RGB888).copy()
+    if encoding == 'rgb8':
+        rgb = pixels.copy()
+        return QImage(
+            rgb.data, width, height, rgb.strides[0], QImage.Format_RGB888).copy()
+    if encoding == 'bgra8':
+        rgba = pixels[:, :, [2, 1, 0, 3]].copy()
+        return QImage(
+            rgba.data, width, height, rgba.strides[0],
+            QImage.Format_RGBA8888).copy()
+    if encoding == 'rgba8':
+        rgba = pixels.copy()
+        return QImage(
+            rgba.data, width, height, rgba.strides[0],
+            QImage.Format_RGBA8888).copy()
+
+    gray = pixels[:, :, 0].copy()
+    return QImage(
+        gray.data, width, height, gray.strides[0], QImage.Format_Grayscale8).copy()
 
 
 def image_topic_names(topic_types):
@@ -33,7 +91,6 @@ class RosImagePanel(QWidget):
     def __init__(self, node, parent=None):
         super().__init__(parent)
         self._node = node
-        self._bridge = CvBridge()
         self._subscription = None
         self._topic = ''
 
@@ -97,11 +154,7 @@ class RosImagePanel(QWidget):
 
     def _on_image(self, message):
         try:
-            bgr = self._bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
-            rgb = bgr[:, :, ::-1].copy()
-            image = QImage(
-                rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0],
-                QImage.Format_RGB888).copy()
+            image = image_to_qimage(message)
         except Exception as error:
             self.image_label.setText(f'图像转换失败: {error}')
             return

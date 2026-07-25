@@ -67,6 +67,24 @@ WORK_SIDE_LEFT = 'LEFT'
 WORK_SIDE_RIGHT = 'RIGHT'
 
 
+def remove_opencv_qt_plugin_override(environment=None):
+    """Prevent a pip OpenCV wheel from selecting its incompatible Qt plugin.
+
+    ``opencv-python`` wheels may export ``QT_QPA_PLATFORM_PLUGIN_PATH`` as
+    ``.../site-packages/cv2/qt/plugins``.  This UI is PyQt5-based, so that
+    plugin must never be selected for its QApplication.
+    """
+    environment = os.environ if environment is None else environment
+    for name in ('QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_PLUGIN_PATH'):
+        value = environment.get(name, '')
+        normalized = value.replace('\\', '/')
+        if '/cv2/qt/plugins' in normalized:
+            environment.pop(name, None)
+    font_path = environment.get('QT_QPA_FONTDIR', '')
+    if '/cv2/qt/' in font_path.replace('\\', '/'):
+        environment.pop('QT_QPA_FONTDIR', None)
+
+
 def tree_offset_from_docking(docking_pose, tree_pose):
     """Return signed alicia_base_link XY for a manually clicked tree.
 
@@ -1165,6 +1183,7 @@ class Nav2Gui(QWidget):
 
 
 def main(args=None):
+    remove_opencv_qt_plugin_override()
     rclpy.init(args=args)
     node = Nav2QtNode()
     app = QApplication(sys.argv)
