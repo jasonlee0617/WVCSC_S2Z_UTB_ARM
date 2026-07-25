@@ -42,7 +42,7 @@ def _expand_path(path):
 
 def _latest_handeye_calibration(simulation=False):
     directory = (Path.home() / 'WVCSC_S2Z_UTB_ARM' / 'src' /
-                 'wvcsc_calibration' / 'config')
+                 'wvcsc_perception' / 'wvcsc_calibration' / 'config')
     prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
     pattern = re.compile(
         rf'^{re.escape(prefix)}_(\d{{8}}_\d{{6}})\.calib$')
@@ -375,7 +375,7 @@ def generate_launch_description():
                 bringup_share, 'scripts', 'preflight_check.py')),
         DeclareLaunchArgument(
             'c10_device',
-            default_value='/dev/video2'),
+            default_value='/dev/video0'),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('control_mode', default_value='pv'),

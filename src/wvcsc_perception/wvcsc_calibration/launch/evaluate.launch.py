@@ -19,7 +19,7 @@ from launch_ros.actions import Node
 
 def _latest_handeye_path(simulation=False):
     directory = (Path.home() / 'WVCSC_S2Z_UTB_ARM' / 'src' /
-                 'wvcsc_calibration' / 'config')
+                 'wvcsc_perception' / 'wvcsc_calibration' / 'config')
     prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
     pattern = re.compile(rf'^{re.escape(prefix)}_(\d{{8}}_\d{{6}})\.calib$')
     candidates = [
@@ -80,7 +80,7 @@ def generate_launch_description():
         # ── C10 camera ──────────────────────────────────────────
         DeclareLaunchArgument(
             'video_device',
-            default_value='/dev/video2'),
+            default_value='/dev/video0'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(

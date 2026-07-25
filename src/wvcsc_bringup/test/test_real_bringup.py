@@ -403,7 +403,7 @@ def test_real_mission_uses_portable_handeye_and_c10_calibration_paths():
     assert "c10_share, 'config', 'c10_intrinsics.yaml'" in source
     assert 'latest_field_route' not in source
     assert 'latest_map_yaml' in source
-    assert 'wvcsc_calibration/config/' in source
+    assert "'wvcsc_perception' / 'wvcsc_calibration' / 'config'" in source
     assert 'nozzle.example.yaml' in source
     assert '.ros/wvcsc_calibration/nozzle.yaml' not in source
 
@@ -428,25 +428,25 @@ def test_real_hardware_defaults_match_field_computer():
             'real_sensors.launch.py',
             'real_system_mission.launch.py'):
         source = _source(launch_name)
-        assert "default_value='/dev/video2'" in source
+        assert "default_value='/dev/video0'" in source
         assert "default_value='/dev/ttyACM0'" in source
     for launch_name in ('real_arm.launch.py', 'real_orchestration.launch.py'):
         source = _source(launch_name)
         assert "default_value='/dev/ttyACM0'" in source
     source = (PERCEPTION / 'wvcsc_calibration' / 'launch' /
               'real_vision_test.launch.py').read_text(encoding='utf-8')
-    assert "default_value='/dev/video2'" in source
+    assert "default_value='/dev/video0'" in source
     for launch_name in (
             'auto_handeye.launch.py', 'c10_handeye.launch.py',
             'calibrate.launch.py', 'evaluate.launch.py'):
         source = (PERCEPTION / 'wvcsc_calibration' / 'launch' /
                   launch_name).read_text(encoding='utf-8')
-        assert "default_value='/dev/video2'" in source
+        assert "default_value='/dev/video0'" in source
         assert "default_value='/dev/ttyACM0'" in source
-    assert "default_value='/dev/video2'" in (
+    assert "default_value='/dev/video0'" in (
         PERCEPTION / 'wvcsc_c10_camera' / 'launch' /
         'c10_camera.launch.py').read_text(encoding='utf-8')
-    assert 'video_device: /dev/video2' in (
+    assert 'video_device: /dev/video0' in (
         PERCEPTION / 'wvcsc_c10_camera' / 'config' /
         'c10_usb_cam.yaml').read_text(encoding='utf-8')
 

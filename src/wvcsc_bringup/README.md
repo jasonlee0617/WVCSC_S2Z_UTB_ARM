@@ -59,5 +59,5 @@ ros2 launch wvcsc_bringup real_cartographer.launch.py
 ros2 launch wvcsc_bringup real_navigation.launch.py
 ```
 
-实机默认 C10 为 `/dev/video2`，Alicia-M 串口为 `/dev/ttyACM0`；其他设备通过 launch 参数
+实机默认 C10 为 `/dev/video0`，Alicia-M 串口为 `/dev/ttyACM0`；其他设备通过 launch 参数
 显式覆盖。完整任务启动前会检查地图、标定、YOLO 环境、相机、机械臂和继电器配置。

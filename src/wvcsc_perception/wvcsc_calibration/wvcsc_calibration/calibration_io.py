@@ -23,7 +23,7 @@ def expanded_path(path):
 def calibration_config_dir():
     """Return the source-workspace calibration directory used at runtime."""
     return (Path.home() / 'WVCSC_S2Z_UTB_ARM' / 'src' /
-            'wvcsc_calibration' / 'config')
+            'wvcsc_perception' / 'wvcsc_calibration' / 'config')
 
 
 def timestamped_calibration_paths(output_dir=None, *, simulation=False,
