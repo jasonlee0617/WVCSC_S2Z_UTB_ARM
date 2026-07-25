@@ -108,10 +108,10 @@ easy_handeye2 会直接崩溃。先在终端 A 执行：
 
 ```bash
 cd "$HOME/WVCSC_S2Z_UTB_ARM"
-source /opt/ros/humble/setup.bash
-source install/setup.bash
 unset PYTHONPATH
 export PYTHONNOUSERSITE=1
+source /opt/ros/humble/setup.bash
+source install/setup.bash
 
 python3 - <<'PY'
 import numpy
@@ -132,10 +132,10 @@ ros2 launch wvcsc_calibration auto_handeye.launch.py \
 
 ```bash
 cd "$HOME/WVCSC_S2Z_UTB_ARM"
-source /opt/ros/humble/setup.bash
-source install/setup.bash
 unset PYTHONPATH
 export PYTHONNOUSERSITE=1
+source /opt/ros/humble/setup.bash
+source install/setup.bash
 
 ros2 run wvcsc_calibration auto_calibration_collector --ros-args \
   --params-file "$(ros2 pkg prefix wvcsc_calibration)/share/wvcsc_calibration/config/auto_handeye_alicia.yaml"
