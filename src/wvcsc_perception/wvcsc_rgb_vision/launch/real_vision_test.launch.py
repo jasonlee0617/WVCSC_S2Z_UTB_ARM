@@ -46,8 +46,8 @@ def generate_launch_description():
             }.items()),
 
         Node(
-            package='wvcsc_rgb_vision', executable='two_stage_yolo',
-            name='wvcsc_two_stage_yolo',
+            package='wvcsc_rgb_vision', executable='perception_pipeline',
+            name='wvcsc_perception_pipeline',
             prefix=[LaunchConfiguration('yolo_python_executable')],
             additional_env={
                 'PYTHONNOUSERSITE': '1',

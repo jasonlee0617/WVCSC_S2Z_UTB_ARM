@@ -18,6 +18,17 @@ def test_simulation_relay_remains_timer_only():
     assert 'controller_pkg' not in LAUNCH_SOURCE
 
 
+def test_simulation_keeps_segmentation_as_the_default_disease_backend():
+    config = yaml.safe_load((
+        Path(__file__).parents[2] / 'wvcsc_perception' /
+        'wvcsc_rgb_vision' / 'config' / 'vision_sim.yaml'
+    ).read_text(encoding='utf-8'))['wvcsc_perception_pipeline']['ros__parameters']
+
+    assert config['disease_model_backend'] == 'segment'
+    assert config['fruit_model_path'] == 'yolov8s_seg_sim.pt'
+    assert config['max_diseased_targets'] == 0
+
+
 def _launch_module():
     path = Path(__file__).parents[1] / 'launch' / 'system_sim.launch.py'
     spec = importlib.util.spec_from_file_location('wvcsc_system_sim_launch', path)
@@ -156,11 +167,11 @@ def test_simulation_control_stack_uses_executable_layered_rates():
         'ros2_controllers.yaml'
     ).read_text(encoding='utf-8'))
     servo_config = yaml.safe_load((
-        source_root / 'wvcsc_visual_servo' / 'config' /
+        source_root / 'wvcsc_manipulation' / 'wvcsc_visual_servo' / 'config' /
         'moveit_servo.yaml'
     ).read_text(encoding='utf-8'))
     visual_config = yaml.safe_load((
-        source_root / 'wvcsc_visual_servo' / 'config' /
+        source_root / 'wvcsc_manipulation' / 'wvcsc_visual_servo' / 'config' /
         'visual_servo.yaml'
     ).read_text(encoding='utf-8'))['wvcsc_visual_servo']['ros__parameters']
 
@@ -180,7 +191,7 @@ def test_simulation_control_stack_uses_executable_layered_rates():
 
 def test_simulation_observation_keeps_camera_above_the_vehicle_roof():
     parameters = yaml.safe_load((
-        Path(__file__).parents[2] / 'wvcsc_arm_task' / 'config' /
+        Path(__file__).parents[2] / 'wvcsc_manipulation' / 'wvcsc_arm_task' / 'config' /
         'arm_task.yaml'
     ).read_text(encoding='utf-8'))['wvcsc_spray_task']['ros__parameters']
 

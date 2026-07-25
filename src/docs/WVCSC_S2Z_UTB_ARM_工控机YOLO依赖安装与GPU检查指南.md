@@ -203,7 +203,7 @@ source "$HOME/venvs/wvcsc_yolo_ros/bin/activate"
   "typing_extensions>=4.12,<5"
 ```
 
-也可以参考 `wvcsc_rgb_vision/requirements-yolo-runtime.txt`，但如果里面的 CUDA wheel 与工控机驱动不匹配，不要强行安装该文件。先按第 5 节安装匹配的 `torch/torchvision`，再安装上面的运行依赖。
+也可以参考 `wvcsc_perception/wvcsc_rgb_vision/requirements-yolo-runtime.txt`，但如果里面的 CUDA wheel 与工控机驱动不匹配，不要强行安装该文件。先按第 5 节安装匹配的 `torch/torchvision`，再安装上面的运行依赖。
 
 验证 Ultralytics：
 
@@ -270,8 +270,8 @@ python3 -m venv --system-site-packages "$HOME/venvs/wvcsc_yolo_ros"
 将训练好的权重复制到：
 
 ```text
-~/WVCSC_S2Z_UTB_ARM/src/wvcsc_rgb_vision/models/yolov8s_real.pt
-~/WVCSC_S2Z_UTB_ARM/src/wvcsc_rgb_vision/models/yolov8s_seg_real.pt
+~/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_rgb_vision/models/yolov8s_real.pt
+~/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_rgb_vision/models/yolov8s_seg_real.pt
 ```
 
 重新构建安装：

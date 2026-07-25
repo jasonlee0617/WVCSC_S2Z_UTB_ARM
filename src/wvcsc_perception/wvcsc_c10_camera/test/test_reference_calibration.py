@@ -22,7 +22,7 @@ def test_reference_calibration_is_the_gazebo_c10_source_of_truth():
     assert 2.0 * math.atan(640.0 / (2.0 * 539.555860)) == pytest.approx(
         1.0706320326518812)
 
-    xacro = (package.parents[0] / 'wvcsc_description' / 'urdf' /
+    xacro = (package.parents[1] / 'wvcsc_description' / 'urdf' /
              'wvcsc_utb_alicia.urdf.xacro').read_text(encoding='utf-8')
     assert "xacro.load_yaml('$(find wvcsc_c10_camera)/config/c10_intrinsics.yaml')" in xacro
     assert '<intrinsics>' in xacro

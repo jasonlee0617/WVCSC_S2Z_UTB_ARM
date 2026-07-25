@@ -36,7 +36,7 @@ typing_extensions>=4.12,<5
 #   dpkg -l | grep -E "python3-opencv|python3-numpy|python3-scipy|python3-yaml"
 #
 # ── C10 手眼标定 (wvcsc_calibration) 系统级依赖 ──
-#   # 本工作区使用 easy_handeye2 + ros2_aruco（位于 third_party/）
+#   # 本工作区使用 easy_handeye2 + ros2_aruco（位于 wvcsc_perception/）
 #   # 工控机需确保以下 ROS2 包已安装：
 #   apt list --installed 2>/dev/null | grep -E "easy-handeye2|ros2-aruco"
 #   # 系统 Python 依赖（通过 --system-site-packages 在 venv 中可用）：

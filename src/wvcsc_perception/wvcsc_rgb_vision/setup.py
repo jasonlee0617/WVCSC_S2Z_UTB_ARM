@@ -25,6 +25,6 @@ setup(
     description='RGB disease perception for WVCSC.',
     license='Apache-2.0',
     entry_points={'console_scripts': [
-        'two_stage_yolo = wvcsc_rgb_vision.two_stage_yolo:main',
+        'perception_pipeline = wvcsc_rgb_vision.perception_pipeline:main',
     ]},
 )

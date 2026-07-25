@@ -1,13 +1,13 @@
-# two_stage_yolo.py
+# perception_pipeline.py
 """
-C10 两阶段 YOLO 感知、病果跟踪与视觉伺服目标发布节点。
+C10 感知流水线、病叶跟踪与视觉伺服目标发布节点。
 
 图像数据流如下：
 1. 全图 YOLO 树木检测 (`tree` 模式) -> 获得 Bounding Box。
-2. 在树木 Box 基础上按 ROI 扩边 -> 进行 YOLO 果实实例分割 (`fruits`/`target` 模式)。
+2. 在树木 Box 基础上按 ROI 扩边 -> 进行病态目标分割或检测 (`fruits`/`target` 模式)。
 3. 对分割掩膜进行 Duplicate 去除、跨帧 ID 关联 (`assign_track_ids`)。
-4. 机械臂通过 `/vision/selected_target_id` 锁定病果 ID 后，持续计算掩膜的“安全喷洒点”
-   (`aim_u/v`) 并发布给视觉伺服节点。
+4. 机械臂通过 `/vision/selected_target_id` 锁定病态目标 ID 后，发布控制点给视觉伺服：
+   分割使用掩膜安全点，检测使用框中心。
 
 重要工程概念：
 - 使用 `safe aim point` 代替检测框中心：通过 `cv2.distanceTransform` 计算掩膜内部
@@ -21,8 +21,6 @@ C10 两阶段 YOLO 感知、病果跟踪与视觉伺服目标发布节点。
 from dataclasses import dataclass, replace
 import json
 import math
-from pathlib import Path
-import sys
 import time
 
 import cv2
@@ -36,83 +34,18 @@ from std_msgs.msg import String
 from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 from wvcsc_interfaces.msg import MissionStatus, Target2D
 
-from .model_utils import (
-    DISEASED_TARGET_CLASS_ALIASES,
-    DISEASED_TARGET_CLASS_NAMES,
-    canonical_class_name,
-    resolve_yolo_model_path,
-    validate_yolo_model,
+from .disease_detector import DiseaseDetector
+from .disease_segmenter import DiseaseSegmenter
+from .disease_target_backend import DiseaseTargetBackend
+from .model_utils import DISEASED_TARGET_CLASS_ALIASES
+from .perception_types import (
+    Instance,
+    Track,
+    deduplicate_instances,
+    expanded_roi,
+    safest_mask_point,
 )
-
-# ============================================================================
-# 第一部分：感知数据类定义与几何运算
-# ============================================================================
-
-
-@dataclass(frozen=True)
-class Instance:
-    """
-    感知实例：一帧图像中检测到的树或果实。
-
-    注意：`aim_u` 和 `aim_v` 是分割掩膜的“安全瞄准点”，而不是检测框的中心点。
-    通过 `cv2.distanceTransform` 计算掩膜内部距离边界最远的点，确保伺服瞄准的是
-    果实的最核心区域，而非边缘。
-    """
-    target_id: str          # 感知层内部分配的跟踪 ID (如 target-1)
-    class_name: str         # 类别名称 (tree / diseased_target)
-    confidence: float       # YOLO 推理置信度
-    left: float             # 检测框左边界
-    top: float              # 检测框上边界
-    right: float            # 检测框右边界
-    bottom: float           # 检测框下边界
-    aim_u: float            # 安全瞄准点的图像 U 坐标 (列)
-    aim_v: float            # 安全瞄准点的图像 V 坐标 (行)
-
-    def __post_init__(self):
-        """Normalize native model labels at the perception data boundary."""
-        object.__setattr__(
-            self,
-            'class_name',
-            DISEASED_TARGET_CLASS_ALIASES.get(
-                str(self.class_name), str(self.class_name)),
-        )
-
-    @property
-    def center_u(self):
-        return (self.left + self.right) / 2.0
-
-    @property
-    def center_v(self):
-        return (self.top + self.bottom) / 2.0
-
-    @property
-    def width(self):
-        return self.right - self.left
-
-    @property
-    def height(self):
-        return self.bottom - self.top
-
-    def iou(self, other):
-        """计算两个检测框的交并比 (IoU)。"""
-        left, top = max(self.left, other.left), max(self.top, other.top)
-        right, bottom = min(self.right, other.right), min(self.bottom, other.bottom)
-        intersection = max(0.0, right - left) * max(0.0, bottom - top)
-        union = self.width * self.height + other.width * other.height - intersection
-        return 0.0 if union <= 0.0 else intersection / union
-
-    def distance_to(self, other):
-        """计算两个实例检测框中心的像素欧氏距离。"""
-        return math.hypot(self.center_u - other.center_u,
-                          self.center_v - other.center_v)
-
-
-@dataclass
-class Track:
-    """短期跨帧轨迹：记录某个实例在连续帧中的状态。"""
-    instance: Instance    # 当前帧的实例快照
-    missed_frames: int = 0  # 连续漏检的帧数（用于触发模板匹配兜底）
-
+from .tree_detector import TreeDetector
 
 @dataclass(frozen=True)
 class TargetTemplate:
@@ -222,52 +155,6 @@ def match_target_template(
         patch_left + template.aim_u,
         patch_top + template.aim_v,
     )
-
-
-def deduplicate_instances(
-        instances, iou_threshold=0.35, center_distance_px=10.0):
-    """
-    消除单类果实分割中的重复实例。
-
-    由于 YOLOv8-seg 在多果实重叠时可能将同一个果实识别为不同的 ID，
-    因此使用 IoU 或中心距离进行并查集 (Union-Find) 去重。
-    """
-    instances = list(instances)
-    parents = list(range(len(instances)))
-
-    def root(index):
-        while parents[index] != index:
-            parents[index] = parents[parents[index]]
-            index = parents[index]
-        return index
-
-    def join(left, right):
-        left_root, right_root = root(left), root(right)
-        if left_root != right_root:
-            parents[right_root] = left_root
-
-    for left in range(len(instances)):
-        for right in range(left + 1, len(instances)):
-            if (instances[left].iou(instances[right]) >= iou_threshold or
-                    instances[left].distance_to(instances[right]) <=
-                    center_distance_px):
-                join(left, right)
-
-    groups = {}
-    for index, instance in enumerate(instances):
-        groups.setdefault(root(index), []).append(instance)
-
-    kept = []
-    for group in groups.values():
-        ranked = sorted(
-            group,
-            key=lambda item: (
-                -item.confidence, item.class_name, item.left, item.top))
-        kept.append(ranked[0])
-    return sorted(
-        kept,
-        key=lambda item: (
-            -item.confidence, item.class_name, item.left, item.top))
 
 
 def track_matches(instances, tracks, iou_threshold, center_distance_px):
@@ -398,53 +285,17 @@ def perception_debug_due(last_time, now, rate_hz):
             1.0 / max(float(rate_hz), 1e-6) - 1e-9)
 
 
-def expanded_roi(left, top, right, bottom, image_width, image_height, padding):
-    """按比例扩展检测框的 ROI，并在图像边界进行裁剪。"""
-    width, height = right - left, bottom - top
-    pad_x, pad_y = width * padding, height * padding
-    return (
-        max(0, int(math.floor(left - pad_x))),
-        max(0, int(math.floor(top - pad_y))),
-        min(int(image_width), int(math.ceil(right + pad_x))),
-        min(int(image_height), int(math.ceil(bottom + pad_y))),
-    )
-
-
-def safest_mask_point(points, width, height):
-    """
-    【核心算法】返回掩膜内部距离边界最远的“安全瞄准点”。
-
-    - 使用 `cv2.distanceTransform` 计算掩膜内部像素到最近轮廓边界的距离。
-    - 取出距离最大值 `maximum`。
-    - 选取距离大于 `0.80 * maximum` 的所有像素作为“安全核心区”。
-    - 计算安全核心区的质心，并寻找距离质心最近的真实核心像素点。
-    
-    该点拥有充足的边界余量，且不会在相邻像素间跳变，极大提升了视觉伺服的稳定性。
-    """
-    mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.fillPoly(mask, [np.asarray(points, dtype=np.int32)], 255)
-    distance = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-    maximum = float(distance.max())
-    if maximum <= 0.0:
-        raise ValueError('fruit mask has no interior pixel')
-    core = np.argwhere(distance >= 0.80 * maximum)
-    centroid = core.mean(axis=0)
-    index = int(np.argmin(np.sum((core - centroid) ** 2, axis=1)))
-    row, column = core[index]
-    return float(column), float(row)
-
-
 # ============================================================================
-# 第四部分：ROS2 两阶段感知节点主体
+# 感知流水线 ROS 节点主体
 # ============================================================================
 
-class TwoStageYolo(Node):
+class PerceptionPipeline(Node):
     """
     根据任务阶段切换推理负载，并维持单个选中病果的逻辑身份。
     """
 
     def __init__(self):
-        super().__init__('wvcsc_two_stage_yolo')
+        super().__init__('wvcsc_perception_pipeline')
         self._declare_parameters()
         self._standalone_mode = bool(
             self.get_parameter('standalone_mode').value)
@@ -453,15 +304,14 @@ class TwoStageYolo(Node):
             str(self.get_parameter('tree_class_name').value).strip()}
         self._target_class_name = str(
             self.get_parameter('target_class_name').value).strip()
-        self._target_class_names = {
-            int(self.get_parameter('target_class_id').value):
-            self._target_class_name}
+        self._target_class_id = int(
+            self.get_parameter('target_class_id').value)
         self._target_id_prefix = str(
             self.get_parameter('target_id_prefix').value).strip()
         self._max_diseased_targets = int(
             self.get_parameter('max_diseased_targets').value)
         if (not self._target_class_name or not self._target_id_prefix or
-                min(self._tree_class_names) < 0 or min(self._target_class_names) < 0 or
+                min(self._tree_class_names) < 0 or self._target_class_id < 0 or
                 self._max_diseased_targets < 0):
             raise ValueError('YOLO class names/prefix must be non-empty and IDs non-negative')
         self._bridge = CvBridge()
@@ -477,7 +327,25 @@ class TwoStageYolo(Node):
         self._last_perception_debug_time = None
         self._last_perception_debug_state = None
         self._last_target_state = None
-        self._tree_model, self._fruit_model = self._load_models()
+        strict_model_classes = bool(
+            self.get_parameter('strict_model_classes').value)
+        self._tree_detector = TreeDetector(
+            self.get_parameter('tree_model_path').value,
+            self._tree_class_names,
+            strict_model_classes=strict_model_classes)
+        self._disease_model_backend = str(
+            self.get_parameter('disease_model_backend').value).strip().lower()
+        if self._disease_model_backend not in {'segment', 'detect'}:
+            raise ValueError(
+                'disease_model_backend must be "segment" or "detect"')
+        disease_backend_type = (
+            DiseaseSegmenter if self._disease_model_backend == 'segment'
+            else DiseaseDetector)
+        self._disease_backend: DiseaseTargetBackend = disease_backend_type(
+            self.get_parameter('fruit_model_path').value,
+            self._target_class_id,
+            self._configured_target_name,
+            strict_model_classes=strict_model_classes)
         latched = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -514,6 +382,7 @@ class TwoStageYolo(Node):
             f'[YOLO][READY] standalone={self._standalone_mode} '
             f'mode={self._inference_mode} '
             f'tree_model={self.get_parameter("tree_model_path").value} '
+            f'diseased_target_backend={self._disease_model_backend} '
             f'diseased_target_model={self.get_parameter("fruit_model_path").value}')
 
     @property
@@ -522,18 +391,6 @@ class TwoStageYolo(Node):
         configured = str(getattr(
             self, '_target_class_name', 'diseased_target')).strip()
         return DISEASED_TARGET_CLASS_ALIASES.get(configured, configured)
-
-    @property
-    def _configured_target_names(self):
-        """Return the class-id contract used by the segmentation model."""
-        configured = getattr(self, '_target_class_names', None)
-        if configured is None:
-            return {0: self._configured_target_name}
-        return {
-            int(class_id): DISEASED_TARGET_CLASS_ALIASES.get(
-                str(class_name).strip(), str(class_name).strip())
-            for class_id, class_name in configured.items()
-        }
 
     @property
     def _configured_target_prefix(self):
@@ -558,6 +415,7 @@ class TwoStageYolo(Node):
             'perception_debug_rate_hz': 5.0,
             'tree_model_path': 'yolov8s_sim.pt',
             'fruit_model_path': 'yolov8s_seg_sim.pt',
+            'disease_model_backend': 'segment',
             'tree_class_id': 0,
             'tree_class_name': 'tree',
             'target_class_id': 0,
@@ -592,32 +450,6 @@ class TwoStageYolo(Node):
         }
         for name, default in values.items():
             self.declare_parameter(name, default)
-
-    def _load_models(self):
-        """加载并校验两个 YOLO 模型权重 (检测 + 分割)。"""
-        try:
-            from ultralytics import YOLO
-        except ImportError as error:
-            raise RuntimeError(
-                f'YOLO runtime import failed with {sys.executable}: {error}. '
-                'Set yolo_python_executable to the isolated WVCSC YOLO environment.'
-            ) from error
-        tree_path = resolve_yolo_model_path(
-            self.get_parameter('tree_model_path').value)
-        fruit_path = resolve_yolo_model_path(
-            self.get_parameter('fruit_model_path').value)
-        missing = [path for path in (tree_path, fruit_path) if not Path(path).is_file()]
-        if missing:
-            raise FileNotFoundError(f'YOLO weight files are missing: {missing}')
-        tree_model = YOLO(tree_path)
-        fruit_model = YOLO(fruit_path)
-        strict = bool(self.get_parameter('strict_model_classes').value)
-        validate_yolo_model(
-            tree_model, 'detect', self._tree_class_names, exact_names=strict)
-        validate_yolo_model(
-            fruit_model, 'segment', DISEASED_TARGET_CLASS_NAMES,
-            exact_names=strict)
-        return tree_model, fruit_model
 
     def _on_status(self, message):
         """监听任务状态，当任务切换时重置所有视觉跟踪状态。"""
@@ -707,9 +539,8 @@ class TwoStageYolo(Node):
         
         当 `_locked_tree` 存在时，强制通过 IoU 关联锁定同一棵树，防止相机移动时跳跃。
         """
-        result = self._tree_model(
-            image, verbose=False, conf=float(self.get_parameter('tree_confidence').value))[0]
-        instances = self._box_instances(result, self._tree_class_names)
+        instances = self._tree_detector.detect(
+            image, self.get_parameter('tree_confidence').value)
         if not instances:
             return None
         height, width = image.shape[:2]
@@ -728,63 +559,28 @@ class TwoStageYolo(Node):
         return preferred
 
     def _fruit_instances(self, image, tree):
-        """在树检测框扩边 ROI 内进行果实实例分割。"""
+        """Run the configured disease backend, then restore full-image coordinates."""
         height, width = image.shape[:2]
         x0, y0, x1, y1 = expanded_roi(
             tree.left, tree.top, tree.right, tree.bottom, width, height,
             float(self.get_parameter('roi_padding').value))
         if x1 <= x0 or y1 <= y0:
             return []
-        result = self._fruit_model(
-            image[y0:y1, x0:x1], verbose=False,
-            conf=float(self.get_parameter('fruit_confidence').value),
-            iou=0.45)[0]
-        return deduplicate_instances(
-            self._seg_instances(result, x0, y0, self._configured_target_names))
-
-    @staticmethod
-    def _box_instances(result, class_names):
-        """将 YOLO 检测结果 (Boxes) 转换为 Instance 对象。"""
-        if result.boxes is None:
-            return []
+        candidates = self._disease_backend.detect(
+            image[y0:y1, x0:x1],
+            self.get_parameter('fruit_confidence').value)
         instances = []
-        names = result.names
-        for box in result.boxes:
-            class_name = canonical_class_name(int(box.cls[0]), names)
-            if class_name not in class_names.values():
-                continue
-            left, top, right, bottom = [float(value) for value in box.xyxy[0].tolist()]
+        for candidate in candidates:
+            control_u = (candidate.center_u if candidate.control_u is None
+                         else candidate.control_u)
+            control_v = (candidate.center_v if candidate.control_v is None
+                         else candidate.control_v)
             instances.append(Instance(
-                '', class_name, float(box.conf[0]), left, top, right, bottom,
-                (left + right) / 2.0, (top + bottom) / 2.0))
-        return instances
-
-    @staticmethod
-    def _seg_instances(result, offset_x, offset_y, class_names):
-        """
-        将 YOLO 分割结果 (Masks) 转换为具有安全瞄准点 (`aim_u/v`) 的 Instance 对象。
-        """
-        if result.boxes is None or result.masks is None:
-            return []
-        instances = []
-        names = result.names
-        for index, box in enumerate(result.boxes):
-            class_name = canonical_class_name(int(box.cls[0]), names)
-            if class_name not in class_names.values() or index >= len(result.masks.xy):
-                continue
-            polygon = np.asarray(result.masks.xy[index], dtype=np.float32)
-            if len(polygon) < 3:
-                continue
-            local_width = max(1, int(math.ceil(polygon[:, 0].max())) + 1)
-            local_height = max(1, int(math.ceil(polygon[:, 1].max())) + 1)
-            # 核心算法调用：将掩膜转换为果实内部的稳定瞄准点
-            aim_u, aim_v = safest_mask_point(polygon, local_width, local_height)
-            left, top, right, bottom = [float(value) for value in box.xyxy[0].tolist()]
-            instances.append(Instance(
-                '', class_name, float(box.conf[0]),
-                left + offset_x, top + offset_y, right + offset_x, bottom + offset_y,
-                aim_u + offset_x, aim_v + offset_y))
-        return instances
+                '', candidate.class_name, candidate.confidence,
+                candidate.left + x0, candidate.top + y0,
+                candidate.right + x0, candidate.bottom + y0,
+                control_u + x0, control_v + y0))
+        return deduplicate_instances(instances)
 
     def _assign_track_ids(self, instances):
         """
@@ -832,7 +628,7 @@ class TwoStageYolo(Node):
         """将 Instance 列表转换为 Detection2DArray ROS 消息。"""
         array = Detection2DArray()
         array.header = image.header
-        array.detections = [TwoStageYolo._detection(image.header, item) for item in instances]
+        array.detections = [PerceptionPipeline._detection(image.header, item) for item in instances]
         return array
 
     @staticmethod
@@ -1110,7 +906,7 @@ class TwoStageYolo(Node):
             cv2.rectangle(annotated, (left, top),
                           (round(instance.right), round(instance.bottom)),
                           color, thickness)
-            cv2.putText(annotated, TwoStageYolo._label(instance),
+            cv2.putText(annotated, PerceptionPipeline._label(instance),
                         (left, max(16, top - 5)), cv2.FONT_HERSHEY_SIMPLEX,
                         0.45, color, 1, cv2.LINE_AA)
             if (draw_diseased_aim_point and
@@ -1140,7 +936,7 @@ class TwoStageYolo(Node):
 
 def main():
     rclpy.init()
-    node = TwoStageYolo()
+    node = PerceptionPipeline()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

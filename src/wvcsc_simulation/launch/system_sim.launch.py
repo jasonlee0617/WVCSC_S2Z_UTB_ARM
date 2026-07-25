@@ -588,7 +588,7 @@ def generate_launch_description():
         ])), output='screen',
     )
     yolo_vision = Node(
-        package='wvcsc_rgb_vision', executable='two_stage_yolo',
+        package='wvcsc_rgb_vision', executable='perception_pipeline',
         prefix=[yolo_python_executable],  # 指定独立的 Python 虚拟环境解释器
         additional_env={
             'PYTHONNOUSERSITE': '1',

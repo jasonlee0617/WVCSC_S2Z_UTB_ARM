@@ -132,7 +132,7 @@ def _launch(context, *, launch_dir):
             }.items(),
         ),
         Node(
-            package='wvcsc_rgb_vision', executable='two_stage_yolo',
+            package='wvcsc_rgb_vision', executable='perception_pipeline',
             prefix=[LaunchConfiguration('yolo_python_executable')],
             additional_env={
                 'PYTHONNOUSERSITE': '1',

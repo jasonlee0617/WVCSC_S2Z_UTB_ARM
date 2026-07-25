@@ -14,6 +14,7 @@ import yaml
 
 PACKAGE = Path(__file__).resolve().parents[1]
 LAUNCH = PACKAGE / 'launch'
+PERCEPTION = PACKAGE.parent / 'wvcsc_perception'
 
 
 def _source(name):
@@ -107,11 +108,11 @@ def test_real_system_rviz_processes_have_separate_explicit_controls_and_names():
 
 def test_real_orchestration_uses_the_qt_mission_manager_only():
     source = _source('real_orchestration.launch.py')
-    vision_path = (PACKAGE.parent / 'wvcsc_rgb_vision' / 'config' /
+    vision_path = (PERCEPTION / 'wvcsc_rgb_vision' / 'config' /
                    'vision_real.yaml')
     vision = vision_path.read_text(encoding='utf-8')
     vision_parameters = yaml.safe_load(vision)[
-        'wvcsc_two_stage_yolo']['ros__parameters']
+        'wvcsc_perception_pipeline']['ros__parameters']
 
     assert "package='wvcsc_mission_manager', executable='mission_manager'" in source
     assert "executable='field_route_manager.py'" not in source
@@ -125,6 +126,7 @@ def test_real_orchestration_uses_the_qt_mission_manager_only():
     assert 'vision_real.yaml' in source
     assert 'yolov8s_real.pt' in vision
     assert 'yolov8s_seg_real.pt' in vision
+    assert vision_parameters['disease_model_backend'] == 'segment'
     assert 'target_class_name: diseased_target' in vision
     assert 'target_id_prefix: target' in vision
     assert 'strict_model_classes: true' in vision
@@ -161,7 +163,7 @@ def test_vehicle_relay_qt_test_uses_real_navigation_and_fake_arm_only():
     assert "'arm_base_yaw_rad': math.pi" in source
     assert 'mission_file' not in source
     for forbidden in (
-            'real_arm.launch.py', 'spray_task', 'two_stage_yolo',
+            'real_arm.launch.py', 'spray_task', 'perception_pipeline',
             'c10_camera.launch.py', 'visual_servo'):
         assert forbidden not in source
     assert "'/arm/execute_spray'" in fake
@@ -246,12 +248,12 @@ def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
         source = _source(launch_name)
         assert "os.path.join(real_config, 'arm_task_real.yaml')" in source
 
-    simulation_config = (PACKAGE.parent / 'wvcsc_arm_task' / 'config' /
+    simulation_config = (PACKAGE.parent / 'wvcsc_manipulation' / 'wvcsc_arm_task' / 'config' /
                          'arm_task.yaml').read_text(encoding='utf-8')
     assert 'joint_preset_center_deg' not in simulation_config
     assert 'spray_on_alignment_failure' not in simulation_config
     assert 'max_targets_per_tree: 0' in simulation_config
-    task_source = (PACKAGE.parent / 'wvcsc_arm_task' / 'wvcsc_arm_task' /
+    task_source = (PACKAGE.parent / 'wvcsc_manipulation' / 'wvcsc_arm_task' / 'wvcsc_arm_task' /
                    'spray_task.py').read_text(encoding='utf-8')
     assert "'spray_on_alignment_failure': False" in task_source
     assert 'SINGLE_SHOT_OPEN_LOOP_ALIGN' not in task_source
@@ -289,10 +291,10 @@ def test_real_sensor_stack_has_one_unified_robot_state_publisher():
 def test_real_lidar_publishes_one_direct_scan_for_amcl_and_nav2():
     real_sensors = _source('real_sensors.launch.py')
     vehicle_launch = (
-        PACKAGE.parent / 'wtb_car_driver' / 'launch' /
+        PACKAGE.parent / 'wvcsc_vehicle' / 'wtb_car_driver' / 'launch' /
         'start_wtb_car_fdimu.launch.py').read_text(encoding='utf-8')
     lidar_driver = (
-        PACKAGE.parent / 'lidar_ros2' / 'lslidar_ros' / 'lslidar_driver' /
+        PACKAGE.parent / 'wvcsc_vehicle' / 'lidar_ros2' / 'lslidar_ros' / 'lslidar_driver' /
         'src' / 'lslidar_driver.cpp').read_text(encoding='utf-8')
 
     for source in (real_sensors, vehicle_launch):
@@ -322,7 +324,7 @@ def test_real_sensor_stack_uses_yesense_and_keeps_fdilink_only_for_rollback():
             for line in source.splitlines())
 
     vehicle_source = (
-        PACKAGE.parent / 'wtb_car_driver' / 'launch' /
+        PACKAGE.parent / 'wvcsc_vehicle' / 'wtb_car_driver' / 'launch' /
         'start_wtb_car_fdimu.launch.py').read_text(encoding='utf-8')
     assert 'yesense_std_ros2' in vehicle_source
     assert 'yesense_node.launch.py' in vehicle_source
@@ -338,16 +340,16 @@ def test_packaged_map_directory_exists():
 def test_bringup_rviz_configs_copy_the_field_validated_configs():
     rviz_dir = PACKAGE / 'rviz'
     assert (rviz_dir / 'real_navigation.rviz').read_bytes() == (
-        PACKAGE.parent / 'my_navigation2' / 'rviz' /
+        PACKAGE.parent / 'wvcsc_navigation' / 'my_navigation2' / 'rviz' /
         'nav2_default_view2.rviz').read_bytes()
     assert (rviz_dir / 'real_cartographer.rviz').read_bytes() == (
-        PACKAGE.parent / 'my_cartographer' / 'rviz' /
+        PACKAGE.parent / 'wvcsc_navigation' / 'my_cartographer' / 'rviz' /
         'my_cartographer.rviz').read_bytes()
 
 
 def test_handeye_session_enables_standalone_robot_tf():
     arm = _source('real_arm.launch.py')
-    handeye = (PACKAGE.parent / 'wvcsc_calibration' / 'launch' /
+    handeye = (PERCEPTION / 'wvcsc_calibration' / 'launch' /
                'c10_handeye.launch.py').read_text(encoding='utf-8')
 
     assert "'publish_robot_state', default_value='false'" in arm
@@ -361,7 +363,7 @@ def test_handeye_session_enables_standalone_robot_tf():
     assert 'wtb_car_driver' not in handeye
     assert 'package://wvcsc_c10_camera/config/c10_intrinsics.yaml' in handeye
 
-    collector = (PACKAGE.parent / 'wvcsc_calibration' /
+    collector = (PERCEPTION / 'wvcsc_calibration' /
                  'wvcsc_calibration' /
                  'auto_calibration_collector.py').read_text(encoding='utf-8')
     assert "RemoveSample.Request(sample_index=count - 1)" in collector
@@ -373,7 +375,7 @@ def test_handeye_session_enables_standalone_robot_tf():
 def test_arm_only_bringup_does_not_require_unpublished_wheel_states():
     arm = _source('real_arm.launch.py')
     spray = _source('real_arm_spray_test.launch.py')
-    car_xacro = (PACKAGE.parent / 'wtb_car_driver' / 'urdf' /
+    car_xacro = (PACKAGE.parent / 'wvcsc_vehicle' / 'wtb_car_driver' / 'urdf' /
                  'wtb_car.xacro').read_text(encoding='utf-8')
 
     assert "DeclareLaunchArgument('enable_ackermann', default_value='false')" in arm
@@ -383,7 +385,7 @@ def test_arm_only_bringup_does_not_require_unpublished_wheel_states():
 
 
 def test_vehicle_mapping_launch_declares_and_passes_ackermann_switch():
-    vehicle_launch = (PACKAGE.parent / 'wtb_car_driver' / 'launch' /
+    vehicle_launch = (PACKAGE.parent / 'wvcsc_vehicle' / 'wtb_car_driver' / 'launch' /
                       'start_wtb_car_fdimu.launch.py').read_text(encoding='utf-8')
     cartographer = _source('real_cartographer.launch.py')
     assert "LaunchConfiguration('enable_ackermann')" in vehicle_launch
@@ -431,26 +433,26 @@ def test_real_hardware_defaults_match_field_computer():
     for launch_name in ('real_arm.launch.py', 'real_orchestration.launch.py'):
         source = _source(launch_name)
         assert "default_value='/dev/ttyACM0'" in source
-    source = (PACKAGE.parent / 'wvcsc_calibration' / 'launch' /
+    source = (PERCEPTION / 'wvcsc_calibration' / 'launch' /
               'real_vision_test.launch.py').read_text(encoding='utf-8')
     assert "default_value='/dev/video2'" in source
     for launch_name in (
             'auto_handeye.launch.py', 'c10_handeye.launch.py',
             'calibrate.launch.py', 'evaluate.launch.py'):
-        source = (PACKAGE.parent / 'wvcsc_calibration' / 'launch' /
+        source = (PERCEPTION / 'wvcsc_calibration' / 'launch' /
                   launch_name).read_text(encoding='utf-8')
         assert "default_value='/dev/video2'" in source
         assert "default_value='/dev/ttyACM0'" in source
     assert "default_value='/dev/video2'" in (
-        PACKAGE.parent / 'wvcsc_c10_camera' / 'launch' /
+        PERCEPTION / 'wvcsc_c10_camera' / 'launch' /
         'c10_camera.launch.py').read_text(encoding='utf-8')
     assert 'video_device: /dev/video2' in (
-        PACKAGE.parent / 'wvcsc_c10_camera' / 'config' /
+        PERCEPTION / 'wvcsc_c10_camera' / 'config' /
         'c10_usb_cam.yaml').read_text(encoding='utf-8')
 
 
 def test_tool0_coincident_nozzle_example_is_valid():
-    data = yaml.safe_load((PACKAGE.parent / 'wvcsc_calibration' / 'config' /
+    data = yaml.safe_load((PERCEPTION / 'wvcsc_calibration' / 'config' /
                            'nozzle.example.yaml').read_text(encoding='utf-8'))
     assert data['parent_frame'] == 'tool0'
     assert data['child_frame'] == 'spray_nozzle_link'

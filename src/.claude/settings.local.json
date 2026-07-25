@@ -49,7 +49,10 @@
       "Bash(killall -9 -r \"wine|wineserver\")",
       "Bash(rm -rf /home/robot/.wine-wecom-new /home/robot/.wine-test)",
       "Bash(WINEARCH=win32 WINEPREFIX=/home/robot/.wine-wecom-new /run/wine/usr/bin/wine wineboot -u)",
-      "Bash(chmod +x /home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/scripts/nav_validate_sites.py)"
+      "Bash(chmod +x /home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_bringup/scripts/nav_validate_sites.py)",
+      "Bash(git mv *)",
+      "Bash(rm -rf build/easy_handeye2_msgs build/ros2_aruco_interfaces build/ros2_aruco build/easy_handeye2 install/easy_handeye2_msgs install/ros2_aruco_interfaces install/ros2_aruco install/easy_handeye2)",
+      "Bash(colcon build *)"
     ],
     "additionalDirectories": [
       "/home/robot/WVCSC_S2Z_UTB_ARM/src/wvcsc_autoware_bringup"

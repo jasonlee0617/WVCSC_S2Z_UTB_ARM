@@ -15,6 +15,7 @@ from wvcsc_calibration.alicia_sample_geometry import (
 
 
 ROOT = Path(__file__).parents[1]
+PERCEPTION_ROOT = ROOT.parent / 'wvcsc_perception'
 LAUNCH_PATH = ROOT / 'launch' / 'calibration_sim.launch.py'
 LAUNCH_SOURCE = LAUNCH_PATH.read_text(encoding='utf-8')
 
@@ -106,12 +107,12 @@ def test_coverage_marker_keeps_at_least_fourteen_fixed_poses_in_strict_c10_view(
         chain.append(joint)
         link = joint.find('parent').attrib['link']
 
-    config = yaml.safe_load((Path(__file__).parents[2] /
+    config = yaml.safe_load((PERCEPTION_ROOT /
                              'wvcsc_calibration/config/' /
                              'auto_handeye_alicia_sim.yaml').read_text(
                                  encoding='utf-8'))[
         'auto_calibration_collector']['ros__parameters']
-    intrinsics = yaml.safe_load((description_root.parent / 'wvcsc_c10_camera' /
+    intrinsics = yaml.safe_load((PERCEPTION_ROOT / 'wvcsc_c10_camera' /
                                  'config' / 'c10_intrinsics.yaml').read_text(
                                      encoding='utf-8'))
     fx, fy, cx, cy = (
@@ -179,7 +180,7 @@ def test_failed_controller_spawner_stops_the_calibration_launch():
 
 
 def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
-    config = yaml.safe_load((Path(__file__).parents[2] /
+    config = yaml.safe_load((PERCEPTION_ROOT /
                              'wvcsc_calibration/config/' /
                              'auto_handeye_alicia_sim.yaml').read_text(
                                  encoding='utf-8'))[

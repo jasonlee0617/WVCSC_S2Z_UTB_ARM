@@ -391,7 +391,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'nozzle_calibration',
             default_value=os.path.expanduser(
-                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config/'
+                '~/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_calibration/config/'
                 'nozzle.example.yaml')),
         DeclareLaunchArgument(
             'relay_config_file',

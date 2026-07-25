@@ -4,7 +4,7 @@ auto_calibration_collector:
     # CI/无交互仿真回归时没有可输入 s 的终端；仍调用与手动模式完全相同的
     # 采集状态机。实机配置未设置该参数，默认必须人工按 s/Enter 启动。
     auto_start: true
-    calibration_output_dir: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config
+    calibration_output_dir: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_calibration/config
     calibration_file_prefix: c10_handeye_sim
     calibration_simulation: true
     velocity_scaling: 0.20

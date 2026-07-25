@@ -11,11 +11,13 @@ from wvcsc_rgb_vision.model_utils import (
     canonical_class_name,
     validate_yolo_model,
 )
-from wvcsc_rgb_vision.two_stage_yolo import (
+from wvcsc_rgb_vision.disease_segmenter import DiseaseSegmenter
+from wvcsc_rgb_vision.disease_detector import DiseaseDetector
+from wvcsc_rgb_vision.perception_pipeline import (
     PERCEPTION_DEBUG_DEFAULTS,
     Instance,
     Track,
-    TwoStageYolo,
+    PerceptionPipeline,
     capture_target_template,
     deduplicate_instances,
     expanded_roi,
@@ -25,6 +27,8 @@ from wvcsc_rgb_vision.two_stage_yolo import (
     track_matches,
     safest_mask_point,
 )
+from wvcsc_rgb_vision.perception_types import DiseaseTarget
+from wvcsc_rgb_vision.tree_detector import TreeDetector
 
 
 def test_two_models_keep_independent_class_contracts():
@@ -66,6 +70,17 @@ def test_real_deployment_rejects_additional_model_classes():
             exact_names=True)
 
 
+def test_detect_experiment_accepts_a_configured_disease_class_in_a_multiclass_model():
+    model = type('Model', (), {
+        'task': 'detect',
+        'names': {0: 'healthy_leaf', 2: 'disease_leaf'},
+    })()
+
+    validate_yolo_model(model, 'detect', {2: 'diseased_target'})
+    with pytest.raises(ValueError, match='contract mismatch'):
+        validate_yolo_model(model, 'detect', {1: 'diseased_target'})
+
+
 def test_native_real_and_sim_names_map_to_shared_target_name():
     assert canonical_class_name(0, {0: 'diseased_fruit'}) == 'diseased_target'
     assert canonical_class_name(0, {0: 'disease_leaf'}) == 'diseased_target'
@@ -75,7 +90,7 @@ def test_detection_message_exposes_only_shared_target_class():
     instance = Instance(
         'target-1', 'disease_leaf', 0.8,
         10.0, 20.0, 30.0, 40.0, 20.0, 30.0)
-    detection = TwoStageYolo._detection(Header(), instance)
+    detection = PerceptionPipeline._detection(Header(), instance)
     assert detection.results[0].hypothesis.class_id == 'diseased_target'
 
 
@@ -87,7 +102,7 @@ def test_mission_status_activates_and_clears_task_vision_identity():
         def info(self, message):
             self.messages.append(message)
 
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._standalone_mode = False
     node._mission_id = ''
     node._tree_id = ''
@@ -99,7 +114,7 @@ def test_mission_status_activates_and_clears_task_vision_identity():
     node._reset_tracking = lambda: reset_calls.append(True)
     node.get_logger = lambda: logger
 
-    TwoStageYolo._on_status(node, SimpleNamespace(
+    PerceptionPipeline._on_status(node, SimpleNamespace(
         state=MissionStatus.ARM_SPRAYING,
         mission_id='corn_field_five_point_001', current_tree_id='corn_01'))
     assert (node._mission_id, node._tree_id) == (
@@ -108,7 +123,7 @@ def test_mission_status_activates_and_clears_task_vision_identity():
     assert logger.messages == [
         '[YOLO][MISSION] active=True mission=corn_field_five_point_001 tree=corn_01']
 
-    TwoStageYolo._on_status(node, SimpleNamespace(
+    PerceptionPipeline._on_status(node, SimpleNamespace(
         state=MissionStatus.NAVIGATING,
         mission_id='corn_field_five_point_001', current_tree_id=''))
     assert (node._mission_id, node._tree_id) == ('', '')
@@ -118,7 +133,7 @@ def test_mission_status_activates_and_clears_task_vision_identity():
 
 
 def test_fruit_tracks_survive_a_short_detector_dropout():
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._tracks = []
     node._next_target_number = 1
     node.get_parameter = lambda name: type('Parameter', (), {'value': {
@@ -193,7 +208,7 @@ def test_valid_low_confidence_yolo_is_not_replaced_by_template():
         'fruit-9', 'diseased_fruit', 0.12,
         52, 44, 57, 49, 54, 46)
 
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._selected_target_id = 'fruit-1'
     node._selected_target_reference = reference
     node._selected_target_template = template
@@ -234,7 +249,7 @@ def test_template_only_bridges_a_frame_with_no_yolo_candidates():
         initial, reference, padding_ratio=0.0, min_padding_px=0.0)
     moved = np.zeros_like(initial)
     moved[44:49, 52:57] = pattern
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._selected_target_id = 'fruit-1'
     node._selected_target_reference = reference
     node._selected_target_template = template
@@ -269,7 +284,7 @@ def test_template_does_not_bypass_an_ambiguous_yolo_frame():
     reference = Instance(
         'fruit-1', 'diseased_fruit', 0.80,
         30, 20, 35, 25, 32, 22)
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._selected_target_id = 'fruit-1'
     node._selected_target_reference = reference
     node._selected_target_template = capture_target_template(
@@ -304,7 +319,7 @@ def test_template_does_not_bypass_an_ambiguous_yolo_frame():
 
 
 def _target_selection_node(selected_id, reference):
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._selected_target_id = selected_id
     node._selected_target_reference = reference
     node.get_parameter = lambda name: SimpleNamespace(value={
@@ -353,7 +368,7 @@ def test_selected_target_keeps_exact_tracker_id_after_large_camera_motion():
 def test_repeated_selected_target_message_preserves_geometric_reference():
     reference = Instance(
         'fruit-9', 'diseased_fruit', 0.9, 12, 10, 32, 30, 22, 20)
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._selected_target_id = 'fruit-1'
     node._selected_target_reference = reference
     node._tracks = []
@@ -523,54 +538,189 @@ def test_deduplication_keeps_highest_confidence_same_class_instance():
         [overlapping, near_center, best]) == [best]
 
 
-def test_fruit_inference_uses_stricter_nms_before_custom_deduplication():
+def test_pipeline_owns_tree_roi_and_restores_segment_safe_point_coordinates():
     calls = []
 
-    class Model:
-        def __call__(self, _image, **kwargs):
-            calls.append(kwargs)
-            return [object()]
+    class Segmenter:
+        def detect(self, roi, confidence):
+            calls.append((roi.shape, confidence))
+            return [stronger]
 
-    stronger = Instance(
-        '', 'diseased_fruit', 0.80, 10, 10, 30, 30, 20, 20)
-    weaker = Instance(
-        '', 'diseased_fruit', 0.50, 12, 12, 32, 32, 22, 22)
-    node = object.__new__(TwoStageYolo)
-    node._fruit_model = Model()
+    stronger = DiseaseTarget(
+        'diseased_fruit', 0.80, 5, 5, 25, 25, 17, 19)
+    node = object.__new__(PerceptionPipeline)
+    node._disease_backend = Segmenter()
     node.get_parameter = lambda name: SimpleNamespace(value={
         'roi_padding': 0.0,
         'fruit_confidence': 0.10,
     }[name])
-    node._seg_instances = lambda *_args: [weaker, stronger]
-    tree = Instance('', 'tree', 1.0, 0, 0, 64, 64, 32, 32)
+    tree = Instance('', 'tree', 1.0, 10, 20, 50, 60, 30, 40)
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
 
-    result = node._fruit_instances(
-        np.zeros((64, 64, 3), dtype=np.uint8), tree)
+    result = node._fruit_instances(image, tree)
 
-    assert calls == [{'verbose': False, 'conf': 0.10, 'iou': 0.45}]
-    assert result == [stronger]
+    assert calls == [((40, 40, 3), 0.10)]
+    assert len(result) == 1
+    assert (result[0].left, result[0].top, result[0].right, result[0].bottom) == (
+        15.0, 25.0, 35.0, 45.0)
+    assert (result[0].aim_u, result[0].aim_v) == (27.0, 39.0)
+
+
+def test_tree_detector_translates_only_the_configured_detect_class():
+    class Box:
+        def __init__(self, class_id, confidence, xyxy):
+            self.cls = np.array([class_id])
+            self.conf = np.array([confidence])
+            self.xyxy = np.array([xyxy])
+
+    class Model:
+        def __call__(self, _image, **kwargs):
+            assert kwargs == {'verbose': False, 'conf': 0.25}
+            return [SimpleNamespace(
+                names={0: 'tree', 1: 'other'},
+                boxes=[Box(0, 0.9, [10, 20, 30, 50]), Box(1, 0.8, [1, 2, 3, 4])])]
+
+    detector = object.__new__(TreeDetector)
+    detector._class_names = {0: 'tree'}
+    detector._model = Model()
+
+    assert detector.detect(np.zeros((64, 64, 3), dtype=np.uint8), 0.25) == [
+        Instance('', 'tree', 0.9, 10.0, 20.0, 30.0, 50.0, 20.0, 35.0)]
+
+
+def test_disease_segmenter_keeps_roi_local_safe_mask_point():
+    class Box:
+        cls = np.array([0])
+        conf = np.array([0.8])
+        xyxy = np.array([[5.0, 5.0, 25.0, 25.0]])
+
+    class Model:
+        def __call__(self, roi, **kwargs):
+            assert roi.shape == (40, 40, 3)
+            assert kwargs == {'verbose': False, 'conf': 0.10, 'iou': 0.45}
+            return [SimpleNamespace(
+                names={0: 'disease_leaf'},
+                boxes=[Box()],
+                masks=SimpleNamespace(xy=[np.array([
+                    [5, 5], [25, 5], [25, 25], [5, 25]], dtype=float)]))]
+
+    segmenter = object.__new__(DiseaseSegmenter)
+    segmenter._model = Model()
+    segmenter._target_class_id = 0
+    segmenter._target_class_name = 'diseased_target'
+
+    result = segmenter.detect(np.zeros((40, 40, 3), dtype=np.uint8), 0.10)
+
+    assert len(result) == 1
+    assert result[0].class_name == 'diseased_target'
+    assert (result[0].left, result[0].top, result[0].right, result[0].bottom) == (
+        5.0, 5.0, 25.0, 25.0)
+    assert 5.0 <= result[0].control_u <= 25.0
+    assert 5.0 <= result[0].control_v <= 25.0
+
+
+def test_disease_detector_returns_only_roi_local_configured_boxes():
+    class Box:
+        def __init__(self, class_id, confidence, xyxy):
+            self.cls = np.array([class_id])
+            self.conf = np.array([confidence])
+            self.xyxy = np.array([xyxy])
+
+    class Model:
+        def __call__(self, roi, **kwargs):
+            assert roi.shape == (40, 40, 3)
+            assert kwargs == {'verbose': False, 'conf': 0.25}
+            return [SimpleNamespace(boxes=[
+                Box(1, 0.9, [5.0, 7.0, 25.0, 27.0]),
+                Box(0, 0.8, [1.0, 2.0, 3.0, 4.0]),
+            ])]
+
+    detector = object.__new__(DiseaseDetector)
+    detector._model = Model()
+    detector._target_class_id = 1
+    detector._target_class_name = 'diseased_target'
+
+    result = detector.detect(np.zeros((40, 40, 3), dtype=np.uint8), 0.25)
+
+    assert result == [DiseaseTarget(
+        'diseased_target', 0.9, 5.0, 7.0, 25.0, 27.0)]
+    assert result[0].control_u is None
+    assert result[0].control_v is None
+
+
+def test_detect_backend_uses_box_center_after_roi_coordinate_restoration():
+    class Detector:
+        def detect(self, roi, confidence):
+            assert roi.shape == (40, 40, 3)
+            assert confidence == 0.25
+            return [DiseaseTarget(
+                'diseased_target', 0.9, 5.0, 7.0, 25.0, 27.0)]
+
+    node = object.__new__(PerceptionPipeline)
+    node._disease_backend = Detector()
+    node.get_parameter = lambda name: SimpleNamespace(value={
+        'roi_padding': 0.0,
+        'fruit_confidence': 0.25,
+    }[name])
+    tree = Instance('', 'tree', 1.0, 10, 20, 50, 60, 30, 40)
+
+    result = node._fruit_instances(np.zeros((100, 100, 3), dtype=np.uint8), tree)
+
+    assert len(result) == 1
+    assert (result[0].left, result[0].top, result[0].right, result[0].bottom) == (
+        15.0, 27.0, 35.0, 47.0)
+    assert (result[0].aim_u, result[0].aim_v) == (25.0, 37.0)
+    assert (result[0].aim_u, result[0].aim_v) == (
+        result[0].center_u, result[0].center_v)
+
+
+def test_detect_box_center_is_published_unchanged_in_target2d():
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    detected = Instance(
+        'target-1', 'diseased_target', 0.9,
+        15.0, 27.0, 35.0, 47.0, 25.0, 37.0)
+    node = _target_selection_node('target-1', detected)
+    node._mission_id = 'mission-1'
+    node._tree_id = 'tree-1'
+    node._target_pub = Publisher()
+    node._log_target_state = lambda *_args: None
+
+    node._publish_selected_target(
+        SimpleNamespace(header=Header(), width=100, height=100), [detected])
+
+    message = node._target_pub.messages[-1]
+    assert (message.center_u, message.center_v) == (25.0, 37.0)
+    assert (message.center_u, message.center_v) == (
+        (detected.left + detected.right) / 2.0,
+        (detected.top + detected.bottom) / 2.0)
 
 
 def test_visualization_labels_include_id_class_and_confidence():
     instance = Instance(
         'target-7', 'diseased_target', 0.937,
         10.4, 20.6, 30.4, 40.6, 20.0, 30.0)
-    assert TwoStageYolo._label(instance) == (
+    assert PerceptionPipeline._label(instance) == (
         'target-7 diseased_target 0.94')
 
 
 def test_fruit_visualization_draws_diseased_box_label_and_aim_point(monkeypatch):
     calls = {'rectangles': [], 'labels': [], 'circles': []}
-    monkeypatch.setattr('wvcsc_rgb_vision.two_stage_yolo.cv2.rectangle',
+    monkeypatch.setattr('wvcsc_rgb_vision.perception_pipeline.cv2.rectangle',
                         lambda *_args: calls['rectangles'].append(_args[1:]))
-    monkeypatch.setattr('wvcsc_rgb_vision.two_stage_yolo.cv2.putText',
+    monkeypatch.setattr('wvcsc_rgb_vision.perception_pipeline.cv2.putText',
                         lambda *_args: calls['labels'].append(_args[1:]))
-    monkeypatch.setattr('wvcsc_rgb_vision.two_stage_yolo.cv2.circle',
+    monkeypatch.setattr('wvcsc_rgb_vision.perception_pipeline.cv2.circle',
                         lambda *_args: calls['circles'].append(_args[1:]))
     diseased = Instance(
         'target-2', 'diseased_target', 0.8, 20, 21, 40, 41, 30, 31)
 
-    rendered = TwoStageYolo._annotated_image(
+    rendered = PerceptionPipeline._annotated_image(
         np.zeros((64, 64, 3), dtype=np.uint8), [diseased],
         draw_diseased_aim_point=True)
 
@@ -587,18 +737,18 @@ def test_selected_target_has_a_separate_visual_highlight(monkeypatch):
     rectangles = []
     circles = []
     monkeypatch.setattr(
-        'wvcsc_rgb_vision.two_stage_yolo.cv2.rectangle',
+        'wvcsc_rgb_vision.perception_pipeline.cv2.rectangle',
         lambda *_args: rectangles.append(_args[1:]))
     monkeypatch.setattr(
-        'wvcsc_rgb_vision.two_stage_yolo.cv2.putText',
+        'wvcsc_rgb_vision.perception_pipeline.cv2.putText',
         lambda *_args: None)
     monkeypatch.setattr(
-        'wvcsc_rgb_vision.two_stage_yolo.cv2.circle',
+        'wvcsc_rgb_vision.perception_pipeline.cv2.circle',
         lambda *_args: circles.append(_args[1:]))
     selected = Instance(
         'target-2', 'diseased_target', 0.8, 20, 21, 40, 41, 30, 31)
 
-    TwoStageYolo._annotated_image(
+    PerceptionPipeline._annotated_image(
         np.zeros((64, 64, 3), dtype=np.uint8), [selected],
         draw_diseased_aim_point=True, selected_target_id='target-2')
 
@@ -618,7 +768,7 @@ def test_visualization_images_keep_the_camera_header():
             assert encoding == 'bgr8'
             return SimpleNamespace(image=image, header=None)
 
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._bridge = Bridge()
     header = SimpleNamespace(frame_id='camera_color_optical_frame')
     publisher = Publisher()
@@ -638,7 +788,7 @@ def test_stage_visualizations_follow_the_inference_mode():
 
     tree = Instance('', 'tree', 0.9, 1, 2, 31, 42, 16, 22)
     fruit = Instance('target-1', 'diseased_target', 0.8, 10, 12, 20, 24, 15, 18)
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._tree_id = 'tree_01'
     node._bridge = SimpleNamespace(
         imgmsg_to_cv2=lambda *_args, **_kwargs: np.zeros(
@@ -672,7 +822,7 @@ def test_stage_visualizations_follow_the_inference_mode():
 
 
 def test_real_disease_target_limit_publishes_the_two_highest_confidences():
-    node = object.__new__(TwoStageYolo)
+    node = object.__new__(PerceptionPipeline)
     node._max_diseased_targets = 2
     low = Instance('target-1', 'diseased_target', 0.30, 0, 0, 10, 10, 5, 5)
     medium = Instance('target-2', 'diseased_target', 0.70, 20, 0, 30, 10, 25, 5)

@@ -66,7 +66,7 @@ auto_calibration_collector:
     maximum_marker_rotation_rms_deg: 1.0
     easy_service_timeout_sec: 10.0
     startup_service_timeout_sec: 20.0
-    calibration_output_dir: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_calibration/config
+    calibration_output_dir: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_calibration/config
     calibration_file_prefix: c10_handeye
     calibration_simulation: false
     # 实机必须由操作者按 s/Enter 确认工作区安全后才开始运动。

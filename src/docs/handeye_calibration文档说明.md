@@ -13,10 +13,10 @@ tool0 -> camera_color_optical_frame
 标定码相对机械臂基座 `alicia_base_link` 安装在左侧：
 
 ```yaml
-# 实机：wvcsc_calibration/config/auto_handeye_alicia.yaml
+# 实机：wvcsc_perception/wvcsc_calibration/config/auto_handeye_alicia.yaml
 marker_position_base_m: [0.0, 0.25, 0.0]
 
-# 仿真：wvcsc_calibration/config/auto_handeye_alicia_sim.yaml
+# 仿真：wvcsc_perception/wvcsc_calibration/config/auto_handeye_alicia_sim.yaml
 marker_position_base_m: [0.0, 0.25, 0.002]
 ```
 
@@ -27,7 +27,7 @@ Gazebo 中 marker 由启动脚本相对
 
 ```text
 wvcsc_simulation/worlds/calibration_table.world
-wvcsc_calibration/xacro/calibration_arm_camera.urdf.xacro
+wvcsc_perception/wvcsc_calibration/xacro/calibration_arm_camera.urdf.xacro
 ```
 
 其启动代码以 `LEGACY DESK CALIBRATION ENVIRONMENT` 注释块保留在 `calibration_sim.launch.py`。它缺少车顶安装和车体碰撞模型，只用于历史对比或人工回退；默认 launch 不会启动它，也不能和整车环境同时启动。

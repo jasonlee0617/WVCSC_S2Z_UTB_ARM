@@ -1,4 +1,4 @@
-wvcsc_two_stage_yolo:
+wvcsc_perception_pipeline:
   ros__parameters:
     image_topic: /camera/color/image_raw
     selected_target_topic: /vision/selected_target_id
@@ -12,6 +12,9 @@ wvcsc_two_stage_yolo:
     inference_mode_topic: /vision/inference_mode
 
     tree_model_path: yolov8s_real.pt
+    # 默认保持分割：掩膜安全点作为 Target2D.center_u/v。
+    # detect 实验模型需显式改为 detect，并配套 detect 权重。
+    disease_model_backend: segment
     fruit_model_path: yolov8s_seg_real.pt
     tree_class_id: 0
     tree_class_name: tree
