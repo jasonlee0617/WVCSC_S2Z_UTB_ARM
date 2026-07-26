@@ -19,7 +19,10 @@ from functools import partial
 from urllib.parse import urlparse
 
 import yaml
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import (
+    get_package_prefix,
+    get_package_share_directory,
+)
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -44,6 +47,7 @@ from launch.substitutions import (
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 from launch_ros.parameter_descriptions import ParameterValue
+from nav2_common.launch import RewrittenYaml
 from wvcsc_simulation.data_acquisition.orchard_assets import generate_orchard_assets
 
 
@@ -172,20 +176,20 @@ def generate_launch_description():
     use_nav2_qt = LaunchConfiguration('use_nav2_qt')
     enable_arm_control = LaunchConfiguration('enable_arm_control')
     enable_ackermann = LaunchConfiguration('enable_ackermann')
-    use_mock_targets = LaunchConfiguration('use_mock_targets')
     use_mission_manager = LaunchConfiguration('use_mission_manager')
+    observation_mode = LaunchConfiguration('observation_mode')
+    show_sim_spray_status = LaunchConfiguration('show_sim_spray_status')
     arm_velocity_scaling = LaunchConfiguration('arm_velocity_scaling')
     arm_acceleration_scaling = LaunchConfiguration('arm_acceleration_scaling')
     planning_pipeline_id = LaunchConfiguration('planning_pipeline_id')
     planner_id = LaunchConfiguration('planner_id')
     yolo_python_executable = LaunchConfiguration('yolo_python_executable')
-    auto_start_mission = LaunchConfiguration('auto_start_mission')
     return_home_after_finish = LaunchConfiguration('return_home_after_finish')
-    mock_target_config = LaunchConfiguration('mock_target_config')
 
     # 获取各个功能包的共享目录路径
     description_share = get_package_share_directory('wvcsc_description')
     simulation_share = get_package_share_directory('wvcsc_simulation')
+    simulation_prefix = get_package_prefix('wvcsc_simulation')
     arm_task_share = get_package_share_directory('wvcsc_arm_task')
     mission_share = get_package_share_directory('wvcsc_mission_manager')
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
@@ -209,6 +213,10 @@ def generate_launch_description():
         os.environ.get('GAZEBO_RESOURCE_PATH'),
         '/usr/share/gazebo-11',
         '/opt/ros/humble/share',
+    ]))
+    gazebo_plugin_path = os.pathsep.join(filter(None, [
+        os.path.join(simulation_prefix, 'lib'),
+        os.environ.get('GAZEBO_PLUGIN_PATH'),
     ]))
 
     # ------------------------- 2. 机器人模型描述 (URDF & SRDF) -------------------------
@@ -247,6 +255,9 @@ def generate_launch_description():
     <disable_collisions link1="link6" link2="camera_link" reason="Mount"/>
     <disable_collisions link1="link7" link2="camera_link" reason="Mount"/>
     <disable_collisions link1="link8" link2="camera_link" reason="Mount"/>
+    <disable_collisions link1="tool0" link2="spray_nozzle_link" reason="Adjacent"/>
+    <disable_collisions link1="base_link" link2="wide_sprayer_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_mount_link" link2="wide_sprayer_link" reason="Adjacent"/>
 '''
     semantic = semantic.replace(
         '</robot>', f'{c10_disabled_collisions}</robot>')
@@ -299,14 +310,23 @@ def generate_launch_description():
         'wvcsc_visual_servo', 'config/moveit_servo.yaml')
 
     # ------------------------- 3. 基础仿真组件 (Gazebo, Spawn, RSP) -------------------------
-    gazebo = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(gazebo_share, 'launch', 'gazebo.launch.py')),
+    # Gazebo Humble's stock ``gazebo.launch.py`` starts gzclient with the
+    # end-of-life banner plugin.  On this Gazebo Classic/Qt/OGRE combination
+    # that client can remain as a 1x1 render window or fail before presenting
+    # its main window.  Keep the standard ROS-aware server launcher, but start
+    # an unmodified Gazebo Classic client for a reliable desktop GUI.
+    gazebo_server = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(gazebo_share, 'launch', 'gzserver.launch.py')),
         launch_arguments={
             'world': orchard_world,
             'verbose': 'false',
             'pause': 'true',        # 必须从暂停状态启动，以便在零重力环境下加载控制器
-            'gui': gazebo_gui,
         }.items(),
+    )
+    gazebo_client = ExecuteProcess(
+        cmd=['gzclient'],
+        output='screen',
+        condition=IfCondition(gazebo_gui),
     )
     state_publisher = Node(
         package='robot_state_publisher', executable='robot_state_publisher',
@@ -353,10 +373,15 @@ def generate_launch_description():
         package='wvcsc_simulation', executable='ackermann_sim.py',
         parameters=[{
             'use_sim_time': True,
-            'wheel_base': 0.67,
+            'wheel_base': 0.82,
             'max_steering_angle': 0.48,
-            'max_linear_speed': 0.8,
-            'command_timeout': 0.5,
+            'max_linear_speed': 0.35,
+            # velocity_smoother 以 20 Hz 发布 /cmd_vel。超时必须明显大于
+            # 50 ms 的传输周期，否则正常的调度抖动也会被误判为失联，导致
+            # 车辆交替刹车并触发 Nav2 控制失败。正常停车由 smoother 主动
+            # 发布的零速度完成；0.25 s 只作为节点失联时的后备制动。
+            'command_timeout': 0.25,
+            'cmd_angular_mode': 'yaw_rate',
         }], output='screen',
         condition=IfCondition(enable_ackermann),
     )
@@ -394,6 +419,10 @@ def generate_launch_description():
         'gripper_open_position': 0.0,
         'gripper_closed_position': -0.05,
         'gripper_max_effort': 5.0,
+        # 仿真默认走与实机相同的 IK 观察状态机；预设姿态仅作为显式回归入口。
+        'observation_mode': observation_mode,
+        # 仿真不允许视觉对准失败后盲喷，必须把未完成目标记为 unresolved。
+        'spray_on_alignment_failure': False,
         'use_sim_time': True,
     }
     motion_control = Node(
@@ -472,6 +501,24 @@ def generate_launch_description():
         ],
         condition=IfCondition(enable_arm_control), output='screen',
     )
+    sim_relay = Node(
+        package='wvcsc_simulation', executable='sim_relay.py',
+        parameters=[{'use_sim_time': True}],
+        condition=IfCondition(PythonExpression([
+            "'", use_mission_manager, "' == 'true' or '",
+            enable_arm_control, "' == 'true'",
+        ])), output='screen',
+    )
+    # Relay channel state is a required safety and visualisation dependency for
+    # the default mission path.  A script that exits cleanly without spinning
+    # is still a failure; terminate the launch rather than silently continuing
+    # with every wide-spray request dropped.
+    guard_sim_relay = RegisterEventHandler(OnProcessExit(
+        target_action=sim_relay,
+        on_exit=lambda event, _context: [Shutdown(
+            reason=f'simulation relay exited unexpectedly with code '
+                   f'{event.returncode}')],
+    ))
 
     # ------------------------- 7. 控制器顺序启动链 (事件驱动) -------------------------
     # 使用 OnProcessExit 构建严格的链式依赖关系：
@@ -520,7 +567,16 @@ def generate_launch_description():
     )
 
     # ------------------------- 9. Nav2 导航栈 -------------------------
-    nav2_params = os.path.join(simulation_share, 'config', 'nav2_sim.yaml')
+    nav2_params_source = os.path.join(simulation_share, 'config', 'nav2_sim.yaml')
+    nav2_params = RewrittenYaml(
+        source_file=nav2_params_source,
+        param_rewrites={
+            'default_nav_to_pose_bt_xml': os.path.join(
+                simulation_share, 'config', 'behavior_trees',
+                'navigate_route.xml'),
+        },
+        convert_types=True,
+    )
     map_server = Node(
         package='nav2_map_server', executable='map_server', name='map_server',
         parameters=[nav2_params, {
@@ -550,15 +606,33 @@ def generate_launch_description():
         condition=IfCondition(use_nav2),
     )
 
-    # ------------------------- 10. 任务管理与感知 (Mock YAML, YOLO) -------------------------
+    # ------------------------- 10. 任务管理与感知 (Qt/RViz, YOLO) -------------------------
     mission_manager = Node(
         package='wvcsc_mission_manager', executable='mission_manager',
         parameters=[
             os.path.join(mission_share, 'config', 'mission_manager.yaml'),
             {
-                'auto_start': ParameterValue(auto_start_mission, value_type=bool),
                 'return_home_after_finish': ParameterValue(
                     return_home_after_finish, value_type=bool),
+                # Alicia 在车顶以 pi yaw 安装；手动树点必须按该真实安装姿态
+                # 解释，才能和 Qt/RViz 记录的 map 坐标一致。
+                'arm_base_yaw_rad': 3.141592653589793,
+                # 仿真 map->odom 为静态单位变换，因此可用新鲜 /odom 对近目标
+                # Nav2 abort 进行停靠质量复核；实机仍使用 AMCL 默认配置。
+                'require_docking_quality': True,
+                'docking_pose_source': 'odom',
+                'accept_aborted_near_goal': True,
+                'nav_goal_xy_tolerance_m': 0.08,
+                'nav_goal_yaw_tolerance_rad': 0.10,
+                'max_docking_position_error_m': 0.10,
+                'max_docking_yaw_error_rad': 0.12,
+                'nav_goal_timeout_sec': 45.0,
+                'inspect_nav_behavior_tree': os.path.join(
+                    simulation_share, 'config', 'behavior_trees',
+                    'navigate_inspect.xml'),
+                'route_nav_behavior_tree': os.path.join(
+                    simulation_share, 'config', 'behavior_trees',
+                    'navigate_route.xml'),
                 'use_sim_time': True,
             },
         ],
@@ -572,20 +646,17 @@ def generate_launch_description():
             'map_frame': 'map',
             'base_frame': 'base_footprint',
             'goal_pose_topic': '/manual_goal_pose',
+            # Gazebo 使用静态 map->odom，不运行 AMCL 的全局重定位服务；仍要求
+            # 操作员在 RViz 重新给出初始位姿后才能记录任务起点。
+            'require_global_relocalization_service': 'false',
+            'show_sim_spray_status': show_sim_spray_status,
+            # The simulation map contains the same circular trunk envelope as
+            # Gazebo.  Reject manually-recorded inspect parking poses that
+            # would be inside its static inflation cost before Nav2 starts.
+            'simulation_parking_clearance_check': 'true',
+            'observation_mode': observation_mode,
         }.items(),
         condition=IfCondition(use_nav2_qt),
-    )
-    mock_target_loader = Node(
-        package='wvcsc_mission_manager', executable='mock_target_loader',
-        arguments=[
-            '--file', mock_target_config,
-            '--service-timeout-sec', '30.0',
-        ],
-        condition=IfCondition(PythonExpression([
-            "'", use_mock_targets, "' == 'true' and '",
-            use_mission_manager, "' == 'true' and '",
-            use_nav2_qt, "' != 'true'",
-        ])), output='screen',
     )
     yolo_vision = Node(
         package='wvcsc_rgb_vision', executable='perception_pipeline',
@@ -623,14 +694,17 @@ def generate_launch_description():
         on_exit=[
             zero_gravity,                               # 生成模型后立刻将重力置零
             unpause_without_arm,                       # 如果没有机械臂，直接取消暂停
-            TimerAction(period=0.5, actions=[vehicle_sim]),   # 0.5秒后启动里程计仿真
+            TimerAction(
+                period=0.5,
+                actions=[vehicle_sim],
+            ),
             TimerAction(period=0.75, actions=[yolo_vision]),  # 0.75秒后启动 YOLO
             TimerAction(period=1.5, actions=[joint_state_controller]), # 1.5秒后启动关节广播
             TimerAction(period=2.0, actions=[map_server, map_lifecycle]), # 2.0秒后启动地图服务器
             TimerAction(period=3.0, actions=[nav2]),    # 3.0秒后启动导航栈
             TimerAction(
                 period=6.0,
-                actions=[mission_manager, mock_target_loader, nav2_qt],
+                actions=[mission_manager, nav2_qt],
             ),
         ],
     ))
@@ -638,15 +712,16 @@ def generate_launch_description():
     # ------------------------- 13. LaunchDescription 组装 -------------------------
     return LaunchDescription([
         DeclareLaunchArgument('use_nav2', default_value='true'),
-        DeclareLaunchArgument('use_rviz', default_value='false'),
+        DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('gazebo_gui', default_value='true'),
         DeclareLaunchArgument('orchard_seed', default_value='42'),
         DeclareLaunchArgument('diseased_fruit_ratio', default_value='0.50'),
-        DeclareLaunchArgument('use_nav2_qt', default_value='false'),
+        DeclareLaunchArgument('use_nav2_qt', default_value='true'),
         DeclareLaunchArgument('enable_arm_control', default_value='true'),
         DeclareLaunchArgument('enable_ackermann', default_value='true'),
-        DeclareLaunchArgument('use_mock_targets', default_value='true'),
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
+        DeclareLaunchArgument('observation_mode', default_value='ik'),
+        DeclareLaunchArgument('show_sim_spray_status', default_value='true'),
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.40'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.50'),
         DeclareLaunchArgument('planning_pipeline_id', default_value='ompl'),
@@ -655,14 +730,10 @@ def generate_launch_description():
             'yolo_python_executable',
             default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
-        DeclareLaunchArgument('auto_start_mission', default_value='true'),
         DeclareLaunchArgument('return_home_after_finish', default_value='false'),
-        DeclareLaunchArgument(
-            'mock_target_config',
-            default_value=os.path.join(
-                simulation_share, 'config', 'mock_targets.yaml')),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),
+        SetEnvironmentVariable('GAZEBO_PLUGIN_PATH', gazebo_plugin_path),
         # 前置安全检查 (若检查失败，直接终止 Launch 启动)
         OpaqueFunction(function=validate_arm_scaling),
         OpaqueFunction(function=ensure_fresh_gazebo_master),
@@ -672,7 +743,10 @@ def generate_launch_description():
             function=prepare_orchard,
             args=[simulation_share, gazebo_model_path],
         ),
-        gazebo,
+        gazebo_server,
+        gazebo_client,
+        guard_sim_relay,
+        sim_relay,
         state_publisher,
         world_map,
         map_odom,

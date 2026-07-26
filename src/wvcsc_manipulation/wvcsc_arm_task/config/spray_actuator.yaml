@@ -5,8 +5,8 @@ wvcsc_spray_actuator:
     motion_locked_topic: /motion_control/locked
     min_duration: 0.2
     max_duration: 10.0
-    # spray_mode: "timer" = 仿真定时器, "service" = 实机 SetRelay 服务
-    spray_mode: timer
+    # 仿真与实机统一通过 SetRelay；Gazebo 由 wvcsc_sim_relay 提供同名服务。
+    spray_mode: service
     relay_service_name: /relay/set
     relay_channel: 2
     relay_service_timeout_sec: 2.0

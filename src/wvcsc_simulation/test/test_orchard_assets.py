@@ -59,9 +59,9 @@ def _read_pgm(path):
 def test_static_map_contains_all_tree_trunks_and_keeps_dock_poses_free():
     width, height, maximum, pixels = _read_pgm(MAP)
     metadata = yaml.safe_load(MAP_YAML.read_text(encoding='utf-8'))
-    assert (width, height, maximum, len(pixels)) == (60, 40, 255, 2400)
-    assert metadata['resolution'] == 0.5
-    assert metadata['origin'] == [-10.0, -10.0, 0.0]
+    assert (width, height, maximum, len(pixels)) == (300, 300, 255, 90000)
+    assert metadata['resolution'] == 0.1
+    assert metadata['origin'] == [-5.0, -15.0, 0.0]
 
     occupied = {
         (column, row)
@@ -84,17 +84,15 @@ def test_static_map_contains_all_tree_trunks_and_keeps_dock_poses_free():
     origin_x, origin_y = metadata['origin'][:2]
     resolution = metadata['resolution']
     for x, y in tree_positions:
-        column = int((x - origin_x) // resolution)
-        grid_row = int((y - origin_y) // resolution)
-        image_row = height - 1 - grid_row
-        expected_trunks.update(
-            (trunk_column, trunk_row)
-            for trunk_column in (column - 1, column)
-            for trunk_row in (image_row, image_row + 1)
-        )
-    assert len(border) == 196
+        for row in range(height):
+            center_y = origin_y + (height - row - 0.5) * resolution
+            for column in range(width):
+                center_x = origin_x + (column + 0.5) * resolution
+                if (center_x - x) ** 2 + (center_y - y) ** 2 <= 0.25 ** 2:
+                    expected_trunks.add((column, row))
+    assert len(border) == 1196
     assert len(tree_positions) == 8
-    assert len(expected_trunks) == 32
+    assert len(expected_trunks) == 128
     assert occupied == border | expected_trunks
 
     for x, y in ((3.0, 0.5), (5.0, -0.5),

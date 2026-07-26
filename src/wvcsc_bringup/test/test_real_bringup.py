@@ -84,7 +84,7 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "'nozzle_calibration'" in source
     assert "'--require-nozzle-calibration', 'true'" in source
     assert "'nozzle_mount_xyz'" in source
-    assert "'aim_fixed_range_m'" in source
+    assert "'aim_trim_u_px'" in source
     assert "'relay_config_file'" in source
     assert "'--relay-config', relay_config" in source
     assert "'--operation', 'qt_mission'" in source
@@ -136,13 +136,13 @@ def test_real_orchestration_uses_the_qt_mission_manager_only():
     assert "'relay_config_file'" in source
 
 
-def test_qt_real_mode_never_autostarts_or_requires_a_file_route():
+def test_qt_real_mode_uses_qt_task_autostart_without_manager_auto_start():
     system = _source('real_system_mission.launch.py')
     orchestration = _source('real_orchestration.launch.py')
     preflight = (PACKAGE / 'scripts' / 'preflight_check.py').read_text(
         encoding='utf-8')
 
-    assert "'auto_start': False" in orchestration
+    assert "'auto_start'" not in orchestration
     assert 'latest_field_route' not in system
     assert 'mission_file' not in system
     assert 'mission_mode' not in system
@@ -159,7 +159,7 @@ def test_vehicle_relay_qt_test_uses_real_navigation_and_fake_arm_only():
     assert "executable='fake_arm_spray_action.py'" in source
     assert "package='wvcsc_mission_manager', executable='mission_manager'" in source
     assert 'nav2_qt.launch.py' in source
-    assert "'auto_start': False" in source
+    assert "'auto_start'" not in source
     assert "'arm_base_yaw_rad': math.pi" in source
     assert 'mission_file' not in source
     for forbidden in (
@@ -227,7 +227,8 @@ def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
     assert parameters['spray_on_alignment_failure'] is True
     assert parameters['max_targets_per_tree'] == 2
     assert parameters['target_recenter_workspace_px'] == 128.0
-    assert parameters['visual_servo_entry_max_error_px'] == 128.0
+    assert parameters['visual_servo_entry_max_error_px'] == 48.0
+    assert parameters['target_post_recenter_stable_sec'] == 0.50
     assert parameters['target_recenter_max_angle_deg'] == 45.0
     assert parameters['target_recenter_max_total_angle_deg'] == 45.0
     assert parameters['joint_preset_center_deg'] == [
@@ -470,9 +471,9 @@ def test_nozzle_frame_and_compensated_aim_are_wired_through_real_stack():
         source = _source(launch_name)
         assert "LaunchConfiguration('nozzle_mount_xyz')" in source
         assert "LaunchConfiguration('nozzle_mount_rpy')" in source
-    assert '<link name="spray_nozzle_link"/>' in xacro
+    assert '<link name="spray_nozzle_link">' in xacro
     assert '<parent link="tool0"/>' in xacro
-    assert "'aim_range_tolerance_m'" in orchestration
+    assert '<geometry><cylinder radius="0.012" length="0.035"/></geometry>' in xacro
     assert "'desired_offset_u_px'" in orchestration
 
 

@@ -42,7 +42,6 @@ def generate_launch_description():
             os.path.join(mission_share, 'config', 'mission_manager.yaml'),
             {
                 'use_sim_time': False,
-                'auto_start': False,
                 'arm_base_yaw_rad': math.pi,
                 'wide_relay_channel': 1,
                 'arm_relay_channel': 2,

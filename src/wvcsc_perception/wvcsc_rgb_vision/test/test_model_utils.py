@@ -425,6 +425,30 @@ def test_selected_target_refuses_ambiguous_reassociation():
     assert event == 'target_invalid'
 
 
+def test_simulation_recenter_allows_bounded_nearest_reassociation():
+    """A 20 degree recenter may move a valid target about 185 px in C10."""
+    reference = Instance('fruit-1', 'diseased_fruit', 0.9, 10, 10, 30, 30, 20, 20)
+    node = _target_selection_node('fruit-1', reference)
+    original_get_parameter = node.get_parameter
+    node.get_parameter = lambda name: (
+        SimpleNamespace(value=320.0)
+        if name == 'target_reassociation_distance_px' else
+        SimpleNamespace(value=True)
+        if name == 'target_reassociation_allow_ambiguous_nearest' else
+        original_get_parameter(name))
+    candidates = [
+        Instance('fruit-9', 'diseased_fruit', 0.9, 210, 10, 230, 30, 220, 20),
+        Instance('fruit-10', 'diseased_fruit', 0.9, 215, 10, 235, 30, 225, 20),
+    ]
+
+    target, reason, event = node._resolve_selected_target(candidates)
+
+    assert target is not None
+    assert target.target_id == 'fruit-9'
+    assert reason == 'none'
+    assert event == 'target_reassociated'
+
+
 def test_selected_target_rejects_id_switch_when_multiple_candidates_are_locked_out():
     reference = Instance('fruit-1', 'diseased_fruit', 0.9, 10, 10, 30, 30, 20, 20)
     node = _target_selection_node('fruit-1', reference)

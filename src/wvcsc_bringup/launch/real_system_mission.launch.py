@@ -218,7 +218,7 @@ def _resolve_calibrations(context, *, launch_dir):
     if not os.path.isfile(nozzle_path):
         raise RuntimeError(
             f'nozzle calibration is required but not found: {nozzle_path}')
-    nozzle_xyz, nozzle_rpy, aim_range, aim_tolerance, trim_uv = (
+    nozzle_xyz, nozzle_rpy, _aim_range, _aim_tolerance, trim_uv = (
         _load_nozzle_calibration(nozzle_path))
     initial_actions.extend([
         LogInfo(msg=f'[BRINGUP] nozzle calibration loaded: {nozzle_path}'),
@@ -228,8 +228,6 @@ def _resolve_calibrations(context, *, launch_dir):
         SetLaunchConfiguration(
             'nozzle_mount_rpy',
             ' '.join(f'{value:.12g}' for value in nozzle_rpy)),
-        SetLaunchConfiguration('aim_fixed_range_m', str(aim_range)),
-        SetLaunchConfiguration('aim_range_tolerance_m', str(aim_tolerance)),
         SetLaunchConfiguration('aim_trim_u_px', str(trim_uv[0])),
         SetLaunchConfiguration('aim_trim_v_px', str(trim_uv[1])),
     ])
@@ -300,6 +298,9 @@ def _resolve_calibrations(context, *, launch_dir):
             'map_frame': 'map',
             'base_frame': 'base_footprint',
             'goal_pose_topic': '/manual_goal_pose',
+            # Keep the recorder's admission policy in sync with the arm
+            # execution mode.  The real default remains joint presets.
+            'observation_mode': LaunchConfiguration('observation_mode'),
         }.items())
     success_actions = [
         LogInfo(msg=(
@@ -332,9 +333,6 @@ def _resolve_calibrations(context, *, launch_dir):
             'arm_acceleration_scaling': LaunchConfiguration(
                 'arm_acceleration_scaling'),
             'observation_mode': LaunchConfiguration('observation_mode'),
-            'aim_fixed_range_m': LaunchConfiguration('aim_fixed_range_m'),
-            'aim_range_tolerance_m': LaunchConfiguration(
-                'aim_range_tolerance_m'),
             'aim_trim_u_px': LaunchConfiguration('aim_trim_u_px'),
             'aim_trim_v_px': LaunchConfiguration('aim_trim_v_px'),
             'relay_config_file': LaunchConfiguration('relay_config_file'),
@@ -397,8 +395,6 @@ def generate_launch_description():
             'relay_config_file',
             default_value=os.path.join(
                 controller_share, 'config', 'fault.ini')),
-        DeclareLaunchArgument('aim_fixed_range_m', default_value='1.0'),
-        DeclareLaunchArgument('aim_range_tolerance_m', default_value='0.05'),
         DeclareLaunchArgument('aim_trim_u_px', default_value='0.0'),
         DeclareLaunchArgument('aim_trim_v_px', default_value='0.0'),
         DeclareLaunchArgument(

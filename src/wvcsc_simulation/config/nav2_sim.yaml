@@ -5,7 +5,7 @@
 #
 # 本文件定义了 Gazebo 仿真中阿克曼小车导航所需的所有参数。
 # 针对阿克曼转向特性，采用了 SmacPlannerHybrid (Reeds-Shepp) 规划器
-# 和 MPPI (模型预测路径积分) 控制器，以满足在果园道路间的精确停靠需求。
+# 和 Regulated Pure Pursuit 控制器，以稳定跟踪人工记录的路线并完成精确停靠。
 # 所有模块启用了 `use_sim_time: true` 以与 Gazebo 仿真时钟同步。
 #
 
@@ -20,8 +20,9 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_footprint
     odom_topic: /odom
-    # 行为树 XML 文件：设定为“到达新目标时重新规划”，保证目标动态更新时路径即时刷新
-    default_nav_to_pose_bt_xml: /opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_w_replanning_only_if_goal_is_updated.xml
+    # Launch 会将此占位路径重写为路线点行为树。机械臂检查点由任务管理器
+    # 在每个 NavigateToPose Goal 中显式选择严格行为树。
+    default_nav_to_pose_bt_xml: navigate_route.xml
     bt_loop_duration: 10
     default_server_timeout: 20
     # Nav2 行为树插件库注册列表 (确保所有用到的插件均已加载)
@@ -70,114 +71,57 @@ controller_server:
   ros__parameters:
     use_sim_time: true
     controller_frequency: 20.0       # 20 Hz 控制频率
+    # 任务、代价地图和里程计均以地面投影点为基准。显式设置，避免
+    # ControllerServer 回退到 Nav2 默认的 base_link 而造成终点语义漂移。
+    robot_base_frame: base_footprint
     odom_topic: /odom
     min_x_velocity_threshold: 0.001  # 最小线速度检测死区
     min_y_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
-    failure_tolerance: 0.3
+    # 代价地图刚更新时，单个控制周期可能暂时没有可用解。期间控制器保持
+    # 零速度，2 s 后才交给行为树恢复处理，避免短暂更新直接中止导航。
+    failure_tolerance: 2.0
     progress_checker_plugin: progress_checker
-    goal_checker_plugins: [general_goal_checker]
+    goal_checker_plugins: [inspection_goal_checker, route_goal_checker]
     controller_plugins: [FollowPath]
     progress_checker:
       plugin: nav2_controller::SimpleProgressChecker
-      required_movement_radius: 0.1
+      # 接近 10 cm 停靠容差时，5 cm 位移即可证明仍在推进，避免将正常的
+      # 末段减速误判为 "Failed to make progress"。
+      required_movement_radius: 0.05
       movement_time_allowance: 20.0
-    general_goal_checker:
+    inspection_goal_checker:
       plugin: nav2_controller::SimpleGoalChecker
       stateful: false
-      xy_goal_tolerance: 0.10   # 10 cm 位置公差
-      yaw_goal_tolerance: 0.10  # 0.1 rad (约 5.7度) 角度公差
-    # 【核心控制器】MPPI (Model Predictive Path Integral)
-    # 针对阿克曼底盘非常有效的局部规划器
+      xy_goal_tolerance: 0.08
+      yaw_goal_tolerance: 0.10
+    route_goal_checker:
+      plugin: nav2_controller::SimpleGoalChecker
+      stateful: false
+      xy_goal_tolerance: 0.08
+      yaw_goal_tolerance: 0.12
+    # Regulated Pure Pursuit 直接跟踪当前全局路径。它保留碰撞预测，
+    # 但不把膨胀层代价额外转化为减速，以免病株停车位附近长期停滞。
     FollowPath:
-      plugin: nav2_mppi_controller::MPPIController
-      time_steps: 56
-      model_dt: 0.05             # 50ms 的预测步长
-      batch_size: 2000           # 批处理采样数
-      vx_std: 0.2
-      vy_std: 0.2
-      wz_std: 0.4
-      vx_max: 0.35               # 最大前进速度 0.35 m/s
-      vx_min: -0.15              # 倒车速度限制
-      vy_max: 0.0                # 阿克曼车不允许横向移动 (0.0)
-      wz_max: 0.30               # 最大角速度 0.30 rad/s
-      iteration_count: 1
-      prune_distance: 1.7
+      plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+      desired_linear_vel: 0.25
+      lookahead_dist: 0.45
+      min_lookahead_dist: 0.30
+      max_lookahead_dist: 0.65
+      lookahead_time: 1.20
+      use_velocity_scaled_lookahead_dist: true
+      min_approach_linear_velocity: 0.04
+      approach_velocity_scaling_dist: 0.80
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: false
+      regulated_linear_scaling_min_radius: 1.575
+      regulated_linear_scaling_min_speed: 0.05
+      use_rotate_to_heading: false
+      allow_reversing: true
+      max_angular_accel: 0.50
       transform_tolerance: 0.3
-      temperature: 0.3
-      gamma: 0.015
-      motion_model: Ackermann    # 运动模型：阿克曼模型
-      visualize: false
-      retry_attempt_limit: 1
-      reset_period: 1.0
-      regenerate_noises: false
-      enforce_path_inversion: true
-      inversion_xy_tolerance: 0.2
-      inversion_yaw_tolerance: 0.3
-      max_robot_pose_search_dist: 10.0
-      # 阿克曼结构约束参数 (最小转弯半径 1.3m)
-      AckermannConstraints:
-        min_turning_r: 1.3
-      # MPPI 的各类 Critic (代价/奖励函数权重)
-      critics:
-        - ConstraintCritic
-        - CostCritic
-        - GoalCritic
-        - GoalAngleCritic
-        - PathAlignCritic
-        - PathFollowCritic
-        - PathAngleCritic
-        - PreferForwardCritic
-      ConstraintCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 4.0
-      CostCritic:                 # 避障代价 (权重很高)
-        enabled: true
-        cost_power: 1
-        cost_weight: 3.81
-        critical_cost: 300.0
-        consider_footprint: true
-        collision_cost: 1000000.0
-        near_goal_distance: 1.0
-      GoalCritic:                 # 接近目标点的代价
-        enabled: true
-        cost_power: 1
-        cost_weight: 5.0
-        threshold_to_consider: 1.4
-      GoalAngleCritic:            # 接近目标航向角的代价
-        enabled: true
-        cost_power: 1
-        cost_weight: 3.0
-        threshold_to_consider: 0.5
-      PathAlignCritic:            # 与参考路径对齐的代价 (极高权重)
-        enabled: true
-        cost_power: 1
-        cost_weight: 14.0
-        max_path_occupancy_ratio: 0.05
-        trajectory_point_step: 3
-        threshold_to_consider: 0.5
-        offset_from_furthest: 20
-        use_path_orientations: true
-      PathFollowCritic:           # 沿着路径前进的代价
-        enabled: true
-        cost_power: 1
-        cost_weight: 5.0
-        offset_from_furthest: 5
-        threshold_to_consider: 1.4
-      PathAngleCritic:            # 路径切向对齐的代价
-        enabled: true
-        cost_power: 1
-        cost_weight: 2.0
-        offset_from_furthest: 4
-        threshold_to_consider: 0.5
-        max_angle_to_furthest: 1.0
-        forward_preference: true
-      PreferForwardCritic:        # 鼓励车辆前进的代价
-        enabled: true
-        cost_power: 1
-        cost_weight: 5.0
-        threshold_to_consider: 0.5
 
 # ---------------- 局部代价地图 (用于短距离实时避障) ----------------
 local_costmap:
@@ -204,8 +148,6 @@ local_costmap:
           data_type: LaserScan
           clearing: true
           marking: true
-          obstacle_max_range: 8.0
-          raytrace_max_range: 10.0
           obstacle_min_range: 0.15
           raytrace_min_range: 0.15
       inflation_layer:                # 膨胀层 (增大障碍物使小车安全绕过)
@@ -240,8 +182,6 @@ global_costmap:
           data_type: LaserScan
           clearing: true
           marking: true
-          obstacle_max_range: 8.0
-          raytrace_max_range: 10.0
           obstacle_min_range: 0.15
           raytrace_min_range: 0.15
       inflation_layer:
@@ -258,7 +198,11 @@ planner_server:
     planner_plugins: [GridBased]
     GridBased:
       plugin: nav2_smac_planner/SmacPlannerHybrid  # 混合状态 Smac 规划器
-      tolerance: 0.0
+      # 机械臂任务使用人工记录的精确停车位。若允许规划器以邻近自由点
+      # 替代原始目标，再叠加 GoalChecker 容差，Nav2 会在距停车位约
+      # 0.35 m 处报告成功，导致任务层拒绝机械臂作业。
+      # 因此仿真必须精确规划到原始 base_footprint 目标；不可达时明确失败。
+      tolerance: 0.00
       downsample_costmap: false
       allow_unknown: false
       max_iterations: 100000
@@ -268,7 +212,7 @@ planner_server:
       angle_quantization_bins: 72                  # 航向角离散化分桶
       analytic_expansion_ratio: 3.5                # 解析扩展 (终点附近的运动学解析解)
       analytic_expansion_max_length: 6.5
-      minimum_turning_radius: 1.3                 # 阿克曼底盘的最小转弯半径
+      minimum_turning_radius: 1.575
       reverse_penalty: 2.0
       change_penalty: 0.2
       non_straight_penalty: 1.2
@@ -326,11 +270,11 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: CLOSED_LOOP
-    max_velocity: [0.35, 0.0, 0.30]     # [vx, vy, wz] 的最大限制
-    min_velocity: [-0.15, 0.0, -0.30]
+    max_velocity: [0.35, 0.0, 0.22]     # [vx, vy, wz] 的最大限制
+    min_velocity: [-0.15, 0.0, -0.22]
     max_accel: [0.5, 0.0, 0.5]
     max_decel: [-1.0, 0.0, -1.0]
     odom_topic: /odom
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
-    velocity_timeout: 0.1
+    velocity_timeout: 0.25

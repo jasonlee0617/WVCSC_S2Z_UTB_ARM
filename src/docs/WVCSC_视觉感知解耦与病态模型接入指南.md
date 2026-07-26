@@ -142,7 +142,7 @@ source install/setup.bash
 仿真 YOLO 流程：
 
 ```bash
-ros2 launch wvcsc_simulation system_sim.launch.py use_mock_targets:=false
+ros2 launch wvcsc_simulation system_sim.launch.py
 ```
 
 实机单臂测试（使用隔离 YOLO 解释器）：

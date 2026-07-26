@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from wvcsc_arm_task.observation import ObservationOptimizer
+from wvcsc_arm_task.ik_observation import ObservationOptimizer
 
 
 ROBOT = '''
@@ -21,18 +21,17 @@ ROBOT = '''
 
 def _optimizer(**overrides):
     config = {
-        'fruit_zone_height_min_m': 0.7,
-        'fruit_zone_height_max_m': 1.7,
-        'fruit_zone_radius_m': 0.5,
-        'distance_min_m': 1.3,
-        'distance_max_m': 1.5,
-        'distance_step_m': 0.1,
+        'tree_range_min_m': 0.8,
+        'tree_range_max_m': 1.5,
+        'camera_reach_min_m': 0.2,
+        'camera_reach_max_m': 0.4,
+        'camera_reach_step_m': 0.1,
         'camera_height_min_m': 0.2,
         'camera_height_max_m': 0.4,
         'camera_height_step_m': 0.1,
         'azimuth_offsets_deg': (0.0,),
-        'image_margin_ratio': 0.08,
-        'min_visible_fraction': 0.60,
+        'pitch_near_deg': -35.0,
+        'pitch_far_deg': -20.0,
         'max_condition_number': 12.0,
         'min_joint_margin_rad': 0.15,
         'preferred_joint_margin_rad': 0.35,
@@ -49,26 +48,24 @@ def _candidates(optimizer):
         (600.0, 600.0, 640.0, 360.0, 1280, 720))
 
 
-def test_candidates_keep_the_fruit_center_and_required_coverage():
+def test_candidates_use_the_radial_grid_without_target_height_filtering():
     candidates = _candidates(_optimizer())
 
     assert candidates
     visible = [candidate for candidate in candidates if candidate.visible]
     assert visible
     assert all(isinstance(candidate.visible, bool) for candidate in candidates)
-    assert all(candidate.visible_fraction >= 0.60 for candidate in visible)
+    assert all(candidate.visible_fraction == pytest.approx(1.0)
+               for candidate in visible)
 
 
 def test_off_center_c10_intrinsics_keep_runtime_observation_candidates():
     optimizer = _optimizer(
-        fruit_zone_height_min_m=0.8,
-        fruit_zone_height_max_m=1.6,
-        distance_min_m=1.1,
-        distance_max_m=1.5,
+        camera_reach_min_m=0.2,
+        camera_reach_max_m=0.4,
         camera_height_min_m=0.2,
         camera_height_max_m=0.4,
         azimuth_offsets_deg=(0.0, -12.0, 12.0),
-        image_margin_ratio=0.07,
     )
     candidates = optimizer.generate(
         (-0.21, -1.79, -1.55),
@@ -78,7 +75,8 @@ def test_off_center_c10_intrinsics_keep_runtime_observation_candidates():
 
     visible = [candidate for candidate in candidates if candidate.visible]
     assert visible
-    assert max(candidate.visible_fraction for candidate in candidates) >= 0.60
+    assert all(candidate.visible_fraction == pytest.approx(1.0)
+               for candidate in candidates)
     assert all(0.20 <= candidate.camera_position[2] <= 0.40
                for candidate in visible)
     assert all(candidate.target_u_px == pytest.approx(640.0) for candidate in visible)
@@ -102,10 +100,10 @@ def test_camera_height_is_measured_from_the_arm_base():
 
 
 @pytest.mark.parametrize('tree_y', (-1.0, 1.0))
-def test_observation_grid_requires_room_between_base_and_tree(tree_y):
+def test_observation_grid_is_not_rejected_by_a_fixed_tree_standoff(tree_y):
     optimizer = _optimizer(
-        distance_min_m=1.0,
-        distance_max_m=1.0,
+        camera_reach_min_m=0.2,
+        camera_reach_max_m=0.2,
     )
 
     candidates = optimizer.generate(
@@ -114,13 +112,13 @@ def test_observation_grid_requires_room_between_base_and_tree(tree_y):
         (600.0, 600.0, 640.0, 360.0, 1280, 720),
     )
 
-    assert candidates == []
+    assert candidates
 
 
 def test_tree_scan_orders_center_then_same_view_left_and_right_fan():
     optimizer = _optimizer(
-        distance_min_m=1.3,
-        distance_max_m=1.3,
+        camera_reach_min_m=0.2,
+        camera_reach_max_m=0.2,
         camera_height_min_m=0.2,
         camera_height_max_m=0.3,
         azimuth_offsets_deg=(0.0, -12.0, 12.0),
@@ -157,13 +155,16 @@ def test_tree_scan_marks_lateral_fallback_when_no_center_is_safe():
     assert ordered[0].azimuth_deg == -12.0
 
 
-def test_coverage_below_configured_threshold_is_rejected():
-    candidates = _candidates(_optimizer(min_visible_fraction=1.0, fruit_zone_radius_m=2.0))
+def test_tree_height_does_not_change_candidate_count():
+    optimizer = _optimizer(azimuth_offsets_deg=(0.0, -12.0, 12.0))
+    mount = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
+    camera = (600.0, 600.0, 640.0, 360.0, 1280, 720)
 
-    assert candidates
-    assert not any(candidate.visible for candidate in candidates)
-    assert all(candidate.rejection_reason == 'fruit_zone_coverage_below_threshold'
-               for candidate in candidates)
+    low = optimizer.generate((1.0, 0.3, 0.0), mount, camera)
+    high = optimizer.generate((1.0, 0.3, 5.0), mount, camera)
+
+    assert len(low) == len(high)
+    assert all(candidate.visible for candidate in low + high)
 
 
 def test_joint_margin_rejects_a_near_limit_ik_solution():

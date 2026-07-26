@@ -12,7 +12,7 @@
 # 4. 图像时间戳是否发生倒流（可能是硬件驱动 Bug）。
 #
 # 所有检测结果通过标准的 `/diagnostics` 话题上报，便于上位机监控软件
-# （如 `robot_monitor`）或 Web 界面直观地展示相机健康度。
+# （如 `robot_monitor`）或 Qt 界面直观地展示相机健康度。
 #
 
 from collections import deque

@@ -16,9 +16,9 @@ wvcsc_visual_servo:
     target_stale_timeout_sec: 0.50
     min_confidence: 0.4
     aim_compensation_enabled: true
-    aim_range_source: fixed
-    aim_fixed_range_m: 1.0
-    aim_range_tolerance_m: 0.05
+    aim_range_source: goal
+    aim_range_min_m: 0.20
+    aim_range_max_m: 2.00
     aim_nozzle_frame: spray_nozzle_link
     aim_min_forward_axis_z: 0.2
     aim_image_margin_px: 60.0

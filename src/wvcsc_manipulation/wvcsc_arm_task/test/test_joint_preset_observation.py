@@ -4,12 +4,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from wvcsc_arm_task.observation import ObservationCandidate
-from wvcsc_arm_task.spray_task import DEFAULT_JOINT_PRESETS_DEG, SprayTask
+from wvcsc_arm_task.ik_observation import ObservationCandidate
+from wvcsc_arm_task.joint_preset_observation import (
+    DEFAULT_JOINT_PRESETS_DEG,
+    JointPresetObservationMixin,
+)
+from wvcsc_arm_task.observation_flow import ObservationFlowMixin
 
 
 class _PresetParameterHarness:
-    _joint_preset_parameters = SprayTask._joint_preset_parameters
+    _joint_preset_parameters = JointPresetObservationMixin._joint_preset_parameters
 
     def __init__(self, values):
         self._values = values
@@ -98,8 +102,9 @@ class _Logger:
 
 
 class _SideGateHarness:
-    _move_to_observation = SprayTask._move_to_observation
-    _hint_available = staticmethod(SprayTask._hint_available)
+    _move_to_observation = ObservationFlowMixin._move_to_observation
+    _hint_available = staticmethod(ObservationFlowMixin._hint_available)
+    _select_joint_preset_side = JointPresetObservationMixin._select_joint_preset_side
 
     def __init__(self):
         self._observation_mode = 'joint_presets'
@@ -165,7 +170,7 @@ def test_joint_preset_selects_the_configured_scan_set_for_each_side(
 
 class _CandidatePreparationHarness:
     _prepare_joint_preset_observation_candidates = (
-        SprayTask._prepare_joint_preset_observation_candidates)
+        JointPresetObservationMixin._prepare_joint_preset_observation_candidates)
 
     def __init__(self, side):
         self._joint_preset_side = side
@@ -176,7 +181,6 @@ class _CandidatePreparationHarness:
         self._observation_candidates = []
         self._observation_candidate_index = 99
         self._observation_failure_reason = ''
-        self._spray_working_distance = 1.0
         self._tree_in_base = (0.0, 0.2 if side == 'left' else -0.2, 0.0)
         self.logger = _Logger()
 
@@ -220,8 +224,8 @@ def _preset(name, joints):
 
 
 class _PresetMotionHarness:
-    _move_to_next_observation = SprayTask._move_to_next_observation
-    _return_to_observation = SprayTask._return_to_observation
+    _move_to_next_observation = ObservationFlowMixin._move_to_next_observation
+    _return_to_observation = ObservationFlowMixin._return_to_observation
 
     def __init__(self):
         self._observation_candidates = [
@@ -233,7 +237,6 @@ class _PresetMotionHarness:
         self._observation_failure_reason = ''
         self._observation_distance = None
         self._observation_pose = None
-        self._spray_working_distance = 1.0
         self._abort = threading.Event()
         self.moves = []
         self.logger = _Logger()
@@ -250,6 +253,10 @@ class _PresetMotionHarness:
     @staticmethod
     def _current_camera_pose():
         return ((0.1, 0.2, 0.3), (0.0, 0.0, 0.0, 1.0))
+
+    @staticmethod
+    def _dynamic_nozzle_range():
+        return 1.0, ''
 
     @staticmethod
     def _publish_observation_debug(*_args, **_kwargs):

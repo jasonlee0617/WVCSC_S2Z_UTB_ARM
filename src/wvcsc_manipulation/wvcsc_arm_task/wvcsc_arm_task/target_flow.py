@@ -100,6 +100,105 @@ def deduplicate_candidates(
     return unique
 
 
+def stable_candidates_from_frames(
+        frames, confirmation_frames, iou_threshold=0.30,
+        center_distance_px=18.0):
+    """Build an ID-independent logical target set from a short scan window.
+
+    YOLO tracker IDs can change while a stationary camera observes the same
+    fruit.  A tree-level task ledger must therefore use the box geometry, not
+    only the latest tracker ID.  Each input item is one distinct image frame;
+    a logical target is accepted only after appearing in ``confirmation_frames``
+    different frames.  Greedy one-to-one matching prevents two detections in
+    the same frame from incrementing one logical target twice.
+    """
+    required = max(1, int(confirmation_frames))
+    clusters = []
+    for frame in frames:
+        assigned = set()
+        for candidate in deduplicate_candidates(frame):
+            matches = []
+            for index, cluster in enumerate(clusters):
+                if index in assigned:
+                    continue
+                previous = cluster['candidate']
+                overlap = candidate.iou(previous)
+                distance = candidate.distance_to(previous)
+                if overlap >= iou_threshold or distance <= center_distance_px:
+                    matches.append((0 if overlap >= iou_threshold else 1,
+                                    -overlap, distance, index))
+            if matches:
+                index = min(matches)[3]
+                clusters[index]['candidate'] = candidate
+                clusters[index]['frames'] += 1
+                assigned.add(index)
+            else:
+                clusters.append({'candidate': candidate, 'frames': 1})
+                assigned.add(len(clusters) - 1)
+    return [cluster['candidate'] for cluster in clusters
+            if cluster['frames'] >= required]
+
+
+def associate_known_targets(
+        known, candidates, same_target, max_cross_view_distance_px):
+    """Associate one detection to one tree-level logical target.
+
+    ``FruitTarget.target_id`` is an image-tracker ID, not a physical identity.
+    A camera recenter or a fan observation can legitimately replace it.  First
+    retain the strict IoU/centre association used within one view; only then
+    make a deterministic nearest-neighbour association for still-unmatched
+    targets.  The caller supplies a finite pixel gate, so a newly seen object
+    can never be silently converted into an existing logical target.
+
+    Returns ``(logical_snapshot, current_detection, forced)`` tuples.  Each
+    logical target and detection appears at most once.
+    """
+    maximum = float(max_cross_view_distance_px)
+    if not math.isfinite(maximum) or maximum <= 0.0:
+        return []
+    known = list(known)
+    candidates = deduplicate_candidates(candidates)
+    pairs = []
+    used_known = set()
+    used_candidates = set()
+
+    strict = []
+    for known_index, previous in enumerate(known):
+        for candidate_index, candidate in enumerate(candidates):
+            if same_target(candidate, previous):
+                strict.append((
+                    -candidate.iou(previous),
+                    candidate.distance_to(previous),
+                    known_index, candidate_index))
+    for _negative_iou, _distance, known_index, candidate_index in sorted(strict):
+        if known_index in used_known or candidate_index in used_candidates:
+            continue
+        pairs.append((known[known_index], candidates[candidate_index], False))
+        used_known.add(known_index)
+        used_candidates.add(candidate_index)
+
+    # A view switch changes all image coordinates.  Do not compare tracker IDs
+    # alone; use one-to-one nearest matching inside the explicit physical gate.
+    fallback = []
+    for known_index, previous in enumerate(known):
+        if known_index in used_known:
+            continue
+        for candidate_index, candidate in enumerate(candidates):
+            if candidate_index in used_candidates:
+                continue
+            distance = candidate.distance_to(previous)
+            if distance <= maximum:
+                fallback.append((distance, -candidate.confidence,
+                                 known_index, candidate_index))
+    for _distance, _confidence, known_index, candidate_index in sorted(fallback):
+        if known_index in used_known or candidate_index in used_candidates:
+            continue
+        pairs.append((known[known_index], candidates[candidate_index], True))
+        used_known.add(known_index)
+        used_candidates.add(candidate_index)
+    return pairs
+
+
 def spray_summary(
         detected, sprayed, unresolved, alignment_failures, recenter_attempts,
         recenter_failures, alignment_attempts):
@@ -235,10 +334,10 @@ class TargetFlowMixin:
             self._tree_frames = self._tree_frames + 1 if trees else 0
 
     def _on_fruit_detections(self, message):
-        """YOLO 病果分割结果的回调，更新目标计数与最新快照。"""
-        fruits = detection_candidates(
+        """YOLO 病果分割结果的回调，保留短窗口几何快照。"""
+        fruits = deduplicate_candidates(detection_candidates(
             message, str(self.get_parameter('target_class_name').value),
-            self.get_parameter('fruit_confidence').value)
+            self.get_parameter('fruit_confidence').value))
         with self._vision_mutex:
             self._fruit_frames += 1
             current = {fruit.target_id: fruit for fruit in fruits}
@@ -249,6 +348,7 @@ class TargetFlowMixin:
                 for target_id in set(self._fruit_counts) | set(current)
             }
             self._fruit_latest = current
+            self._fruit_history.append((time.monotonic(), list(current.values())))
 
     def _on_selected_target(self, message):
         """
@@ -298,7 +398,8 @@ class TargetFlowMixin:
             )
             self._target_valid_frames += 1
 
-            # 检查目标是否处于可进行 IBVS 的工作空间内（像素误差小于 workspce_px）
+            # 重心后才允许交给 IBVS；这里使用 Servo 的真实入口阈值，而不是
+            # 已删除的粗对准固定工作区阈值。
             desired_aim = self._active_aim_pixel(
                 message.image_width, message.image_height)
             reliable_in_workspace = (
@@ -309,7 +410,7 @@ class TargetFlowMixin:
                 self._recenter_config['post_min_confidence']
                 and not target_requires_recenter(
                     message.center_u, message.center_v, *desired_aim,
-                    self._recenter_config['workspace_px']))
+                    self._recenter_config['servo_entry_px']))
 
             if reliable_in_workspace:
                 now = time.monotonic()
@@ -346,31 +447,37 @@ class TargetFlowMixin:
     # ---------- 目标等待与锁定 ----------
     def _wait_for_fruits(self, cancel_requested):
         """
-        等待果实检测满足置信度与稳定性要求，返回候选列表。
+        收集一个短时间窗口内的稳定病果，返回树级逻辑候选列表。
 
-        只有 `confirmation_frames` 帧连续出现，并且在 `settle` 时间后
-        依然稳定，才会被认为是可靠的检测结果。
+        这里故意不要求 tracker ID 跨帧不变：分割器可能在同一病果上分配
+        新 ID。窗口内按 IoU/中心距离关联，避免“第二颗果实只短暂出现”时
+        被首个稳定帧永久排除在任务账本之外。
         """
         deadline = time.monotonic() + float(self.get_parameter('detection_timeout_sec').value)
         settle = float(
             self.get_parameter('fruit_collection_settle_sec').value)
         required = int(self.get_parameter('confirmation_frames').value)
-        ready_since = None
+        collection_started_at = None
         while time.monotonic() < deadline:
             if self._aborted(cancel_requested):
                 return None
             with self._vision_mutex:
-                if self._fruit_frames >= required:
-                    candidates = [
-                        candidate for target_id, candidate in self._fruit_latest.items()
-                        if self._fruit_counts.get(target_id, 0) >= required
+                if collection_started_at is None:
+                    collection_started_at = next(
+                        (stamp for stamp, candidates in self._fruit_history
+                         if candidates), None)
+                if (collection_started_at is not None and
+                        time.monotonic() - collection_started_at >= settle):
+                    frames = [
+                        candidates for stamp, candidates in self._fruit_history
+                        if collection_started_at <= stamp <=
+                        collection_started_at + settle
                     ]
-                    if candidates:
-                        now = time.monotonic()
-                        if ready_since is None:
-                            ready_since = now
-                        if now - ready_since >= settle:
-                            return candidates
+                    return stable_candidates_from_frames(
+                        frames, required,
+                        float(self.get_parameter('processed_iou_threshold').value),
+                        float(self.get_parameter(
+                            'processed_center_distance_px').value))
             time.sleep(0.02)
         with self._vision_mutex:
             return [] if self._fruit_frames else None
@@ -463,6 +570,19 @@ class TargetFlowMixin:
                 -item.confidence),
         )
 
+    def _associate_known_targets(self, known, candidates):
+        """Link a new view to the immutable tree-level target ledger.
+
+        This is deliberately a task-layer association.  The perception layer
+        still owns frame-to-frame tracking; this layer prevents a safe camera
+        motion from making a pending physical target disappear merely because
+        the tracker issued a new temporary ID.
+        """
+        maximum = float(self.get_parameter(
+            'cross_view_reassociation_max_distance_px').value)
+        return associate_known_targets(
+            known, candidates, self._same_target, maximum)
+
     def _remember_targets(self, known, candidates):
         """将当前帧的新检测与已知目标进行关联，更新可能已漂移的同质目标。"""
         for candidate in candidates:
@@ -536,6 +656,7 @@ class TargetFlowMixin:
             self._fruit_frames = 0
             self._fruit_counts = {}
             self._fruit_latest = {}
+            self._fruit_history = []
             self._target_confirmation_id = ''
             self._target_valid_frames = 0
             self._target_confirmation_frames = 0

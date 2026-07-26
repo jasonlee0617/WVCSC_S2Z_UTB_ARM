@@ -10,8 +10,9 @@ import uuid
 from dataclasses import dataclass
 
 import rclpy
-from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import Point, Pose, PoseStamped, PoseWithCovarianceStamped
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -34,6 +35,7 @@ from PyQt5.QtWidgets import (
 )
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool
 from std_srvs.srv import Empty, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
@@ -46,7 +48,7 @@ from wvcsc_interfaces.srv import LoadManualMission
 from wvcsc_bringup.qt_image_viewer import RosImagePanel
 
 
-DEFAULT_SAVE_PATH = os.path.expanduser('~/navigation_points.json')
+DEFAULT_SAVE_DIRECTORY = os.path.expanduser('~')
 
 # These values are the installed ``alicia_mount_joint`` transform.  The
 # Qt editor deliberately uses the same fixed geometry as the real route
@@ -56,6 +58,19 @@ ARM_BASE_FORWARD_OFFSET_M = -0.40
 ARM_BASE_LEFT_OFFSET_M = 0.0
 ARM_BASE_YAW_RAD = math.pi
 SIDE_EPSILON_M = 0.05
+TREE_ROOT_RADIUS_M = 0.16
+TREE_CANOPY_RADIUS_M = 0.55
+TREE_CANOPY_SEGMENTS = 48
+
+# Gazebo 的树干碰撞圆柱半径约为 0.20 m。仿真静态地图使用 0.25 m
+# 的保守树干圆，并沿用 Nav2 的 0.55 m 膨胀半径。该预检只在仿真
+# 启用，用来阻止把停车位录在精确规划也无法到达的树干安全区内。
+SIM_TREE_TRUNK_RADIUS_M = 0.25
+SIM_NAV_FOOTPRINT_HALF_LENGTH_M = 0.725
+SIM_NAV_FOOTPRINT_HALF_WIDTH_M = 0.375
+SIM_NAV_FOOTPRINT_PADDING_M = 0.05
+SIM_NAV_INFLATION_RADIUS_M = 0.55
+SIM_NAV_MIN_PARKING_CLEARANCE_M = 0.05
 
 POINT_INSPECT = 'INSPECT'
 POINT_TRANSIT = 'TRANSIT'
@@ -65,6 +80,39 @@ POINT_TYPES = (POINT_TRANSIT, POINT_INSPECT, POINT_FINISH)
 WORK_SIDE_UNSPECIFIED = 'UNSPECIFIED'
 WORK_SIDE_LEFT = 'LEFT'
 WORK_SIDE_RIGHT = 'RIGHT'
+ARM_ANCHOR_POSE_REFERENCE = 'alicia_base_link_xy_vehicle_yaw'
+
+
+def non_overwriting_json_path(path):
+    """Return ``path`` or a numbered sibling without overwriting a mission."""
+    root, extension = os.path.splitext(os.path.expanduser(path))
+    extension = extension or '.json'
+    candidate = root + extension
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = f'{root}_{suffix:02d}{extension}'
+        suffix += 1
+    return candidate
+
+
+def timestamped_mission_path(directory=DEFAULT_SAVE_DIRECTORY, now=None):
+    """Create the default save path for one distinct manual mission export."""
+    timestamp = (now or datetime.datetime.now()).strftime('%Y%m%d_%H%M%S')
+    return non_overwriting_json_path(
+        os.path.join(os.path.expanduser(directory),
+                     f'navigation_points_{timestamp}.json'))
+
+
+def route_timeline(points):
+    """Return the user-facing relay contract for the submitted route."""
+    entries = []
+    for index, point in enumerate(points, start=1):
+        wide = 'ON' if point.wide_spray_on_approach else 'OFF'
+        item = f'{index}:{point.point_type} 广域={wide}'
+        if point.point_type == POINT_INSPECT:
+            item += f' 病株={point.arm_spray_duration_sec:.1f}s'
+        entries.append(item)
+    return ' | '.join(entries)
 
 
 def remove_opencv_qt_plugin_override(environment=None):
@@ -85,28 +133,55 @@ def remove_opencv_qt_plugin_override(environment=None):
         environment.pop('QT_QPA_FONTDIR', None)
 
 
-def tree_offset_from_docking(docking_pose, tree_pose):
-    """Return signed alicia_base_link XY for a manually clicked tree.
+def arm_anchor_from_vehicle_pose(vehicle_pose):
+    """Return the operator-facing arm-base anchor for a vehicle pose.
 
-    ``docking_pose`` and ``tree_pose`` are both in ``map``.  The arm is
-    mounted at (-0.40, 0.0, pi) relative to the vehicle base.
+    The XY point is ``alicia_base_link``.  Its orientation deliberately keeps
+    the vehicle heading because the RViz 2D Goal arrow means "vehicle front",
+    not the Alicia arm's local +X direction.
     """
-    yaw = pose_yaw(docking_pose)
+    arm_anchor = copy_pose(vehicle_pose)
+    yaw = pose_yaw(vehicle_pose)
     cosine, sine = math.cos(yaw), math.sin(yaw)
-    arm_x = (
-        docking_pose.position.x + cosine * ARM_BASE_FORWARD_OFFSET_M
+    arm_anchor.position.x += (
+        cosine * ARM_BASE_FORWARD_OFFSET_M
         - sine * ARM_BASE_LEFT_OFFSET_M)
-    arm_y = (
-        docking_pose.position.y + sine * ARM_BASE_FORWARD_OFFSET_M
+    arm_anchor.position.y += (
+        sine * ARM_BASE_FORWARD_OFFSET_M
         + cosine * ARM_BASE_LEFT_OFFSET_M)
-    arm_yaw = yaw + ARM_BASE_YAW_RAD
+    return arm_anchor
+
+
+def vehicle_pose_from_arm_anchor(arm_anchor_pose):
+    """Convert an operator-facing arm-base click into a Nav2 vehicle goal."""
+    vehicle_pose = copy_pose(arm_anchor_pose)
+    yaw = pose_yaw(arm_anchor_pose)
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    vehicle_pose.position.x -= (
+        cosine * ARM_BASE_FORWARD_OFFSET_M
+        - sine * ARM_BASE_LEFT_OFFSET_M)
+    vehicle_pose.position.y -= (
+        sine * ARM_BASE_FORWARD_OFFSET_M
+        + cosine * ARM_BASE_LEFT_OFFSET_M)
+    return vehicle_pose
+
+
+def tree_offset_from_arm_anchor(arm_anchor_pose, tree_pose):
+    """Return signed Alicia-frame XY for a tree clicked in ``map``."""
+    arm_yaw = pose_yaw(arm_anchor_pose) + ARM_BASE_YAW_RAD
     arm_cosine, arm_sine = math.cos(arm_yaw), math.sin(arm_yaw)
-    dx = tree_pose.position.x - arm_x
-    dy = tree_pose.position.y - arm_y
+    dx = tree_pose.position.x - arm_anchor_pose.position.x
+    dy = tree_pose.position.y - arm_anchor_pose.position.y
     return (
         arm_cosine * dx + arm_sine * dy,
         -arm_sine * dx + arm_cosine * dy,
     )
+
+
+def tree_offset_from_docking(docking_pose, tree_pose):
+    """Compatibility helper for legacy vehicle-base docking poses."""
+    return tree_offset_from_arm_anchor(
+        arm_anchor_from_vehicle_pose(docking_pose), tree_pose)
 
 
 def work_side_from_tree_y(tree_y_m):
@@ -128,6 +203,72 @@ def valid_work_side(point):
             f'病株侧位与相对 Y 不一致: Y={point.tree_y_m:.3f} m, '
             f'应为 {inferred}')
     return None
+
+
+def ik_recording_range_error(point, observation_mode, minimum_m=0.85,
+                             maximum_m=1.45):
+    """Return a recording-time IK safety error for an inspection point.
+
+    RViz records the arm-base anchor and the tree centre independently.  The
+    arm keeps its wider runtime interlock (0.80--1.50 m), while this editor
+    leaves a 5 cm margin on both sides so an operator cannot submit a task
+    which is already on the hard limit before Nav2 docking variation.
+    """
+    if (str(observation_mode).strip().lower() != 'ik' or
+            point.point_type != POINT_INSPECT):
+        return None
+    distance = math.hypot(float(point.tree_x_m), float(point.tree_y_m))
+    if not math.isfinite(distance):
+        return 'IK模式病株相对机械臂基座距离无效'
+    minimum_m = float(minimum_m)
+    maximum_m = float(maximum_m)
+    if minimum_m <= distance <= maximum_m:
+        return None
+    return (
+        f'IK模式病株距离 {distance:.2f} m 超出录入范围 '
+        f'{minimum_m:.2f}–{maximum_m:.2f} m；'
+        '请重新设置机械臂基座停靠位与树中心')
+
+
+def simulation_parking_clearance_m(arm_anchor_pose, tree_pose):
+    """Return clearance from the padded vehicle footprint to one tree's map cost.
+
+    RViz records ``alicia_base_link`` ground projections, whereas Nav2 moves
+    ``base_footprint``.  The calculation therefore first converts the anchor
+    to the actual vehicle pose, rotates the tree into the vehicle frame, and
+    measures the shortest distance to its padded rectangle.  A positive
+    result is free space remaining after the static trunk and inflation cost.
+    """
+    vehicle_pose = vehicle_pose_from_arm_anchor(arm_anchor_pose)
+    yaw = pose_yaw(vehicle_pose)
+    dx = tree_pose.position.x - vehicle_pose.position.x
+    dy = tree_pose.position.y - vehicle_pose.position.y
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    local_x = cosine * dx + sine * dy
+    local_y = -sine * dx + cosine * dy
+    half_length = (SIM_NAV_FOOTPRINT_HALF_LENGTH_M +
+                   SIM_NAV_FOOTPRINT_PADDING_M)
+    half_width = (SIM_NAV_FOOTPRINT_HALF_WIDTH_M +
+                  SIM_NAV_FOOTPRINT_PADDING_M)
+    nearest_x = min(max(local_x, -half_length), half_length)
+    nearest_y = min(max(local_y, -half_width), half_width)
+    footprint_distance = math.hypot(local_x - nearest_x, local_y - nearest_y)
+    return (footprint_distance - SIM_TREE_TRUNK_RADIUS_M -
+            SIM_NAV_INFLATION_RADIUS_M)
+
+
+def simulation_parking_clearance_error(point, enabled=False):
+    """Return a simulation-only recording error for an unsafe inspect parking pose."""
+    if (not enabled or point.point_type != POINT_INSPECT or
+            point.tree_pose is None):
+        return None
+    clearance = simulation_parking_clearance_m(point.pose, point.tree_pose)
+    if clearance >= SIM_NAV_MIN_PARKING_CLEARANCE_M:
+        return None
+    return (
+        '仿真停车位过近：车辆 footprint 至树干/膨胀区净余量 '
+        f'{clearance:.2f} m，小于 {SIM_NAV_MIN_PARKING_CLEARANCE_M:.2f} m；'
+        '请将机械臂基座停靠位远离树中心后重新记录')
 
 
 def copy_pose(source):
@@ -193,12 +334,14 @@ class WorkPoint:
 
 
 class MissionEditor:
-    schema_version = 4
+    """Qt 保存的人工任务；所有停靠点均由操作员在 RViz 中记录。"""
+
+    schema_version = 7
 
     def __init__(self):
         self.start_pose = None
         self.points = []
-        self.spray_duration = 2.0
+        self.spray_duration = 3.0
         self.return_home_after_finish = False
         self.load_warning = None
 
@@ -225,6 +368,7 @@ class MissionEditor:
     def save(self, path):
         data = {
             'schema_version': self.schema_version,
+            'pose_reference': ARM_ANCHOR_POSE_REFERENCE,
             'start_pose': (
                 pose_to_json(self.start_pose) if self.start_pose else None),
             'spray_duration': self.spray_duration,
@@ -252,41 +396,57 @@ class MissionEditor:
         with open(path, encoding='utf-8') as stream:
             data = json.load(stream)
         version = data.get('schema_version')
-        if version not in (3, self.schema_version):
+        if version not in (3, 4, 5, 6, self.schema_version):
             raise ValueError(
                 f'unsupported navigation file schema_version: {version!r}')
+        if (version in (5, 6, self.schema_version) and
+                data.get('pose_reference') != ARM_ANCHOR_POSE_REFERENCE):
+            raise ValueError(
+                'schema v5/v6/v7 requires pose_reference='
+                f'{ARM_ANCHOR_POSE_REFERENCE!r}')
+        legacy_vehicle_pose = version in (3, 4)
+
+        def load_pose(data_item):
+            pose = pose_from_json(data_item)
+            return (arm_anchor_from_vehicle_pose(pose)
+                    if legacy_vehicle_pose else pose)
+
         self.start_pose = (
-            pose_from_json(data['start_pose'])
+            load_pose(data['start_pose'])
             if data.get('start_pose') else None)
-        self.spray_duration = float(data.get('spray_duration', 2.0))
+        self.spray_duration = float(data.get('spray_duration', 3.0))
         self.return_home_after_finish = bool(
             data.get('return_home_after_finish', False))
         self.load_warning = None
         if version == 3:
-            # Schema v3 represented every point as an arm target.  Preserve
-            # its measured offsets, but make the migration visible because it
-            # does not contain the manually clicked map tree centre or route
-            # operation fields.
+            # Schema v3/v4 stored vehicle-base Nav2 goals.  Convert them to
+            # the new operator-facing arm-base anchor without changing the
+            # eventual vehicle path submitted to Nav2.
             raw_points = data.get('targets', [])
             self.points = [
                 WorkPoint(
-                    pose_from_json(item['pose']),
+                    load_pose(item['pose']),
                     float(item['tree_x_m']),
                     float(item['tree_y_m']),
                     float(item.get('tree_base_z_m', 0.0)),
                     POINT_INSPECT,
                     work_side_from_tree_y(item['tree_y_m']),
                     False,
-                    float(data.get('spray_duration', 2.0)),
+                    float(data.get('spray_duration', 3.0)),
                     0.0,
                     None,
                 )
                 for item in raw_points
             ]
             self.load_warning = (
-                '已导入旧版任务：所有点均按病株检查点处理；请复核点类型、'
-                '广域喷洒和侧位。旧文件没有树中心地图坐标。')
+                '已导入旧版车辆基座任务：已转换为机械臂基座点击语义。'
+                '所有点均按病株检查点处理；请复核点类型、广域喷洒和侧位。')
             return
+
+        if version in (5, 6) and 'auto_start' in data:
+            self.load_warning = (
+                '已导入旧版任务：已忽略 auto_start。加载只预览任务，'
+                '请人工点击“开始任务”。')
 
         self.points = []
         for item in data.get('route_points', []):
@@ -295,7 +455,7 @@ class MissionEditor:
                 raise ValueError(f'unsupported point type: {point_type}')
             tree_pose_data = item.get('tree_pose')
             self.points.append(WorkPoint(
-                pose_from_json(item['pose']),
+                load_pose(item['pose']),
                 float(item.get('tree_x_m', 0.0)),
                 float(item.get('tree_y_m', 0.0)),
                 float(item.get('tree_base_z_m', 0.0)),
@@ -304,7 +464,7 @@ class MissionEditor:
                 (False if point_type == POINT_FINISH else
                  bool(item.get('wide_spray_on_approach', False))),
                 float(item.get('arm_spray_duration_sec',
-                               data.get('spray_duration', 2.0))),
+                               data.get('spray_duration', 3.0))),
                 float(item.get('dwell_time_sec', 0.0)),
                 pose_from_json(tree_pose_data) if tree_pose_data else None,
             ))
@@ -318,8 +478,33 @@ class Nav2QtNode(Node):
         self.declare_parameter('initial_pose_topic', '/initialpose')
         self.declare_parameter('goal_pose_topic', '/manual_goal_pose')
         self.declare_parameter('marker_topic', '/waypoints')
+        self.declare_parameter('require_global_relocalization_service', True)
+        self.declare_parameter('show_sim_spray_status', False)
+        self.declare_parameter('simulation_parking_clearance_check', False)
+        # IK mode has a stricter recording envelope than the arm's runtime
+        # interlock.  Joint presets deliberately bypass this radial check.
+        self.declare_parameter('observation_mode', 'joint_presets')
+        self.declare_parameter('ik_recording_range_min_m', 0.85)
+        self.declare_parameter('ik_recording_range_max_m', 1.45)
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
+        self.require_global_relocalization_service = bool(
+            self.get_parameter('require_global_relocalization_service').value)
+        self.show_sim_spray_status = bool(
+            self.get_parameter('show_sim_spray_status').value)
+        self.simulation_parking_clearance_check = bool(
+            self.get_parameter('simulation_parking_clearance_check').value)
+        self.observation_mode = str(
+            self.get_parameter('observation_mode').value).strip().lower()
+        self.ik_recording_range_min_m = float(
+            self.get_parameter('ik_recording_range_min_m').value)
+        self.ik_recording_range_max_m = float(
+            self.get_parameter('ik_recording_range_max_m').value)
+        if self.observation_mode not in {'ik', 'joint_presets'}:
+            raise ValueError('observation_mode must be ik or joint_presets')
+        if not (0.0 < self.ik_recording_range_min_m <
+                self.ik_recording_range_max_m):
+            raise ValueError('invalid IK recording range')
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.latest_initial_pose = None
@@ -328,6 +513,7 @@ class Nav2QtNode(Node):
         self.goal_sequence = 0
         self.status = None
         self.plan = None
+        self.sim_relay_active = {1: False, 2: False}
 
         latched = QoSProfile(
             depth=1,
@@ -346,6 +532,13 @@ class Nav2QtNode(Node):
                                  self._on_status, latched)
         self.create_subscription(MissionPlan, '/mission/plan',
                                  self._on_plan, latched)
+        if self.show_sim_spray_status:
+            self.create_subscription(
+                Bool, '/relay/sim/channel_1_active',
+                lambda message: self._on_sim_relay(1, message), latched)
+            self.create_subscription(
+                Bool, '/relay/sim/channel_2_active',
+                lambda message: self._on_sim_relay(2, message), latched)
         self.marker_pub = self.create_publisher(
             MarkerArray, str(self.get_parameter('marker_topic').value), 10)
         self.service_clients = {
@@ -390,6 +583,9 @@ class Nav2QtNode(Node):
     def _on_plan(self, message):
         self.plan = message
 
+    def _on_sim_relay(self, channel, message):
+        self.sim_relay_active[channel] = bool(message.data)
+
     def current_pose(self):
         try:
             transform = self.tf_buffer.lookup_transform(
@@ -414,26 +610,31 @@ class Nav2QtNode(Node):
         request.header.stamp = self.get_clock().now().to_msg()
         request.header.frame_id = self.map_frame
         request.mission_id = f'manual_{prefix}_{uuid.uuid4().hex[:8]}'
-        request.home_pose = copy_pose(start_pose)
+        request.home_pose = vehicle_pose_from_arm_anchor(start_pose)
         request.return_home_after_finish = return_home_after_finish
         for index, point in enumerate(points, start=1):
             error = valid_work_side(point)
+            if error is None:
+                error = ik_recording_range_error(
+                    point, getattr(self, 'observation_mode', 'joint_presets'),
+                    getattr(self, 'ik_recording_range_min_m', 0.85),
+                    getattr(self, 'ik_recording_range_max_m', 1.45))
+            if error is None:
+                error = simulation_parking_clearance_error(
+                    point,
+                    getattr(self, 'simulation_parking_clearance_check', False))
             if error is not None:
                 raise ValueError(f'第 {index} 个点无效：{error}')
             target = ManualMissionTarget()
             target.target_id = f'{prefix}_{index:02d}'
-            target.docking_pose = copy_pose(point.pose)
+            target.docking_pose = vehicle_pose_from_arm_anchor(point.pose)
             is_inspect = point.point_type == POINT_INSPECT
             target.tree_x_m = point.tree_x_m if is_inspect else 0.0
             target.tree_y_m = point.tree_y_m if is_inspect else 0.0
             target.tree_base_z_m = point.tree_base_z_m if is_inspect else 0.0
-            target.use_tree_offset_from_arm_base = is_inspect
             target.spray_duration = (
                 float(point.arm_spray_duration_sec)
                 if is_inspect else 0.0)
-            target.confidence = 1.0
-            target.evidence_uri = 'manual://rviz'
-            target.compute_docking_pose = False
             # These fields are part of the typed real-route extension.  The
             # guard keeps a source checkout usable with an older generated
             # interface until the whole workspace is rebuilt.
@@ -470,6 +671,10 @@ class Nav2QtNode(Node):
         if editor.start_pose is not None:
             markers.markers.append(self._marker(
                 editor.start_pose, 'manual_start', 0, 0.2, 0.9, 0.2))
+            markers.markers.append(self._vehicle_marker(
+                editor.start_pose, 'manual_start_vehicle', 0, 0.2, 0.9, 0.2))
+            markers.markers.append(self._mount_line(
+                editor.start_pose, 'manual_start_mount', 0, 0.2, 0.9, 0.2))
         for index, point in enumerate(editor.points, start=1):
             color = {
                 POINT_TRANSIT: (0.1, 0.6, 1.0),
@@ -478,17 +683,43 @@ class Nav2QtNode(Node):
             }[point.point_type]
             markers.markers.append(self._marker(
                 point.pose, 'manual_target', index, *color))
+            markers.markers.append(self._vehicle_marker(
+                point.pose, 'manual_target_vehicle', index, *color))
+            markers.markers.append(self._mount_line(
+                point.pose, 'manual_target_mount', index, *color))
             markers.markers.append(self._label(point.pose, index, point))
             if point.tree_pose is not None:
-                markers.markers.append(self._tree_marker(point.tree_pose, index))
+                markers.markers.append(
+                    self._tree_root_marker(point.tree_pose, index))
+                markers.markers.append(
+                    self._tree_canopy_marker(point.tree_pose, index))
                 markers.markers.append(
                     self._tree_line(point.pose, point.tree_pose, index))
+                markers.markers.append(
+                    self._tree_distance_label(point.pose, point.tree_pose, index))
+                markers.markers.append(self._tree_label(point.tree_pose, index))
+        # Cyan line: operator-recorded route after every arm-base click has
+        # been converted into the actual vehicle-base Nav2 goal.  It is not a
+        # planner prediction; the magenta Path in RViz is recorded odometry.
+        route_anchors = []
+        if editor.start_pose is not None:
+            route_anchors.append(editor.start_pose)
+        route_anchors.extend(point.pose for point in editor.points)
+        if len(route_anchors) >= 2:
+            markers.markers.append(self._vehicle_route_marker(route_anchors))
         if candidate is not None:
             markers.markers.append(self._marker(
                 candidate, 'manual_candidate', 1000, 1.0, 0.8, 0.0))
+            markers.markers.append(self._vehicle_marker(
+                candidate, 'manual_candidate_vehicle', 1000, 1.0, 0.8, 0.0))
+            markers.markers.append(self._mount_line(
+                candidate, 'manual_candidate_mount', 1000, 1.0, 0.8, 0.0))
         if pending_dock is not None:
             markers.markers.append(self._marker(
                 pending_dock, 'manual_pending_inspect_dock', 1001,
+                0.75, 0.2, 0.9))
+            markers.markers.append(self._vehicle_marker(
+                pending_dock, 'manual_pending_inspect_vehicle', 1001,
                 0.75, 0.2, 0.9))
         self.marker_pub.publish(markers)
 
@@ -510,6 +741,66 @@ class Nav2QtNode(Node):
         marker.color.a = 0.9
         return marker
 
+    def _vehicle_marker(self, arm_anchor, namespace, marker_id,
+                        red, green, blue):
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = namespace
+        marker.id = marker_id
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose = vehicle_pose_from_arm_anchor(arm_anchor)
+        marker.scale.x = marker.scale.y = marker.scale.z = 0.16
+        marker.color.r = red
+        marker.color.g = green
+        marker.color.b = blue
+        marker.color.a = 0.55
+        return marker
+
+    def _mount_line(self, arm_anchor, namespace, marker_id,
+                    red, green, blue):
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = namespace
+        marker.id = marker_id
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.025
+        marker.color.r = red
+        marker.color.g = green
+        marker.color.b = blue
+        marker.color.a = 0.65
+        marker.points.extend([
+            arm_anchor.position,
+            vehicle_pose_from_arm_anchor(arm_anchor).position,
+        ])
+        return marker
+
+    def _vehicle_route_marker(self, arm_anchors):
+        """Show the recorded vehicle-base route derived from arm-base clicks."""
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'manual_vehicle_route'
+        marker.id = 0
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.045
+        marker.color.r = 0.0
+        marker.color.g = 0.95
+        marker.color.b = 0.95
+        marker.color.a = 0.90
+        for arm_anchor in arm_anchors:
+            vehicle_pose = vehicle_pose_from_arm_anchor(arm_anchor)
+            marker.points.append(Point(
+                x=vehicle_pose.position.x,
+                y=vehicle_pose.position.y,
+                z=0.06,
+            ))
+        return marker
+
     def _label(self, pose, index, point):
         marker = Marker()
         marker.header.frame_id = self.map_frame
@@ -527,20 +818,83 @@ class Nav2QtNode(Node):
             marker.text += f' {point.work_side}'
         return marker
 
-    def _tree_marker(self, pose, marker_id):
+    def _tree_root_marker(self, pose, marker_id):
+        """Draw the physical tree-trunk footprint at the manually clicked root."""
         marker = Marker()
         marker.header.frame_id = self.map_frame
         marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'manual_tree_center'
+        marker.ns = 'manual_tree_root'
         marker.id = marker_id
-        marker.type = Marker.SPHERE
+        marker.type = Marker.CYLINDER
         marker.action = Marker.ADD
         marker.pose = copy_pose(pose)
-        marker.scale.x = marker.scale.y = marker.scale.z = 0.24
+        marker.pose.position.z = 0.015
+        marker.scale.x = marker.scale.y = TREE_ROOT_RADIUS_M * 2.0
+        marker.scale.z = 0.03
+        marker.color.r = 0.45
+        marker.color.g = 0.20
+        marker.color.b = 0.05
+        marker.color.a = 0.95
+        return marker
+
+    def _tree_canopy_marker(self, pose, marker_id):
+        """Draw the horizontal outer envelope of the current tree model."""
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'manual_tree_canopy'
+        marker.id = marker_id
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.025
         marker.color.r = 1.0
-        marker.color.g = 0.1
-        marker.color.b = 0.1
-        marker.color.a = 0.9
+        marker.color.g = 0.72
+        marker.color.b = 0.05
+        marker.color.a = 0.95
+        for step in range(TREE_CANOPY_SEGMENTS + 1):
+            angle = 2.0 * math.pi * step / TREE_CANOPY_SEGMENTS
+            marker.points.append(Point(
+                x=pose.position.x + TREE_CANOPY_RADIUS_M * math.cos(angle),
+                y=pose.position.y + TREE_CANOPY_RADIUS_M * math.sin(angle),
+                z=0.04,
+            ))
+        return marker
+
+    def _tree_distance_label(self, arm_anchor, tree, marker_id):
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'manual_tree_distance'
+        marker.id = marker_id
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.pose.position.x = (arm_anchor.position.x + tree.position.x) / 2.0
+        marker.pose.position.y = (arm_anchor.position.y + tree.position.y) / 2.0
+        marker.pose.position.z = 0.24
+        marker.scale.z = 0.18
+        marker.color.r = marker.color.g = marker.color.b = marker.color.a = 1.0
+        distance = math.hypot(
+            tree.position.x - arm_anchor.position.x,
+            tree.position.y - arm_anchor.position.y)
+        marker.text = f'ARM-ROOT: {distance:.2f} m'
+        return marker
+
+    def _tree_label(self, pose, marker_id):
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'manual_tree_label'
+        marker.id = marker_id
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.pose = copy_pose(pose)
+        marker.pose.position.z = 0.30
+        marker.scale.z = 0.16
+        marker.color.r = 1.0
+        marker.color.g = 0.85
+        marker.color.b = 0.2
+        marker.color.a = 1.0
+        marker.text = f'ROOT\nCANOPY r={TREE_CANOPY_RADIUS_M:.2f}m'
         return marker
 
     def _tree_line(self, docking, tree, marker_id):
@@ -580,16 +934,17 @@ class Nav2Gui(QWidget):
         super().__init__()
         self.node = node
         self.editor = MissionEditor()
-        self.save_path = DEFAULT_SAVE_PATH
+        self.save_directory = DEFAULT_SAVE_DIRECTORY
+        self.save_path = timestamped_mission_path(self.save_directory)
         self.candidate = None
         self.candidate_sequence = 0
         self.consumed_goal_sequence = 0
         self.pending_dock_pose = None
         self.pending_dock_sequence = 0
-        self.single_mission_id = None
         self.pending = False
         self.required_initial_pose_sequence = 0
-        self.relocalization_ready = True
+        self.relocalization_ready = not bool(getattr(
+            node, 'require_global_relocalization_service', True))
         self._build_ui()
         self.ros_timer = QTimer(self)
         self.ros_timer.timeout.connect(self._spin_ros)
@@ -608,17 +963,15 @@ class Nav2Gui(QWidget):
         self.point_type_combo.addItem('通行点', POINT_TRANSIT)
         self.point_type_combo.addItem('病株检查点', POINT_INSPECT)
         self.point_type_combo.addItem('终点', POINT_FINISH)
-        self.add_point_button = QPushButton('使用最新目标为停靠位')
+        self.add_point_button = QPushButton('使用最新目标为机械臂基座停靠位')
         self.capture_tree_button = QPushButton('使用下一目标为树中心')
-        self.single_button = QPushButton('单点导航+喷洒')
-        self.multi_button = QPushButton('多点导航+喷洒')
+        self.start_task_button = QPushButton('开始任务')
         task_layout.addWidget(self.record_start_button, 0, 0)
         task_layout.addWidget(QLabel('新点类型:'), 0, 1)
         task_layout.addWidget(self.point_type_combo, 0, 2)
         task_layout.addWidget(self.add_point_button, 0, 3)
         task_layout.addWidget(self.capture_tree_button, 0, 4)
-        task_layout.addWidget(self.single_button, 0, 5)
-        task_layout.addWidget(self.multi_button, 0, 6)
+        task_layout.addWidget(self.start_task_button, 0, 5, 1, 2)
         task_layout.addWidget(self.relocalize_button, 0, 7)
         task_layout.addWidget(QLabel('病株默认喷洒时长 (s):'), 1, 0)
         self.duration_spin = QDoubleSpinBox()
@@ -631,11 +984,12 @@ class Nav2Gui(QWidget):
         self.dwell_spin.setRange(0.0, 60.0)
         self.dwell_spin.setSingleStep(0.5)
         task_layout.addWidget(self.dwell_spin, 1, 3)
-        self.wide_spray_checkbox = QCheckBox('驶向该点时开启广域喷洒')
+        self.wide_spray_checkbox = QCheckBox('驶向该点（进入区段）开启广域喷洒')
+        self.wide_spray_checkbox.setChecked(True)
         task_layout.addWidget(self.wide_spray_checkbox, 1, 4, 1, 3)
         layout.addLayout(task_layout)
 
-        self.candidate_label = QLabel('最新RViz终点: 未收到 /manual_goal_pose')
+        self.candidate_label = QLabel('最新RViz机械臂基座点: 未收到 /manual_goal_pose')
         self.capture_label = QLabel('采集状态: 请选择点类型并点击 RViz 2D Goal')
         self.start_label = QLabel('起点: 未记录')
         self.return_home_checkbox = QCheckBox('完成后返回起点')
@@ -644,11 +998,21 @@ class Nav2Gui(QWidget):
         layout.addWidget(self.start_label)
         layout.addWidget(self.return_home_checkbox)
 
+        self.wide_relay_label = None
+        self.arm_relay_label = None
+        if self.node.show_sim_spray_status:
+            relay_layout = QHBoxLayout()
+            self.wide_relay_label = QLabel('广域喷洒: ● 关闭')
+            self.arm_relay_label = QLabel('喷嘴喷洒: ● 关闭')
+            relay_layout.addWidget(self.wide_relay_label)
+            relay_layout.addWidget(self.arm_relay_label)
+            layout.addLayout(relay_layout)
+
         self.table = QTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels(
-            ['序号', '类型', '停靠 X (m)', '停靠 Y (m)', 'yaw (rad)',
+            ['序号', '类型', '机械臂基座 X (m)', '机械臂基座 Y (m)', '车头 yaw (rad)',
              '树相对基座 X (m)', '树相对基座 Y (m)', '侧位',
-             '驶向本点广域喷洒', '病株喷洒(s)', '停留(s)'])
+             '驶向本点广域喷洒（进入区段）', '病株喷洒(s)', '停留(s)'])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -658,7 +1022,7 @@ class Nav2Gui(QWidget):
         self.delete_button = QPushButton('删除选中点')
         self.up_button = QPushButton('上移')
         self.down_button = QPushButton('下移')
-        self.clear_button = QPushButton('清空多点列表')
+        self.clear_button = QPushButton('清空任务列表')
         for button in (self.delete_button, self.up_button,
                        self.down_button, self.clear_button):
             edit_layout.addWidget(button)
@@ -679,8 +1043,8 @@ class Nav2Gui(QWidget):
         layout.addLayout(control_layout)
 
         file_layout = QHBoxLayout()
-        self.save_button = QPushButton('保存多点任务')
-        self.load_button = QPushButton('加载多点任务')
+        self.save_button = QPushButton('保存任务')
+        self.load_button = QPushButton('加载任务')
         file_layout.addWidget(self.save_button)
         file_layout.addWidget(self.load_button)
         layout.addLayout(file_layout)
@@ -704,8 +1068,7 @@ class Nav2Gui(QWidget):
         self.relocalize_button.clicked.connect(self._relocalize_and_clear)
         self.add_point_button.clicked.connect(self._add_point)
         self.capture_tree_button.clicked.connect(self._capture_tree_center)
-        self.single_button.clicked.connect(self._start_single)
-        self.multi_button.clicked.connect(self._start_multi)
+        self.start_task_button.clicked.connect(self._start_task)
         self.delete_button.clicked.connect(self._delete_point)
         self.up_button.clicked.connect(lambda: self._move_point(-1))
         self.down_button.clicked.connect(lambda: self._move_point(1))
@@ -728,13 +1091,12 @@ class Nav2Gui(QWidget):
         self._refresh()
 
     def _refresh(self):
-        self._consume_completed_single_target()
         if self.node.goal_sequence != self.candidate_sequence:
             self.candidate_sequence = self.node.goal_sequence
             self.candidate = self.node.latest_goal_pose
             if self.candidate is not None:
                 self.candidate_label.setText(
-                    '最新RViz终点: '
+                    '最新RViz机械臂基座点: '
                     f'x={self.candidate.position.x:.2f}, '
                     f'y={self.candidate.position.y:.2f}, '
                     f'yaw={pose_yaw(self.candidate):.2f}')
@@ -744,6 +1106,13 @@ class Nav2Gui(QWidget):
         if self.node.status and self.node.status.last_error:
             state_text += f' - {self.node.status.last_error}'
         self.status_label.setText(f'状态: {state_text}')
+        wide_relay_label = getattr(self, 'wide_relay_label', None)
+        arm_relay_label = getattr(self, 'arm_relay_label', None)
+        if wide_relay_label is not None and arm_relay_label is not None:
+            self._set_relay_label(
+                wide_relay_label, '广域喷洒', self.node.sim_relay_active[1])
+            self._set_relay_label(
+                arm_relay_label, '喷嘴喷洒', self.node.sim_relay_active[2])
         busy = state in self.ACTIVE
         editable = not self.pending and not busy
         has_start = self.editor.start_pose is not None
@@ -761,10 +1130,8 @@ class Nav2Gui(QWidget):
             editable and self.pending_dock_pose is not None
             and self.candidate is not None
             and self.node.goal_sequence > self.pending_dock_sequence)
-        self.single_button.setEnabled(
-            editable and has_start and point_count == 1)
-        self.multi_button.setEnabled(
-            editable and has_start and point_count >= 2)
+        self.start_task_button.setEnabled(
+            editable and has_start and point_count >= 1)
         for button in (self.delete_button, self.up_button,
                        self.down_button, self.clear_button, self.save_button,
                        self.load_button):
@@ -785,11 +1152,19 @@ class Nav2Gui(QWidget):
             if not self.relocalization_ready:
                 self.start_label.setText('起点: 等待 AMCL 全局重定位服务成功')
             elif fresh_initial and self.node.latest_initial_pose is not None:
-                pose = self.node.latest_initial_pose
+                pose = arm_anchor_from_vehicle_pose(
+                    self.node.latest_initial_pose)
                 self.start_label.setText(
-                    '起点候选: RViz 已重新定位，等待确认 '
+                    '起点候选（机械臂基座）: RViz 已重新定位，等待确认 '
                     f'x={pose.position.x:.2f}, y={pose.position.y:.2f}, '
                     f'yaw={pose_yaw(pose):.2f}')
+
+    @staticmethod
+    def _set_relay_label(label, name, active):
+        label.setText(f'{name}: ● ' + ('开启' if active else '关闭'))
+        label.setStyleSheet(
+            'color: #00d7d7; font-weight: bold;' if active
+            else 'color: #808080;')
 
     def _record_start(self):
         if not self.relocalization_ready:
@@ -798,15 +1173,16 @@ class Nav2Gui(QWidget):
         if self.node.initial_pose_sequence <= self.required_initial_pose_sequence:
             self._log('记录起点失败：请先在 RViz 重新点击 2D Estimate Pose')
             return
-        pose = self.node.current_pose()
-        if pose is None:
+        vehicle_pose = self.node.current_pose()
+        if vehicle_pose is None:
             self._log('记录起点失败：请等待 AMCL 的 map→base TF 可用')
             return
-        self.editor.start_pose = copy_pose(pose)
+        pose = arm_anchor_from_vehicle_pose(vehicle_pose)
+        self.editor.start_pose = pose
         self.start_label.setText(
-            f'起点: x={pose.position.x:.2f}, y={pose.position.y:.2f}, '
+            f'起点（机械臂基座）: x={pose.position.x:.2f}, y={pose.position.y:.2f}, '
             f'yaw={pose_yaw(pose):.2f}')
-        self._log('已确认当前 AMCL 起点')
+        self._log('已确认当前起点：显示为机械臂基座，导航仍使用车辆基座')
         self._publish_markers()
 
     def _relocalize_and_clear(self):
@@ -817,14 +1193,21 @@ class Nav2Gui(QWidget):
         self.consumed_goal_sequence = self.node.goal_sequence
         self.pending_dock_pose = None
         self.pending_dock_sequence = self.node.goal_sequence
-        self.single_mission_id = None
         self.required_initial_pose_sequence = self.node.initial_pose_sequence
-        self.relocalization_ready = False
-        self.start_label.setText('起点: 正在请求 AMCL 全局重定位')
+        self.relocalization_ready = not bool(getattr(
+            self.node, 'require_global_relocalization_service', True))
+        self.start_label.setText(
+            '起点: 正在请求 AMCL 全局重定位'
+            if bool(getattr(self.node, 'require_global_relocalization_service', True))
+            else '起点: 请在 RViz 点击 2D Estimate Pose 后确认')
         self.capture_label.setText('采集状态: 任务点已清空；请重新定位后设置任务点')
-        self.candidate_label.setText('最新RViz终点: 等待新的 2D Goal')
+        self.candidate_label.setText('最新RViz机械臂基座点: 等待新的 2D Goal')
         self._update_table()
         self._publish_markers()
+
+        if not bool(getattr(self.node, 'require_global_relocalization_service', True)):
+            self._log('仿真未启动 AMCL 全局重定位服务；请在 RViz 点击 2D Estimate Pose 后确认起点')
+            return
 
         client = self.node.service_clients['reinitialize_global_localization']
         if not client.service_is_ready():
@@ -854,8 +1237,8 @@ class Nav2Gui(QWidget):
             self.pending_dock_sequence = self.node.goal_sequence
             self.consumed_goal_sequence = self.node.goal_sequence
             self.capture_label.setText(
-                '采集状态: 已记录病株停车位；请在 RViz 点击树中心，再点击“使用下一目标为树中心”')
-            self._log('已记录病株停车位，等待树中心点击')
+                '采集状态: 已记录病株机械臂基座停靠位；请在 RViz 点击树中心，再点击“使用下一目标为树中心”')
+            self._log('已记录病株机械臂基座停靠位，等待树中心点击')
             self._publish_markers()
             return
 
@@ -876,11 +1259,42 @@ class Nav2Gui(QWidget):
         if self.node.goal_sequence <= self.pending_dock_sequence:
             self._log('请先在 RViz 点击新的树中心位置')
             return
-        tree_x_m, tree_y_m = tree_offset_from_docking(
+        tree_x_m, tree_y_m = tree_offset_from_arm_anchor(
             self.pending_dock_pose, self.candidate)
         work_side = work_side_from_tree_y(tree_y_m)
         if work_side == WORK_SIDE_UNSPECIFIED:
             self._log('树中心与机械臂基座 Y 过近，无法判定左右侧；请重新点击树中心')
+            return
+        prospective = WorkPoint(
+            pose=copy_pose(self.pending_dock_pose),
+            tree_x_m=tree_x_m,
+            tree_y_m=tree_y_m,
+            tree_base_z_m=self.candidate.position.z,
+            point_type=POINT_INSPECT,
+            work_side=work_side,
+            tree_pose=copy_pose(self.candidate),
+        )
+        error = ik_recording_range_error(
+            prospective, self.node.observation_mode,
+            self.node.ik_recording_range_min_m,
+            self.node.ik_recording_range_max_m)
+        if error is None:
+            error = simulation_parking_clearance_error(
+                prospective,
+                getattr(self.node, 'simulation_parking_clearance_check', False))
+        if error is not None:
+            # Do not leave a stale pending docking point that could later be
+            # paired with an unrelated tree click.
+            self.pending_dock_pose = None
+            self.pending_dock_sequence = 0
+            title = ('仿真停车位不合格'
+                     if error.startswith('仿真停车位过近')
+                     else 'IK 作业距离不合格')
+            self.capture_label.setText(
+                '采集状态: 停车位或IK作业距离不合格；请重新记录停靠位')
+            self._log(f'拒绝病株点: {error}')
+            QMessageBox.warning(self, title, error)
+            self._publish_markers()
             return
         self.editor.add_point(
             self.pending_dock_pose,
@@ -899,9 +1313,14 @@ class Nav2Gui(QWidget):
         self.capture_label.setText(
             '采集状态: 病株点已完成；可继续选择下一个点类型')
         self._update_table()
-        self._log(
+        message = (
             f'已添加病株点 {len(self.editor.points)}: '
             f'树相对基座=({tree_x_m:.2f}, {tree_y_m:.2f}) m, {work_side}')
+        if getattr(self.node, 'simulation_parking_clearance_check', False):
+            clearance = simulation_parking_clearance_m(
+                self.editor.points[-1].pose, self.editor.points[-1].tree_pose)
+            message += f'; 停车净余量={clearance:.2f} m'
+        self._log(message)
         self._publish_markers()
 
     @staticmethod
@@ -912,15 +1331,10 @@ class Nav2Gui(QWidget):
             POINT_FINISH: '终点',
         }[point_type]
 
-    def _start_single(self):
-        if len(self.editor.points) != 1:
-            return
-        self._submit_manual([self._copy_work_point(self.editor.points[0])],
-                            'single')
-
-    def _start_multi(self):
+    def _start_task(self):
+        """提交当前列表；一个点和多个点共享同一条任务入口。"""
         points = [self._copy_work_point(point) for point in self.editor.points]
-        self._submit_manual(points, 'multi')
+        self._submit_manual(points, 'task')
 
     @staticmethod
     def _copy_work_point(point):
@@ -937,6 +1351,7 @@ class Nav2Gui(QWidget):
             return
         self.editor.spray_duration = self.duration_spin.value()
         self.editor.return_home_after_finish = self.return_home_checkbox.isChecked()
+        self._log(f'路线预览: {route_timeline(points)}')
         if self.node.status and self.node.status.state in self.TERMINAL:
             self._trigger('reset', lambda _result: self._load_manual(points, prefix))
             return
@@ -949,30 +1364,15 @@ class Nav2Gui(QWidget):
                 self.editor.return_home_after_finish, prefix)
         except ValueError as error:
             self._log(f'任务数据无效: {error}')
+            QMessageBox.warning(self, '任务数据无效', str(error))
             return
         self._request(
             'load', request,
-            lambda result: self._start_loaded_mission(
-                result, request.mission_id if prefix == 'single' else None))
+            self._start_loaded_mission)
 
-    def _start_loaded_mission(self, result, single_mission_id=None):
-        if single_mission_id is not None:
-            self.single_mission_id = single_mission_id
+    def _start_loaded_mission(self, result):
         self._log(result.message)
         self._trigger('start')
-
-    def _consume_completed_single_target(self):
-        status = self.node.status
-        if (self.single_mission_id is None or status is None
-                or status.mission_id != self.single_mission_id
-                or status.completed_targets < 1):
-            return
-        self.single_mission_id = None
-        if self.editor.points:
-            self.editor.points.pop(0)
-            self._update_table()
-            self._publish_markers()
-            self._log('单点喷洒完成，已从列表删除')
 
     def _trigger(self, name, callback=None):
         self._request(name, Trigger.Request(), callback)
@@ -1009,12 +1409,27 @@ class Nav2Gui(QWidget):
     def _update_table(self):
         self.table.setRowCount(len(self.editor.points))
         for row, point in enumerate(self.editor.points):
-            self.table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+            range_error = ik_recording_range_error(
+                point, getattr(self.node, 'observation_mode', 'joint_presets'),
+                getattr(self.node, 'ik_recording_range_min_m', 0.85),
+                getattr(self.node, 'ik_recording_range_max_m', 1.45))
+            if range_error is None:
+                range_error = simulation_parking_clearance_error(
+                    point,
+                    getattr(self.node, 'simulation_parking_clearance_check', False))
+            static_cells = (
+                (0, QTableWidgetItem(str(row + 1))),
+                (2, QTableWidgetItem(f'{point.pose.position.x:.3f}')),
+                (3, QTableWidgetItem(f'{point.pose.position.y:.3f}')),
+                (4, QTableWidgetItem(f'{pose_yaw(point.pose):.3f}')),
+            )
+            for column, item in static_cells:
+                if range_error is not None:
+                    item.setBackground(QColor(255, 226, 226))
+                    item.setToolTip(range_error)
+                self.table.setItem(row, column, item)
             self.table.setCellWidget(
                 row, 1, self._point_type_combo(point))
-            self.table.setItem(row, 2, QTableWidgetItem(f'{point.pose.position.x:.3f}'))
-            self.table.setItem(row, 3, QTableWidgetItem(f'{point.pose.position.y:.3f}'))
-            self.table.setItem(row, 4, QTableWidgetItem(f'{pose_yaw(point.pose):.3f}'))
             self.table.setCellWidget(
                 row, 5, self._offset_spin(point.tree_x_m, point, 'tree_x_m'))
             self.table.setCellWidget(
@@ -1127,10 +1542,12 @@ class Nav2Gui(QWidget):
         self._publish_markers()
 
     def _save_dialog(self):
+        default_path = timestamped_mission_path(self.save_directory)
         path, _ = QFileDialog.getSaveFileName(
-            self, '保存多点任务', self.save_path, 'JSON files (*.json)')
+            self, '保存任务', default_path, 'JSON files (*.json)')
         if not path:
             return
+        path = non_overwriting_json_path(path)
         try:
             self.editor.spray_duration = self.duration_spin.value()
             self.editor.return_home_after_finish = self.return_home_checkbox.isChecked()
@@ -1138,12 +1555,13 @@ class Nav2Gui(QWidget):
         except (OSError, ValueError, KeyError) as error:
             QMessageBox.warning(self, '保存失败', str(error))
             return
-        self.save_path = path
+        self.save_directory = os.path.dirname(path) or DEFAULT_SAVE_DIRECTORY
+        self.save_path = timestamped_mission_path(self.save_directory)
         self._log(f'已保存任务: {path}')
 
     def _load_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, '加载多点任务', self.save_path, 'JSON files (*.json)')
+            self, '加载任务', self.save_directory, 'JSON files (*.json)')
         if not path:
             return
         try:
@@ -1151,12 +1569,13 @@ class Nav2Gui(QWidget):
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
             QMessageBox.warning(self, '加载失败', str(error))
             return
-        self.save_path = path
+        self.save_directory = os.path.dirname(path) or DEFAULT_SAVE_DIRECTORY
+        self.save_path = timestamped_mission_path(self.save_directory)
         self.duration_spin.setValue(self.editor.spray_duration)
         self.return_home_checkbox.setChecked(self.editor.return_home_after_finish)
         if self.editor.start_pose is not None:
             self.start_label.setText(
-                f'起点: x={self.editor.start_pose.position.x:.2f}, '
+                f'起点（机械臂基座）: x={self.editor.start_pose.position.x:.2f}, '
                 f'y={self.editor.start_pose.position.y:.2f}, '
                 f'yaw={pose_yaw(self.editor.start_pose):.2f}')
         else:
@@ -1168,6 +1587,7 @@ class Nav2Gui(QWidget):
         if self.editor.load_warning:
             QMessageBox.warning(self, '旧任务已迁移', self.editor.load_warning)
             self._log(self.editor.load_warning)
+        self._log('任务已加载，仅预览；请点击“开始任务”后提交导航与喷洒任务')
 
     def _publish_markers(self):
         self.node.publish_markers(

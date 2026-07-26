@@ -29,7 +29,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, JointState
-from std_msgs.msg import Int8, String
+from std_msgs.msg import Int8
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 from trajectory_msgs.msg import JointTrajectory
@@ -41,7 +41,6 @@ from .aim_compensation import plane_error_mm, project_nozzle_axis
 from .servo.alignment_progress import AlignmentProgress
 from .servo.math_utils import (bounded_control_dt, limit_xy_norm, slew,
                                 SimpleTargetPredictor2D)
-from .servo.debug_snapshot import debug_json, debug_publish_due
 from .servo.servo_status_policy import ServoStatusAction, ServoStatusPolicy
 from .servo.pid_controller import PIDController2D, ServoControlConfig
 from .servo.visual_servo_params import ServoRuntimeConfig
@@ -66,9 +65,6 @@ class _GoalState:
     stop_code: int | None = None                   # 触发停止时的错误码
     stop_message: str = ''                         # 触发停止的错误信息
     alignment_started: float | None = None         # 本次对准开始的时间戳
-    last_debug_publish: float | None = None        # 上次发布高频调试信息的时间
-    last_terminal_status_log: float | None = None  # 上次打印终端人类可读日志的时间
-    last_terminal_phase: tuple | None = None       # 上次记录的终端阶段状态
     alignment_hold_latched: bool = False           # 收敛迟滞保持标志（防止误差在容差边缘反复跳动）
     initial_joint_positions: tuple = ()             # Action 开始时的机械臂关节快照
     max_joint_delta_rad: float = 0.0                # Action 期间实际最大关节位移
@@ -78,6 +74,7 @@ class _GoalState:
     servo_output_first_monotonic: float | None = None
     servo_output_last_monotonic: float | None = None
     max_commanded_joint_delta_rad: float = 0.0      # Servo 轨迹相对实测关节的最大位移
+    first_motion_command_monotonic: float | None = None
     direction_guard_baseline: tuple | None = None   # (wall_time, error_u_px, error_v_px)
     direction_guard_checked: bool = False
 
@@ -87,6 +84,14 @@ def _positive_finite_rate(node, name):
     value = float(node.get_parameter(name).value)
     if not math.isfinite(value) or value <= 0.0:
         raise ValueError(f'{name} must be finite and positive')
+    return value
+
+
+def _nonnegative_finite_value(node, name):
+    """读取非负有限标量，供执行链诊断阈值使用。"""
+    value = float(node.get_parameter(name).value)
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError(f'{name} must be finite and non-negative')
     return value
 
 
@@ -140,8 +145,14 @@ class VisualServo(Node):
         super().__init__('wvcsc_visual_servo')
         self._declare_parameters()
         self._config = ServoRuntimeConfig.from_node(self)
-        _positive_finite_rate(self, 'debug_rate_hz')
-        _positive_finite_rate(self, 'terminal_status_rate_hz')
+        self._servo_response_timeout_sec = _positive_finite_rate(
+            self, 'servo_response_timeout_sec')
+        self._servo_min_output_rate_hz = _positive_finite_rate(
+            self, 'servo_min_output_rate_hz')
+        self._servo_min_commanded_joint_delta_rad = _nonnegative_finite_value(
+            self, 'servo_min_commanded_joint_delta_rad')
+        self._servo_min_actual_joint_delta_rad = _nonnegative_finite_value(
+            self, 'servo_min_actual_joint_delta_rad')
         self._angular_u_sign = _unit_axis_sign(self, 'angular_u_sign')
         self._angular_v_sign = _unit_axis_sign(self, 'angular_v_sign')
         self._direction_guard_enabled = bool(
@@ -208,8 +219,6 @@ class VisualServo(Node):
         # 4. 主要 ROS 接口初始化
         self._twist = self.create_publisher(
             TwistStamped, str(self.get_parameter('twist_topic').value), 10)
-        self._debug = self.create_publisher(
-            String, str(self.get_parameter('debug_topic').value), 10)
 
         # 5. 订阅话题 (视觉输入与状态)
         self.create_subscription(
@@ -266,9 +275,6 @@ class VisualServo(Node):
             'servo_status_topic': '/servo_node/status',
             'joint_state_topic': '/joint_states',
             'servo_command_out_topic': '/arm_controller/joint_trajectory',
-            'debug_topic': '/vision/visual_servo_debug',
-            'debug_rate_hz': 5.0,
-            'terminal_status_rate_hz': 1.0,
             'start_servo_service': '/servo_node/start_servo',
             'aim_service_name': '/vision/compute_spray_aim',
             'command_frame': 'camera_color_optical_frame',
@@ -288,9 +294,11 @@ class VisualServo(Node):
             'desired_offset_u_px': 0.0,
             'desired_offset_v_px': 0.0,
             'aim_compensation_enabled': True,
-            'aim_range_source': 'fixed',
-            'aim_fixed_range_m': 1.0,
-            'aim_range_tolerance_m': 0.05,
+            # 工距由当前观察位和树根几何计算后随 Align Goal 传入；不得把
+            # 固定标定工距误当作任务的可用范围门控。
+            'aim_range_source': 'goal',
+            'aim_range_min_m': 0.20,
+            'aim_range_max_m': 2.00,
             'aim_nozzle_frame': 'spray_nozzle_link',
             'aim_min_forward_axis_z': 0.2,
             'aim_image_margin_px': 20.0,
@@ -321,6 +329,10 @@ class VisualServo(Node):
             'direction_guard_min_error_px': 20.0,
             'direction_guard_max_growth_px': 10.0,
             'direction_guard_min_confidence': 0.60,
+            'servo_response_timeout_sec': 0.75,
+            'servo_min_output_rate_hz': 8.0,
+            'servo_min_commanded_joint_delta_rad': 0.01,
+            'servo_min_actual_joint_delta_rad': 0.002,
             'zero_command_count': 8,
             'service_timeout_sec': 5.0,
             'initial_start_timeout_sec': 12.0,
@@ -504,13 +516,13 @@ class VisualServo(Node):
         working_range_m = float(working_range_m)
         if not math.isfinite(working_range_m) or working_range_m <= 0.0:
             return None, 'working range is invalid'
-        if abs(working_range_m - self._config.aim_fixed_range_m) > (
-                self._config.aim_range_tolerance_m):
+        if not (self._config.aim_range_min_m <= working_range_m <=
+                self._config.aim_range_max_m):
             return None, (
-                'working range does not match the calibrated aim profile: '
+                'working range is outside the geometric aim bounds: '
                 f'requested={working_range_m:.3f}m '
-                f'profile={self._config.aim_fixed_range_m:.3f}±'
-                f'{self._config.aim_range_tolerance_m:.3f}m')
+                f'allowed={self._config.aim_range_min_m:.3f}-'
+                f'{self._config.aim_range_max_m:.3f}m')
         with self._lock:
             camera = self._camera
         if camera is None:
@@ -643,6 +655,64 @@ class VisualServo(Node):
             rate = float(count - 1) / (last - first)
         return count, velocity_count, rate
 
+    def _servo_actuation_stall_reason(self, now):
+        """Return a precise downstream-execution fault after a real command.
+
+        A valid image target and a published Twist only prove that the Python
+        controller ran.  The last leg of this chain is MoveIt Servo's
+        ``JointTrajectory`` output followed by measured joint motion.  Gazebo
+        previously rejected trajectories containing a non-zero terminal
+        velocity while Servo status stayed ``NO_WARNING``; this watchdog turns
+        that silent condition into a recoverable Action result.
+        """
+        with self._lock:
+            state = self._goal_state
+            command_started = state.first_motion_command_monotonic
+            first_output = state.servo_output_first_monotonic
+            last_output = state.servo_output_last_monotonic
+            output_count = state.servo_output_count
+            commanded_delta = state.max_commanded_joint_delta_rad
+            actual_delta = state.max_joint_delta_rad
+
+        # ``object.__new__(VisualServo)`` is intentionally used by focused
+        # unit tests.  Keep the watchdog backward-compatible with those
+        # minimal harnesses while real nodes always use validated parameters.
+        response_timeout = getattr(self, '_servo_response_timeout_sec', 0.75)
+        min_output_rate = getattr(self, '_servo_min_output_rate_hz', 8.0)
+        min_commanded_delta = getattr(
+            self, '_servo_min_commanded_joint_delta_rad', 0.01)
+        min_actual_delta = getattr(
+            self, '_servo_min_actual_joint_delta_rad', 0.002)
+
+        if command_started is None:
+            return None
+        elapsed = max(0.0, now - command_started)
+        if elapsed < response_timeout:
+            return None
+        if last_output is None:
+            return (
+                'no JointTrajectory received after '
+                f'{elapsed:.2f}s of non-zero visual-servo command')
+        output_age = max(0.0, now - last_output)
+        if output_age > response_timeout:
+            return (
+                'JointTrajectory output stopped for '
+                f'{output_age:.2f}s after visual-servo command')
+        if (first_output is not None and last_output > first_output and
+                output_count > 1):
+            rate = float(output_count - 1) / (last_output - first_output)
+            if rate < min_output_rate:
+                return (
+                    f'JointTrajectory output rate {rate:.1f}Hz is below '
+                    f'{min_output_rate:.1f}Hz')
+        if (commanded_delta >= min_commanded_delta and
+                actual_delta < min_actual_delta):
+            return (
+                'joint state did not follow Servo trajectory '
+                f'(commanded={commanded_delta:.5f}rad, '
+                f'actual={actual_delta:.5f}rad)')
+        return None
+
     def _direction_guard_decision(self, now, latest):
         """Sample the commanded image response once and stop on axis divergence.
 
@@ -712,9 +782,9 @@ class VisualServo(Node):
                 ServoStatusAction.RECOVERABLE_STOP,
                 ServoStatusAction.SAFETY_STOP}:
             self._publish_zero()
-        if changed:
-            self._publish_debug(
-                'servo_status_changed', message=decision.message, force=True)
+        if changed and active and decision.action != ServoStatusAction.OK:
+            self.get_logger().warn(
+                f'[VISUAL_SERVO] Servo status={code}: {decision.message}')
 
     # ---------- 核心动作执行器 (The Main Control Loop) ----------
     def _execute(self, goal_handle):
@@ -782,7 +852,6 @@ class VisualServo(Node):
             return self._abort(goal_handle, result, code, message, latest)
 
         try:
-            self._publish_debug('goal_started', force=True)
             aim_ready, aim_message = self._prepare_aim_compensation(
                 request.working_range_m)
             if not aim_ready:
@@ -801,23 +870,19 @@ class VisualServo(Node):
                     goal_handle, result, AlignTarget.Result.INVALID_GOAL,
                     'AlignTarget nozzle-aim contract does not match calibrated '
                     'camera/nozzle geometry')
-            self._publish_debug('aim_ready', force=True)
             ok, message = self._activate_servo()
             if not ok:
                 return self._abort(
                     goal_handle, result, AlignTarget.Result.SERVO_SAFETY_STOP,
                     f'MoveIt Servo activation failed: {message}')
             servo_started = True
-            self._publish_debug('servo_activated', force=True)
             period = 1.0 / self._config.control_rate_hz
             self.get_logger().info(
                 f'[VISUAL_SERVO] 进入伺服 target={request.target_id} '
                 f'rate={self._config.control_rate_hz:.1f}Hz '
                 f'command_mode={self._command_mode} '
                 f'angular_u_sign={getattr(self, "_angular_u_sign", 1.0):+.0f} '
-                f'angular_v_sign={getattr(self, "_angular_v_sign", 1.0):+.0f} '
-                f'terminal_rate='
-                f'{float(self.get_parameter("terminal_status_rate_hz").value):.1f}Hz')
+                f'angular_v_sign={getattr(self, "_angular_v_sign", 1.0):+.0f}')
             
             # 使用单调墙钟时间进行积分步长计算，避免 Gazebo /clock 回退时控制崩溃
             last_control_tick = time.monotonic()
@@ -833,9 +898,6 @@ class VisualServo(Node):
                     result.success = False
                     result.error_code = AlignTarget.Result.CANCELED
                     result.message = 'visual alignment canceled'
-                    self._publish_debug(
-                        'canceled', result_code=result.error_code,
-                        message=result.message, force=True)
                     return result
                 
                 now = self._now()
@@ -881,11 +943,6 @@ class VisualServo(Node):
                     unavailable_duration = max(0.0, now - unavailable_since)
                     self._publish_zero()
                     self._publish_feedback(goal_handle, latest)
-                    self._publish_debug(
-                        'target_hold' if latest is not None and latest.get('hold')
-                        else 'waiting_target')
-                    self._log_terminal_status(
-                        'WAIT', now, latest, reason='target_unavailable')
                     if unavailable_duration >= self._config.stale_timeout_sec:
                         return abort_with_stop(
                             AlignTarget.Result.TARGET_STALE,
@@ -901,9 +958,6 @@ class VisualServo(Node):
                             self.get_parameter('require_camera_info').value)):
                     self._publish_zero()
                     self._publish_feedback(goal_handle, latest)
-                    self._publish_debug('waiting_camera_info')
-                    self._log_terminal_status(
-                        'WAIT', now, latest, reason='camera_info_unavailable')
                     time.sleep(period)
                     continue
 
@@ -913,6 +967,14 @@ class VisualServo(Node):
                         AlignTarget.Result.SERVO_SAFETY_STOP,
                         'image-axis direction guard stopped Servo: '
                         f'{direction_guard}',
+                        self._terminal_target_snapshot(now, latest))
+
+                actuation_stall = self._servo_actuation_stall_reason(
+                    time.monotonic())
+                if actuation_stall:
+                    return abort_with_stop(
+                        AlignTarget.Result.SERVO_SAFETY_STOP,
+                        f'servo actuation stalled: {actuation_stall}',
                         self._terminal_target_snapshot(now, latest))
 
                 # 5. 评估对准状态 (AlignmentProgress)
@@ -955,9 +1017,6 @@ class VisualServo(Node):
                     result.final_error_u = latest['error_u']
                     result.final_error_v = latest['error_v']
                     goal_handle.succeed()
-                    self._publish_debug(
-                        'aligned', result_code=result.error_code,
-                        message=result.message, force=True)
                     return result
                 
                 if stalled:
@@ -980,8 +1039,6 @@ class VisualServo(Node):
                 if hold_alignment:
                     self._publish_zero()
                     self._publish_feedback(goal_handle, latest)
-                    self._publish_debug('holding_alignment')
-                    self._log_terminal_status('TRACK', now, latest)
                     time.sleep(period)
                     continue
                 
@@ -1002,7 +1059,7 @@ class VisualServo(Node):
                     predicted = latest['error']
                 
                 # PID 计算与指令合成
-                x, y, _debug = self._controller.step(predicted, dt)
+                x, y, _ = self._controller.step(predicted, dt)
                 scale = 1.0
                 if max(abs(latest['error_u']), abs(latest['error_v'])) <= (
                         self._config.coarse_tolerance_px):
@@ -1025,10 +1082,13 @@ class VisualServo(Node):
                 self._goal_state.last_command = (x, y)
                 self._goal_state.peak_command_norm = max(
                     self._goal_state.peak_command_norm, math.hypot(x, y))
+                if math.hypot(x, y) > 1e-6:
+                    with self._lock:
+                        if self._goal_state.first_motion_command_monotonic is None:
+                            self._goal_state.first_motion_command_monotonic = (
+                                time.monotonic())
                 self._publish_twist(x, y)
                 self._publish_feedback(goal_handle, latest)
-                self._publish_debug('control')
-                self._log_terminal_status('TRACK', now, latest)
                 time.sleep(period)
                 
             return abort_with_stop(
@@ -1105,9 +1165,6 @@ class VisualServo(Node):
             f'commanded_joint_delta={self._goal_state.max_commanded_joint_delta_rad:.5f}rad '
             f'actual_joint_delta={self._goal_state.max_joint_delta_rad:.5f}rad '
             f'servo_status={self._servo_status} message={message}')
-        self._publish_debug(
-            event, result_code=code, message=message, force=True,
-            target_snapshot=latest)
         return result
 
     def _terminal_target_snapshot(self, now, latest=None):
@@ -1245,169 +1302,6 @@ class VisualServo(Node):
         for _index in range(count):
             self._publish_zero()
             time.sleep(period)
-
-    def _log_terminal_status(self, phase, now, latest, reason=''):
-        """输出低噪声终端状态；完整数值仍由 debug topic 承载。"""
-        wall_now = time.monotonic()
-        rate = float(self.get_parameter('terminal_status_rate_hz').value)
-        phase = str(phase).upper()
-        phase_key = (phase, reason if phase == 'WAIT' else '')
-        with self._lock:
-            phase_changed = phase_key != self._goal_state.last_terminal_phase
-            if phase == 'WAIT' and not phase_changed:
-                return
-            if (phase != 'WAIT' and not phase_changed and
-                    not debug_publish_due(
-                        wall_now, self._goal_state.last_terminal_status_log, rate)):
-                return
-            self._goal_state.last_terminal_status_log = wall_now
-            self._goal_state.last_terminal_phase = phase_key
-            target_id = self._active_target
-            started = self._goal_state.alignment_started
-            command = self._goal_state.last_command
-            stable_duration = self._progress.stable_duration
-            servo_status = self._servo_status
-        elapsed = max(0.0, now - started) if started is not None else 0.0
-        confidence = 0.0 if latest is None else float(
-            latest.get('confidence', 0.0))
-        if not math.isfinite(confidence):
-            confidence = 0.0
-        if phase == 'WAIT':
-            self.get_logger().info(
-                f'[VISUAL_SERVO] WAIT target={target_id} elapsed={elapsed:.2f}s '
-                f'error_px=n/a reason={reason or "unspecified"} '
-                f'confidence={confidence:.2f}')
-            return
-        error_u = float(latest.get('error_u', 0.0))
-        error_v = float(latest.get('error_v', 0.0))
-        status_suffix = (
-            '' if servo_status == 0 else
-            f' servo_status={servo_status}({self._policy.status_text(servo_status)})')
-        cmd_label, cmd_unit = self._command_labels()
-        speed_label = f'{cmd_label}_speed'
-        (servo_outputs, servo_velocity_outputs,
-         servo_output_rate_hz) = self._servo_output_diagnostics()
-        self.get_logger().info(
-            f'[VISUAL_SERVO] TRACK target={target_id} elapsed={elapsed:.2f}s '
-            f'error_px=({error_u:.1f},{error_v:.1f}) '
-            f'norm_px={math.hypot(error_u, error_v):.1f} '
-            f'{cmd_label}=({command[0]:.3f},{command[1]:.3f}) '
-            f'{speed_label}={math.hypot(*command):.3f} '
-            f'confidence={confidence:.2f} '
-            f'stable_duration={stable_duration:.2f}s '
-            f'servo_output_rate_hz={servo_output_rate_hz:.1f} '
-            f'servo_outputs={servo_outputs} '
-            f'servo_velocity_outputs={servo_velocity_outputs}'
-            f'{status_suffix}')
-
-    def _publish_debug(
-            self, event, result_code=-1, message='', force=False,
-            target_snapshot=None):
-        """发布结构稳定的高频 JSON 调试数据。"""
-        wall_now = time.monotonic()
-        rate = float(self.get_parameter('debug_rate_hz').value)
-        if not debug_publish_due(
-                wall_now, self._goal_state.last_debug_publish, rate, force):
-            return
-        now = self._now()
-        latest = (dict(target_snapshot) if target_snapshot is not None
-                  else self._terminal_target_snapshot(now))
-        with self._lock:
-            self._goal_state.last_debug_publish = wall_now
-            last_valid = self._goal_state.last_valid_target
-            started = self._goal_state.alignment_started
-            command = self._goal_state.last_command
-            status = self._servo_status
-            progress_stalled = bool(
-                latest is not None and latest.get('valid')
-                and not latest.get('hold') and self._progress.stalled(now))
-            stable_duration = self._progress.stable_duration
-            direction_guard_checked = self._goal_state.direction_guard_checked
-        confidence = 0.0 if latest is None else float(
-            latest.get('confidence', 0.0))
-        if not math.isfinite(confidence):
-            confidence = 0.0
-        linear_x, linear_y, angular_x, angular_y = (
-            self._command_components(*command))
-        (servo_outputs, servo_velocity_outputs,
-         servo_output_rate_hz) = self._servo_output_diagnostics()
-        aim = self._aim_solution
-        estimated_error = 0.0
-        if (aim is not None and latest is not None and latest.get('valid')
-                and self._camera is not None):
-            estimated_error = plane_error_mm(
-                latest.get('error_u', 0.0), latest.get('error_v', 0.0),
-                self._camera[0], self._camera[1], aim.range_m)
-            if not math.isfinite(estimated_error):
-                estimated_error = 0.0
-        payload = debug_json(
-            event=event,
-            mission_id=self._active_mission,
-            tree_id=self._active_tree,
-            target_id=self._active_target,
-            elapsed_sec=0.0 if started is None else max(0.0, now - started),
-            camera_ready=self._camera is not None,
-            aim_compensation_enabled=self._config.aim_compensation_enabled,
-            aim_ready=(
-                aim is not None or not self._config.aim_compensation_enabled),
-            aim_range_m=(0.0 if aim is None else aim.range_m),
-            aim_u_px=(0.0 if aim is None else aim.u_px),
-            aim_v_px=(0.0 if aim is None else aim.v_px),
-            desired_u_px=(0.0 if aim is None else aim.u_px),
-            desired_v_px=(0.0 if aim is None else aim.v_px),
-            estimated_plane_error_mm=estimated_error,
-            target_valid=bool(
-                latest is not None and latest.get(
-                    'terminal_target_valid', latest.get('valid'))),
-            target_age_sec=(
-                -1.0 if latest is None else
-                max(0.0, now - float(latest['received']))),
-            target_unavailable_sec=float(
-                latest.get('target_unavailable_sec', 0.0)
-                if latest is not None else 0.0),
-            confidence=confidence,
-            error_u_px=(
-                0.0 if latest is None else float(latest.get('error_u', 0.0))),
-            error_v_px=(
-                0.0 if latest is None else float(latest.get('error_v', 0.0))),
-            last_valid_error_u_px=(
-                0.0 if last_valid is None
-                else float(last_valid.get('error_u', 0.0))),
-            last_valid_error_v_px=(
-                0.0 if last_valid is None
-                else float(last_valid.get('error_v', 0.0))),
-            stable_frames=(
-                0 if latest is None else int(latest.get('stable_frames', 0))),
-            stable_duration_sec=float(stable_duration),
-            progress_stalled=bool(progress_stalled),
-            command_mode=self._command_mode,
-            angular_u_sign=getattr(self, '_angular_u_sign', 1.0),
-            angular_v_sign=getattr(self, '_angular_v_sign', 1.0),
-            command_x_mps=linear_x,
-            command_y_mps=linear_y,
-            command_angular_x_rps=angular_x,
-            command_angular_y_rps=angular_y,
-            control_dt_sec=float(self._goal_state.last_control_dt),
-            servo_status=status,
-            servo_status_text=self._policy.status_text(status),
-            servo_lifecycle_state=self._servo_lifecycle,
-            lifecycle_transition=self._last_lifecycle_transition,
-            service_latency_sec=self._last_service_latency_sec,
-            joint_positions=list(self._joint_positions),
-            servo_output_count=int(servo_outputs),
-            servo_output_points=int(self._goal_state.servo_output_points),
-            servo_output_velocity_count=int(servo_velocity_outputs),
-            servo_output_rate_hz=float(servo_output_rate_hz),
-            direction_guard_checked=bool(direction_guard_checked),
-            max_commanded_joint_delta_rad=float(
-                self._goal_state.max_commanded_joint_delta_rad),
-            max_joint_delta_rad=float(self._goal_state.max_joint_delta_rad),
-            result_code=int(result_code),
-            message=message,
-        )
-        debug_message = String()
-        debug_message.data = payload
-        self._debug.publish(debug_message)
 
     def _now(self):
         return self.get_clock().now().nanoseconds * 1e-9

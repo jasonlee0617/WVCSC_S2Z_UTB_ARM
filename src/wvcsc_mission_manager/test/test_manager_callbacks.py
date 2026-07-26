@@ -8,6 +8,7 @@ from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_mission_manager.core import (
     MissionCore,
     MissionState,
+    PointType,
     StopDetector,
     Target,
 )
@@ -64,7 +65,7 @@ class _NavClient:
 
 class _Harness:
     def __init__(self, state=MissionState.NAVIGATING):
-        target = Target('tree_1', 3.0, 2.0, 0.0, 0.9, 2.0)
+        target = Target('tree_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0))
         self.core = MissionCore()
         self.core.load('demo', [target])
         self.core.state = state
@@ -81,7 +82,6 @@ class _Harness:
         self._spray_timeout = 5.0
         self._spray_progress_timeout = 3.0
         self._spray_last_progress = 0.0
-        self._auto_start = False
         self._return_home_after_finish = False
         self._manual_return_home = False
         self._home_pose = (0.0, 0.0, 0.0)
@@ -95,13 +95,18 @@ class _Harness:
         self._nav_timeout_canceling = False
         self._nav_timeout_cancel_deadline = None
         self._wide_motion_pending = False
+        self._wide_relay_channel = 1
+        self._accept_aborted_near_goal = False
         self.failures = []
+        self.relay_commands = []
         self.nav_cancels = 0
         self.spray_cancels = 0
         self.status_updates = 0
         self._navigation_active = MissionManager._navigation_active.__get__(
             self, _Harness)
         self._nav_result = MissionManager._nav_result.__get__(self, _Harness)
+        self._navigation_arrived = (
+            MissionManager._navigation_arrived.__get__(self, _Harness))
         self._clear_nav_startup_retry = (
             MissionManager._clear_nav_startup_retry.__get__(self, _Harness))
         self._schedule_initial_nav_retry = (
@@ -112,9 +117,13 @@ class _Harness:
             MissionManager._skip_arm_point.__get__(self, _Harness))
         self._continue_after_point = (
             MissionManager._continue_after_point.__get__(self, _Harness))
+        self._finish_noninspect_point = (
+            MissionManager._finish_noninspect_point.__get__(self, _Harness))
         self._advance_abort_and_home = lambda: None
         self._command_all_relays_off = lambda: None
+        self._command_relay_best_effort = self._relay_then_continue
         self._start_navigation = lambda: setattr(self, 'nav_sent', True)
+        self._begin_stop_verification = lambda: None
         self._tick_wide_spray_motion = lambda _now: None
 
     def _fail(self, message):
@@ -130,6 +139,11 @@ class _Harness:
     def _cancel_spray_goal(self):
         self.spray_cancels += 1
 
+    def _relay_then_continue(self, channel, enabled, duration, continuation, context):
+        self.relay_commands.append((channel, enabled, duration, context))
+        if continuation is not None:
+            continuation()
+
     def _now(self):
         return 6.0
 
@@ -140,9 +154,6 @@ class _Harness:
 class _Validator:
     def __init__(self):
         self._map_frame = 'map'
-        self._road_center_y = 0.0
-        self._road_yaw = 0.0
-        self._docking_lateral_offset = 0.5
         self._arm_base_forward_offset = -0.40
         self._arm_base_left_offset = 0.0
         self._arm_base_yaw = 0.0
@@ -171,15 +182,9 @@ def _manual_request(frame='map', x=3.0, count=1):
         target_id=f'manual_{index}',
         docking_pose=_pose(x + index, 0.5, yaw=0.2 + index),
         spray_duration=2.0,
-        confidence=1.0,
-        evidence_uri='manual://test',
-        tree_hint=SimpleNamespace(x=0.0, y=0.0, z=0.0),
-        use_explicit_tree_hint=False,
         tree_x_m=0.0,
         tree_y_m=1.5,
         tree_base_z_m=0.0,
-        use_tree_offset_from_arm_base=True,
-        compute_docking_pose=False,
     ) for index in range(count)]
     return SimpleNamespace(
         header=SimpleNamespace(frame_id=frame),
@@ -205,6 +210,26 @@ def test_nav_rejection_and_confirmed_failure_skip_current_route_point():
     )
     assert failed.core.state == MissionState.MISSION_COMPLETED
     assert failed.core.current_index == 1
+    assert failed.relay_commands[0][:3] == (1, False, 0.0)
+
+
+def test_simulation_accepts_only_an_aborted_goal_that_passes_docking_gate():
+    harness = _docking_harness(
+        (5.8, 3.43, 0.22, 0.04, 0.05, 0.05),
+        state=MissionState.NAVIGATING)
+    harness._accept_aborted_near_goal = True
+    harness._navigation_arrived = (
+        MissionManager._navigation_arrived.__get__(harness, _Harness))
+    harness._begin_stop_verification = lambda: None
+
+    MissionManager._nav_result(
+        harness,
+        _Future(SimpleNamespace(status=GoalStatus.STATUS_ABORTED)),
+    )
+
+    assert harness.core.state == MissionState.VERIFYING_STOP
+    assert harness.core.skipped_targets == 0
+    assert harness.relay_commands[0][:3] == (1, False, 0.0)
 
 
 def test_initial_nav_rejection_retries_while_lifecycle_activates():
@@ -328,6 +353,40 @@ def test_nav_timeout_cancels_for_skip_while_spray_timeout_stays_blocking():
     assert stale.core.skipped_targets == 1
 
 
+def test_simulation_docking_quality_gate_applies_to_inspection_points():
+    """Only arm work needs the stricter alicia-base docking quality gate."""
+    harness = _Harness(MissionState.VERIFYING_STOP)
+    harness._stop_detector = _Detector(StopDetector.STABLE)
+    harness.core.targets = (Target(
+        'route_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0),
+        point_type=PointType.INSPECT),)
+    harness._require_docking_quality = True
+    checks = []
+    harness._verify_docking_quality = lambda _now: checks.append(True) or False
+
+    MissionManager._tick(harness)
+
+    assert checks == [True]
+    assert harness.core.state == MissionState.VERIFYING_STOP
+
+
+@pytest.mark.parametrize('point_type', [PointType.TRANSIT, PointType.FINISH])
+def test_simulation_route_points_bypass_arm_docking_quality(point_type):
+    harness = _Harness(MissionState.VERIFYING_STOP)
+    harness._stop_detector = _Detector(StopDetector.STABLE)
+    harness.core.targets = (Target(
+        'route_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0),
+        point_type=point_type),)
+    harness._require_docking_quality = True
+    checks = []
+    harness._verify_docking_quality = lambda _now: checks.append(True) or False
+
+    MissionManager._tick(harness)
+
+    assert checks == []
+    assert harness.core.state == MissionState.MISSION_COMPLETED
+
+
 def test_late_nav_goal_acceptance_stays_canceled_after_timeout():
     class PendingResult:
         def add_done_callback(self, callback):
@@ -382,7 +441,7 @@ def test_fail_cancels_both_children_and_stops_odom_check():
     assert harness.status_updates == 1
 
 
-def test_invalid_manual_frame_coordinate_target_count_and_confidence_are_rejected():
+def test_invalid_manual_frame_coordinate_or_target_count_is_rejected():
     validator = _Validator()
     for request in (
             _manual_request(frame='odom'),
@@ -394,18 +453,14 @@ def test_invalid_manual_frame_coordinate_target_count_and_confidence_are_rejecte
             continue
         raise AssertionError('invalid mission was accepted')
 
-    invalid_confidence = _manual_request()
-    invalid_confidence.targets[0].confidence = 0.0
-    with pytest.raises(ValueError, match='confidence'):
-        MissionManager._validate_manual_request(validator, invalid_confidence)
-
-
 def test_manual_targets_preserve_selected_pose_and_validate_input():
     validator = _Validator()
     request = _manual_request()
     targets, home = MissionManager._validate_manual_request(validator, request)
-    assert targets[0].docking_pose_override[:2] == (3.0, 0.5)
-    assert math.isclose(targets[0].docking_pose_override[2], 0.2)
+    assert targets[0].docking_pose[:2] == (3.0, 0.5)
+    assert math.isclose(targets[0].docking_pose[2], 0.2)
+    assert MissionManager._tree_hint(targets[0]) == pytest.approx(
+        (2.309969, 1.890632, 0.0), abs=1e-6)
     assert home == (0.0, 0.0, 0.0)
 
 
@@ -419,45 +474,17 @@ def test_manual_qt_route_accepts_twenty_three_inspection_points():
     assert len(targets) == 23
 
 
-def test_mock_style_manual_target_uses_mission_manager_docking_geometry():
+def test_manual_target_requires_a_nonzero_signed_arm_offset():
     validator = _Validator()
     request = _manual_request()
-    target = request.targets[0]
-    target.tree_hint = SimpleNamespace(x=3.0, y=2.0, z=0.0)
-    target.use_explicit_tree_hint = True
-    target.use_tree_offset_from_arm_base = False
-    target.compute_docking_pose = True
-    target.confidence = 0.95
-    target.evidence_uri = 'mock://tree_01'
-
-    targets, _home = MissionManager._validate_manual_request(validator, request)
-
-    assert targets[0].docking_pose_override is None
-    assert targets[0].tree_hint_override == (3.0, 2.0, 0.0)
-    assert targets[0].evidence_uri == 'mock://tree_01'
-
-
-def test_manual_target_can_supply_explicit_measured_tree_hint():
-    validator = _Validator()
-    request = _manual_request()
-    request.targets[0].tree_hint = SimpleNamespace(x=3.2, y=1.7, z=0.0)
-    request.targets[0].use_explicit_tree_hint = True
-    request.targets[0].use_tree_offset_from_arm_base = False
-    request.targets[0].evidence_uri = ''
-
-    targets, _home = MissionManager._validate_manual_request(validator, request)
-
-    assert targets[0].tree_hint_override == (3.2, 1.7, 0.0)
-    assert targets[0].docking_pose_override[:2] == (3.0, 0.5)
-    assert targets[0].evidence_uri == 'manual://measured'
-    assert MissionManager._tree_hint(validator, targets[0]) == (3.2, 1.7, 0.0)
+    request.targets[0].tree_x_m = 0.0
+    request.targets[0].tree_y_m = 0.0
+    with pytest.raises(ValueError, match='tree offset is zero'):
+        MissionManager._validate_manual_request(validator, request)
 
 
 def _docking_harness(actual, *, state=MissionState.VERIFYING_STOP):
     harness = _Harness(state)
-    harness._road_center_y = 0.0
-    harness._road_yaw = 0.0
-    harness._docking_lateral_offset = 0.2
     harness._arm_base_forward_offset = -0.40
     harness._arm_base_left_offset = 0.0
     harness._localization_max_age = 1.0
@@ -472,6 +499,9 @@ def _docking_harness(actual, *, state=MissionState.VERIFYING_STOP):
     harness._docking_retry_target_index = 0
     harness._last_docking_log_state = None
     harness._localization_pose = actual
+    harness._docking_pose_source = 'localization'
+    harness._docking_pose_for_quality = (
+        MissionManager._docking_pose_for_quality.__get__(harness, _Harness))
     harness._docking_quality = MissionManager._docking_quality.__get__(
         harness, _Harness)
     harness._log_docking_quality = MissionManager._log_docking_quality.__get__(
@@ -498,6 +528,20 @@ def test_docking_quality_gate_passes_only_fresh_precise_localization():
     assert MissionManager._docking_quality(harness, 6.0)[0] == 'stale'
     harness._localization_pose = (5.8, 3.43, 0.22, 0.04, 0.20, 0.05)
     assert MissionManager._docking_quality(harness, 6.0)[0] == 'uncertain'
+
+
+def test_docking_quality_reports_arm_anchor_error_but_vehicle_goal_yaw():
+    # The automatic left-side target has a vehicle goal of (3.4, 0.2, 0).
+    # The corresponding arm base is (3.0, 0.2), proving the quality gate and
+    # the Qt click semantics use the same mounting translation.
+    harness = _docking_harness((6.0, 3.4, 0.2, 0.0, 0.05, 0.05))
+    status, details = MissionManager._docking_quality(harness, 6.0)
+
+    assert status == 'ok'
+    assert details['desired'] == pytest.approx((3.4, 0.2, 0.0))
+    assert details['arm_desired'] == pytest.approx((3.0, 0.2))
+    assert details['arm_actual'] == pytest.approx((3.0, 0.2))
+    assert details['position_error'] == pytest.approx(0.0)
 
 
 def test_outside_docking_tolerance_retries_once_without_spraying():

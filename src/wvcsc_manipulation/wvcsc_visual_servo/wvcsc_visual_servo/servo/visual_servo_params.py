@@ -23,8 +23,8 @@ class ServoRuntimeConfig:
     desired_offset_v_px: float
     aim_compensation_enabled: bool
     aim_range_source: str
-    aim_fixed_range_m: float
-    aim_range_tolerance_m: float
+    aim_range_min_m: float
+    aim_range_max_m: float
     aim_nozzle_frame: str
     aim_min_forward_axis_z: float
     aim_image_margin_px: float
@@ -58,9 +58,8 @@ class ServoRuntimeConfig:
             aim_compensation_enabled=bool(
                 _value(node, 'aim_compensation_enabled')),
             aim_range_source=str(_value(node, 'aim_range_source')),
-            aim_fixed_range_m=float(_value(node, 'aim_fixed_range_m')),
-            aim_range_tolerance_m=float(
-                _value(node, 'aim_range_tolerance_m')),
+            aim_range_min_m=float(_value(node, 'aim_range_min_m')),
+            aim_range_max_m=float(_value(node, 'aim_range_max_m')),
             aim_nozzle_frame=str(_value(node, 'aim_nozzle_frame')).strip(),
             aim_min_forward_axis_z=float(
                 _value(node, 'aim_min_forward_axis_z')),
@@ -93,19 +92,19 @@ class ServoRuntimeConfig:
             raise ValueError('near_target_speed_scale must be in (0, 1]')
         if config.command_mode not in {'linear_xy', 'angular_xy'}:
             raise ValueError('command_mode must be linear_xy or angular_xy')
-        if config.aim_range_source != 'fixed':
-            raise ValueError('aim_range_source must be fixed')
+        if config.aim_range_source != 'goal':
+            raise ValueError('aim_range_source must be goal')
         aim_values = (
-            config.aim_fixed_range_m,
-            config.aim_range_tolerance_m,
+            config.aim_range_min_m,
+            config.aim_range_max_m,
             config.aim_min_forward_axis_z,
             config.aim_image_margin_px,
             config.desired_offset_u_px,
             config.desired_offset_v_px,
         )
         if (not all(math.isfinite(value) for value in aim_values)
-                or config.aim_fixed_range_m <= 0.0
-                or config.aim_range_tolerance_m <= 0.0
+                or config.aim_range_min_m <= 0.0
+                or config.aim_range_max_m <= config.aim_range_min_m
                 or not 0.0 < config.aim_min_forward_axis_z <= 1.0
                 or config.aim_image_margin_px < 0.0
                 or (config.aim_compensation_enabled

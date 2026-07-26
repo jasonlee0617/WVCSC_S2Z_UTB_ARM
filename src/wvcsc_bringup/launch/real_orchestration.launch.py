@@ -87,11 +87,6 @@ def generate_launch_description():
             os.path.join(real_config, 'visual_servo_real.yaml'),
             {
                 'use_sim_time': False,
-                'aim_fixed_range_m': ParameterValue(
-                    LaunchConfiguration('aim_fixed_range_m'), value_type=float),
-                'aim_range_tolerance_m': ParameterValue(
-                    LaunchConfiguration('aim_range_tolerance_m'),
-                    value_type=float),
                 'desired_offset_u_px': ParameterValue(
                     LaunchConfiguration('aim_trim_u_px'), value_type=float),
                 'desired_offset_v_px': ParameterValue(
@@ -108,8 +103,6 @@ def generate_launch_description():
             os.path.join(real_config, 'arm_task_real.yaml'),
             arm_motion_parameters,
             {
-                'spray_working_distance_m': ParameterValue(
-                    LaunchConfiguration('aim_fixed_range_m'), value_type=float),
                 'observation_mode': LaunchConfiguration('observation_mode'),
             },
             robot_description,
@@ -135,11 +128,11 @@ def generate_launch_description():
             os.path.join(mission_share, 'config', 'mission_manager.yaml'),
             {
                 'use_sim_time': False,
-                'auto_start': False,
                 'arm_base_yaw_rad': 3.141592653589793,
                 'wide_relay_channel': 1,
                 'arm_relay_channel': 2,
                 'relay_service_name': '/relay/set',
+                'require_relay_service': True,
             },
         ],
         remappings=[('/odom', '/ekf_odom')],
@@ -168,8 +161,6 @@ def generate_launch_description():
             'c10_mount_rpy', default_value='0 -1.57079632679 0'),
         DeclareLaunchArgument('nozzle_mount_xyz', default_value='0 0 0'),
         DeclareLaunchArgument('nozzle_mount_rpy', default_value='0 0 0'),
-        DeclareLaunchArgument('aim_fixed_range_m', default_value='1.0'),
-        DeclareLaunchArgument('aim_range_tolerance_m', default_value='0.05'),
         DeclareLaunchArgument('aim_trim_u_px', default_value='0.0'),
         DeclareLaunchArgument('aim_trim_v_px', default_value='0.0'),
         DeclareLaunchArgument(

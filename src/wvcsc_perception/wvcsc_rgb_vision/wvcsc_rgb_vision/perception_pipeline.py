@@ -191,7 +191,7 @@ def track_matches(instances, tracks, iou_threshold, center_distance_px):
 def reassociation_candidate(
         reference, instances, iou_threshold, center_distance_px,
         iou_margin, distance_margin_px, equivalent_aim_distance_px,
-        target_class_name='diseased_target'):
+        target_class_name='diseased_target', allow_ambiguous_nearest=False):
     """
     当感知层 ID 漂移时，为选中的逻辑目标寻找物理层面的重关联候选。
     """
@@ -214,6 +214,8 @@ def reassociation_candidate(
                     overlap[0][0].aim_v - overlap[1][0].aim_v) <= (
                         equivalent_aim_distance_px):
                 return overlap[0][0], 'equivalent_reassociation'
+            if allow_ambiguous_nearest:
+                return overlap[0][0], 'nearest_reassociation'
             return None, 'ambiguous_reassociation'
         return overlap[0][0], 'none'
     nearby = sorted(scored, key=lambda item: (item[2], item[0].target_id))
@@ -226,6 +228,8 @@ def reassociation_candidate(
                 nearby[0][0].aim_v - nearby[1][0].aim_v) <= (
                     equivalent_aim_distance_px):
             return nearby[0][0], 'equivalent_reassociation'
+        if allow_ambiguous_nearest:
+            return nearby[0][0], 'nearest_reassociation'
         return None, 'ambiguous_reassociation'
     return nearby[0][0], 'none'
 
@@ -437,6 +441,10 @@ class PerceptionPipeline(Node):
             # 专用 160px 宽关口仅允许在同一明确任务目标下恢复关联。
             'target_reassociation_distance_px': 160.0,
             'target_reassociation_require_unique_candidate': False,
+            # Task-level ledger retains the original physical target.  During a
+            # safe recenter, deterministic nearest association may be allowed
+            # only inside the existing geometric reassociation gate.
+            'target_reassociation_allow_ambiguous_nearest': False,
             'target_equivalent_aim_distance_px': 8.0,
             'target_lock_ema_alpha': 0.20,
             'target_template_tracking_enabled': True,
@@ -693,6 +701,11 @@ class PerceptionPipeline(Node):
                 if item.class_name == self._configured_target_name]
             if len(same_class_instances) > 1:
                 return None, 'selected_id_missing_multiple_candidates', 'target_invalid'
+        try:
+            allow_ambiguous_nearest = bool(self.get_parameter(
+                'target_reassociation_allow_ambiguous_nearest').value)
+        except (AttributeError, KeyError):
+            allow_ambiguous_nearest = False
         target, reason = reassociation_candidate(
             reference,
             instances,
@@ -704,6 +717,7 @@ class PerceptionPipeline(Node):
             float(self.get_parameter(
                 'target_equivalent_aim_distance_px').value),
             self._configured_target_name,
+            allow_ambiguous_nearest,
         )
         if target is not None:
             target = smoothed_target(

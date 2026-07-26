@@ -80,7 +80,7 @@ class MotionControlNode(Node):
         self._reset_abort = threading.Event()
 
         # 4. 订阅运动控制命令话题
-        # 接收来自 Web 界面、遥控器或键盘的机械臂控制命令。
+        # 接收来自 Qt 任务界面、遥控器或键盘的机械臂控制命令。
         self.command_sub = self.create_subscription(
             String,
             '/motion_control/command',

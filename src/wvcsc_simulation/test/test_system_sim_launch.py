@@ -13,9 +13,129 @@ LAUNCH_SOURCE = (
 ).read_text(encoding='utf-8')
 
 
-def test_simulation_relay_remains_timer_only():
+def test_simulation_uses_the_shared_service_relay_contract():
     assert "'config', 'spray_actuator.yaml'" in LAUNCH_SOURCE
-    assert 'controller_pkg' not in LAUNCH_SOURCE
+    assert "package='wvcsc_simulation', executable='sim_relay.py'" in LAUNCH_SOURCE
+    assert 'guard_sim_relay' in LAUNCH_SOURCE
+    assert "'spray_on_alignment_failure': False" in LAUNCH_SOURCE
+    assert "use_mission_manager, \"' == 'true' or '\"" in LAUNCH_SOURCE
+
+
+def test_simulation_requires_a_live_relay_before_running_a_route():
+    config = yaml.safe_load((
+        Path(__file__).parents[2] / 'wvcsc_mission_manager' / 'config' /
+        'mission_manager.yaml'
+    ).read_text(encoding='utf-8'))['mission_manager']['ros__parameters']
+
+    assert config['require_relay_service'] is True
+
+
+def test_simulation_uses_plain_gzclient_instead_of_humble_eol_gui_wrapper():
+    assert "'gzserver.launch.py'" in LAUNCH_SOURCE
+    assert "cmd=['gzclient']" in LAUNCH_SOURCE
+    assert "os.path.join(gazebo_share, 'launch', 'gazebo.launch.py')" not in LAUNCH_SOURCE
+    assert 'libgazebo_ros_eol_gui.so' not in LAUNCH_SOURCE
+
+
+def test_gazebo_spray_visual_uses_the_gazebo_owned_ros_executor():
+    plugin = (Path(__file__).parents[1] / 'src' /
+              'spray_visual_plugin.cpp').read_text(encoding='utf-8')
+
+    assert 'gazebo_ros::Node::Get' in plugin
+    assert 'rclcpp::spin_some(this->node_)' not in plugin
+    assert 'std::atomic_bool wide_active_' in plugin
+    assert 'Qt::WA_DontShowOnScreen' in plugin
+    assert 'this->hide();' in plugin
+
+
+def test_sim_navigation_uses_per_point_goal_checker_behavior_trees():
+    behavior_tree_dir = Path(__file__).parents[1] / 'config' / 'behavior_trees'
+    inspect_tree = (behavior_tree_dir / 'navigate_inspect.xml').read_text(
+        encoding='utf-8')
+    route_tree = (behavior_tree_dir / 'navigate_route.xml').read_text(
+        encoding='utf-8')
+    config = yaml.safe_load((
+        Path(__file__).parents[1] / 'config' / 'nav2_sim.yaml'
+    ).read_text(encoding='utf-8'))
+
+    assert 'goal_checker_id="inspection_goal_checker"' in inspect_tree
+    assert 'goal_checker_id="route_goal_checker"' in route_tree
+    assert config['controller_server']['ros__parameters']['progress_checker'][
+        'required_movement_radius'] == pytest.approx(0.05)
+    assert config['controller_server']['ros__parameters'][
+        'failure_tolerance'] == pytest.approx(2.0)
+    parameters = config['controller_server']['ros__parameters']
+    inspect_goal_checker = parameters['inspection_goal_checker']
+    route_goal_checker = parameters['route_goal_checker']
+    assert inspect_goal_checker['stateful'] is False
+    assert route_goal_checker['stateful'] is False
+    assert config['controller_server']['ros__parameters'][
+        'robot_base_frame'] == 'base_footprint'
+    assert inspect_goal_checker['xy_goal_tolerance'] == pytest.approx(0.08)
+    assert inspect_goal_checker['yaw_goal_tolerance'] == pytest.approx(0.10)
+    assert route_goal_checker['xy_goal_tolerance'] == pytest.approx(0.08)
+    assert route_goal_checker['yaw_goal_tolerance'] == pytest.approx(0.12)
+    assert config['planner_server']['ros__parameters']['GridBased'][
+        'tolerance'] == pytest.approx(0.0)
+    assert config['planner_server']['ros__parameters']['GridBased'][
+        'minimum_turning_radius'] == pytest.approx(1.575)
+    follow_path = config['controller_server']['ros__parameters']['FollowPath']
+    assert follow_path['plugin'] == (
+        'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController')
+    assert follow_path['desired_linear_vel'] == pytest.approx(0.25)
+    assert follow_path['use_collision_detection'] is True
+    assert follow_path['use_cost_regulated_linear_velocity_scaling'] is False
+    assert 'RewrittenYaml' in LAUNCH_SOURCE
+    assert "'accept_aborted_near_goal': True" in LAUNCH_SOURCE
+    assert "'docking_pose_source': 'odom'" in LAUNCH_SOURCE
+    assert "'max_docking_position_error_m': 0.10" in LAUNCH_SOURCE
+    assert "'max_docking_yaw_error_rad': 0.12" in LAUNCH_SOURCE
+    assert "'nav_goal_xy_tolerance_m': 0.08" in LAUNCH_SOURCE
+    assert "'nav_goal_yaw_tolerance_rad': 0.10" in LAUNCH_SOURCE
+    assert "'nav_goal_timeout_sec': 45.0" in LAUNCH_SOURCE
+    # Nav2's velocity smoother publishes at 20 Hz. The simulator timeout must
+    # leave transport jitter margin rather than matching that 50 ms period.
+    assert "'command_timeout': 0.25" in LAUNCH_SOURCE
+    for behavior_tree in (inspect_tree, route_tree):
+        assert '<RecoveryNode number_of_retries="4" name="NavigateRecovery">' in behavior_tree
+        assert 'ClearEntireCostmap' in behavior_tree
+        assert 'BackUp name="BackUpRecovery"' in behavior_tree
+        assert 'IsPathValid path="{path}"' in behavior_tree
+        assert '<GlobalUpdatedGoal/>' in behavior_tree
+        assert '<Spin' not in behavior_tree
+
+
+def test_simulation_uses_confirmed_real_vehicle_geometry_and_driver_semantics():
+    assert "'wheel_base': 0.82" in LAUNCH_SOURCE
+    assert "'cmd_angular_mode': 'yaw_rate'" in LAUNCH_SOURCE
+
+
+def test_simulation_records_the_actual_vehicle_path_for_rviz():
+    source = (Path(__file__).parents[1] / 'scripts' /
+              'ackermann_sim.py').read_text(encoding='utf-8')
+    rviz = (Path(__file__).parents[1] / 'rviz' / 'wvcsc.rviz').read_text(
+        encoding='utf-8')
+
+    assert "'executed_path_topic', '/vehicle/executed_path'" in source
+    assert 'MissionStatus, \'/mission/status\'' in source
+    assert "MissionPlan, '/mission/plan'" in source
+    assert "'/vehicle/route_cross_track_error'" in source
+    assert "'/vehicle/controller_path_error'" in source
+    assert 'def _append_executed_path' in source
+    assert 'Name: Executed Vehicle Path' in rviz
+    assert 'Value: /vehicle/executed_path' in rviz
+    assert 'Color: 255; 0; 255' in rviz
+
+
+def test_rviz_grid_matches_the_expanded_thirty_meter_square_map():
+    rviz = (Path(__file__).parents[1] / 'rviz' / 'wvcsc.rviz').read_text(
+        encoding='utf-8')
+
+    assert 'Cell Size: 0.5' in rviz
+    assert 'Plane Cell Count: 60' in rviz
+    # 60 cells * 0.5 m are centred at x=10 m, so the grid is exactly
+    # x=[-5,25] and y=[-15,15], matching orchard.yaml.
+    assert 'Offset:\n        X: 10' in rviz
 
 
 def test_simulation_keeps_segmentation_as_the_default_disease_backend():
@@ -27,6 +147,7 @@ def test_simulation_keeps_segmentation_as_the_default_disease_backend():
     assert config['disease_model_backend'] == 'segment'
     assert config['fruit_model_path'] == 'yolov8s_seg_sim.pt'
     assert config['max_diseased_targets'] == 0
+    assert config['target_reassociation_require_unique_candidate'] is False
 
 
 def _launch_module():
@@ -102,12 +223,18 @@ def test_arm_planner_selection_is_exposed_as_launch_arguments():
     assert "'planner_id': planner_id" in LAUNCH_SOURCE
 
 
-def test_simulation_loads_mock_targets_without_a_uav_gateway():
-    assert "package='wvcsc_mission_manager', executable='mock_target_loader'" \
+def test_simulation_uses_qt_rviz_as_the_only_manual_task_source():
+    assert 'mock_target_loader' not in LAUNCH_SOURCE
+    assert 'use_mock_targets' not in LAUNCH_SOURCE
+    assert 'mock_targets.yaml' not in LAUNCH_SOURCE
+    assert 'auto_start_mission' not in LAUNCH_SOURCE
+    assert "DeclareLaunchArgument('use_nav2_qt', default_value='true')" \
         in LAUNCH_SOURCE
-    assert "DeclareLaunchArgument('use_mock_targets', default_value='true')" \
+    assert "DeclareLaunchArgument('use_rviz', default_value='true')" \
         in LAUNCH_SOURCE
-    assert "mock_targets.yaml" in LAUNCH_SOURCE
+    assert "DeclareLaunchArgument('observation_mode', default_value='ik')" \
+        in LAUNCH_SOURCE
+    assert "'simulation_parking_clearance_check': 'true'" in LAUNCH_SOURCE
     assert 'wvcsc_uav_gateway' not in LAUNCH_SOURCE
     assert 'use_replay_uav' not in LAUNCH_SOURCE
 
@@ -180,7 +307,9 @@ def test_simulation_control_stack_uses_executable_layered_rates():
     assert servo_config['publish_period'] == pytest.approx(0.10)
     assert servo_config['low_latency_mode'] is False
     assert servo_config['use_gazebo'] is True
-    assert servo_config['publish_joint_velocities'] is True
+    # The simulated controller accepts position-only trajectories.  Sending
+    # terminal velocity fields made Gazebo reject otherwise valid Servo output.
+    assert servo_config['publish_joint_velocities'] is False
     assert servo_config['incoming_command_timeout'] == pytest.approx(0.30)
     assert servo_config['check_collisions'] is True
     assert visual_config['control_rate_hz'] == pytest.approx(30.0)
@@ -198,11 +327,18 @@ def test_simulation_observation_keeps_camera_above_the_vehicle_roof():
     assert parameters['camera_height_min_m'] == pytest.approx(0.15)
     assert parameters['camera_height_max_m'] == pytest.approx(0.40)
     assert parameters['camera_height_step_m'] == pytest.approx(0.10)
+    assert parameters['ik_tree_range_min_m'] == pytest.approx(0.8)
+    assert parameters['ik_tree_range_max_m'] == pytest.approx(1.5)
+    assert parameters['observation_camera_reach_min_m'] == pytest.approx(0.2)
+    assert parameters['observation_camera_reach_max_m'] == pytest.approx(0.4)
+    assert parameters['observation_pitch_near_deg'] == pytest.approx(-35.0)
+    assert parameters['observation_pitch_far_deg'] == pytest.approx(-20.0)
     assert 'observation_min_camera_z_in_base_m' not in parameters
     assert parameters['target_recenter_trigger_px'] == pytest.approx(16.0)
-    assert parameters['target_recenter_workspace_px'] == pytest.approx(128.0)
-    assert parameters['visual_servo_entry_max_error_px'] == pytest.approx(128.0)
+    assert parameters['cross_view_reassociation_max_distance_px'] == pytest.approx(320.0)
+    assert parameters['visual_servo_entry_max_error_px'] == pytest.approx(16.0)
     assert parameters['target_recenter_max_total_angle_deg'] == pytest.approx(45.0)
     assert parameters['target_recenter_max_iterations'] == 8
     assert parameters['max_alignment_attempts'] == 3
-    assert parameters['target_post_recenter_min_confidence'] == pytest.approx(0.20)
+    assert parameters['target_post_recenter_stable_sec'] == pytest.approx(0.50)
+    assert parameters['target_post_recenter_min_confidence'] == pytest.approx(0.30)

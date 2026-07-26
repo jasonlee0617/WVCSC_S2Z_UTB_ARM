@@ -1,0 +1,165 @@
+{
+  "schema_version": 7,
+  "pose_reference": "alicia_base_link_xy_vehicle_yaw",
+  "start_pose": {
+    "position": {
+      "x": -0.4,
+      "y": 0.0,
+      "z": 0.0
+    },
+    "orientation": {
+      "x": 0.0,
+      "y": 0.0,
+      "z": 0.0,
+      "w": 1.0
+    }
+  },
+  "spray_duration": 3.0,
+  "return_home_after_finish": false,
+  "route_points": [
+    {
+      "pose": {
+        "position": {
+          "x": 2.986999273300171,
+          "y": 0.48641225695610046,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0,
+          "w": 1.0
+        }
+      },
+      "point_type": "TRANSIT",
+      "tree_x_m": 0.0,
+      "tree_y_m": 0.0,
+      "tree_base_z_m": 0.0,
+      "tree_pose": null,
+      "work_side": "UNSPECIFIED",
+      "wide_spray_on_approach": false,
+      "arm_spray_duration_sec": 3.0,
+      "dwell_time_sec": 0.0
+    },
+    {
+      "pose": {
+        "position": {
+          "x": 7.020170211791992,
+          "y": 0.5073100924491882,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0,
+          "w": 1.0
+        }
+      },
+      "point_type": "INSPECT",
+      "tree_x_m": 0.02089691162109392,
+      "tree_y_m": -1.3792186379432678,
+      "tree_base_z_m": 0.0,
+      "tree_pose": {
+        "position": {
+          "x": 6.999273300170898,
+          "y": 1.886528730392456,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.010202550082027714,
+          "w": 0.9999479526314475
+        }
+      },
+      "work_side": "RIGHT",
+      "wide_spray_on_approach": true,
+      "arm_spray_duration_sec": 5.0,
+      "dwell_time_sec": 0.0
+    },
+    {
+      "pose": {
+        "position": {
+          "x": 11.011540412902832,
+          "y": 0.5491037964820862,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.015146826688596375,
+          "w": 0.9998852802403212
+        }
+      },
+      "point_type": "INSPECT",
+      "tree_x_m": -0.03924489347870931,
+      "tree_y_m": -1.2950364876576252,
+      "tree_base_z_m": 0.0,
+      "tree_pose": {
+        "position": {
+          "x": 11.011540412902832,
+          "y": 1.844734787940979,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0,
+          "w": 1.0
+        }
+      },
+      "work_side": "RIGHT",
+      "wide_spray_on_approach": true,
+      "arm_spray_duration_sec": 5.0,
+      "dwell_time_sec": 0.0
+    },
+    {
+      "pose": {
+        "position": {
+          "x": 15.023797988891602,
+          "y": 0.44461822509765625,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0208197999797769,
+          "w": 0.9997832444729218
+        }
+      },
+      "point_type": "TRANSIT",
+      "tree_x_m": 0.0,
+      "tree_y_m": 0.0,
+      "tree_base_z_m": 0.0,
+      "tree_pose": null,
+      "work_side": "UNSPECIFIED",
+      "wide_spray_on_approach": true,
+      "arm_spray_duration_sec": 3.0,
+      "dwell_time_sec": 0.0
+    },
+    {
+      "pose": {
+        "position": {
+          "x": 18.074798583984375,
+          "y": 0.46551552414894104,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.016122781176614705,
+          "w": 0.9998700195161024
+        }
+      },
+      "point_type": "FINISH",
+      "tree_x_m": 0.0,
+      "tree_y_m": 0.0,
+      "tree_base_z_m": 0.0,
+      "tree_pose": null,
+      "work_side": "UNSPECIFIED",
+      "wide_spray_on_approach": false,
+      "arm_spray_duration_sec": 3.0,
+      "dwell_time_sec": 0.0
+    }
+  ]
+}

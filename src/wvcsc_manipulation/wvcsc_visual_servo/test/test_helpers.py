@@ -1,4 +1,3 @@
-import json
 import math
 import threading
 from types import SimpleNamespace
@@ -21,11 +20,6 @@ from wvcsc_visual_servo.servo.math_utils import (
     slew,
     SimpleTargetPredictor2D,
 )
-from wvcsc_visual_servo.servo.debug_snapshot import (
-    DEBUG_DEFAULTS,
-    debug_json,
-    debug_publish_due,
-)
 from wvcsc_visual_servo.servo.servo_status_policy import (
     ServoStatusAction,
     ServoStatusPolicy,
@@ -33,7 +27,6 @@ from wvcsc_visual_servo.servo.servo_status_policy import (
 from wvcsc_visual_servo.visual_servo_node import (
     VisualServo, _GoalState,
     _direction_guard_result,
-    _positive_finite_rate,
 )
 from wvcsc_interfaces.action import AlignTarget
 
@@ -88,6 +81,40 @@ def test_servo_execution_diagnostics_distinguish_output_from_joint_motion():
     assert node._goal_state.servo_output_velocity_count == 1
     assert node._goal_state.max_commanded_joint_delta_rad == pytest.approx(0.01)
     assert node._goal_state.max_joint_delta_rad == pytest.approx(0.004)
+
+
+def test_servo_watchdog_reports_missing_joint_trajectory_after_motion_command():
+    node = object.__new__(VisualServo)
+    node._lock = threading.Lock()
+    node._goal_state = _GoalState(first_motion_command_monotonic=10.0)
+    node._servo_response_timeout_sec = 0.75
+    node._servo_min_output_rate_hz = 8.0
+    node._servo_min_commanded_joint_delta_rad = 0.01
+    node._servo_min_actual_joint_delta_rad = 0.002
+
+    reason = node._servo_actuation_stall_reason(10.80)
+
+    assert reason is not None
+    assert 'no JointTrajectory received' in reason
+
+
+def test_servo_watchdog_accepts_frequent_output_with_joint_response():
+    node = object.__new__(VisualServo)
+    node._lock = threading.Lock()
+    node._goal_state = _GoalState(
+        first_motion_command_monotonic=10.0,
+        servo_output_first_monotonic=10.05,
+        servo_output_last_monotonic=10.75,
+        servo_output_count=15,
+        max_commanded_joint_delta_rad=0.02,
+        max_joint_delta_rad=0.004,
+    )
+    node._servo_response_timeout_sec = 0.75
+    node._servo_min_output_rate_hz = 8.0
+    node._servo_min_commanded_joint_delta_rad = 0.01
+    node._servo_min_actual_joint_delta_rad = 0.002
+
+    assert node._servo_actuation_stall_reason(10.80) is None
 
 
 def test_stop_burst_publishes_zero_for_a_quarter_second(monkeypatch):
@@ -377,7 +404,7 @@ def _status_harness(busy):
     node.zero_commands = 0
     node._publish_zero = lambda: setattr(
         node, 'zero_commands', node.zero_commands + 1)
-    node._publish_debug = lambda *_args, **_kwargs: None
+    node.get_logger = lambda: SimpleNamespace(warn=lambda *_args: None)
     return node
 
 
@@ -494,15 +521,6 @@ def test_non_matching_target_does_not_invalidate_the_active_target():
     assert node._goal_state.latest == {'valid': True, 'received': 10.0}
 
 
-def test_visual_servo_debug_json_has_stable_complete_schema():
-    payload = json.loads(debug_json(event='control', error_u_px=12.5))
-    assert list(payload) == list(DEBUG_DEFAULTS)
-    assert payload['event'] == 'control'
-    assert payload['error_u_px'] == 12.5
-    assert payload['desired_u_px'] == 0.0
-    assert payload['servo_lifecycle_state'] == 'never_started'
-
-
 def test_servo_lifecycle_starts_once_then_reuses_zero_braked_loop():
     node = object.__new__(VisualServo)
     node._servo_lifecycle = 'never_started'
@@ -521,104 +539,6 @@ def test_servo_lifecycle_starts_once_then_reuses_zero_braked_loop():
     assert node._servo_lifecycle == 'running'
     assert node._activate_servo() == (True, 'already running')
     assert calls == [('start', 12.0)]
-
-
-def test_visual_servo_debug_rate_is_limited_unless_forced():
-    assert debug_publish_due(10.0, None, 5.0)
-    assert not debug_publish_due(10.1, 10.0, 5.0)
-    assert debug_publish_due(10.21, 10.0, 5.0)
-    assert debug_publish_due(10.01, 10.0, 5.0, force=True)
-
-
-def _terminal_log_harness(rate=1.0):
-    class Logger:
-        def __init__(self):
-            self.lines = []
-
-        def info(self, message):
-            self.lines.append(message)
-
-    node = object.__new__(VisualServo)
-    node._lock = threading.Lock()
-    node._active_target = 'fruit-1'
-    node._goal_state = _GoalState(
-        alignment_started=5.0,
-        last_command=(0.018, -0.009))
-    # 终端日志按命令空间选择单位；该轻量 harness 不执行完整构造函数。
-    node._command_mode = 'linear_xy'
-    node._progress = SimpleNamespace(stable_duration=0.20)
-    node._servo_status = 0
-    node._policy = ServoStatusPolicy({1, 3}, {2}, {4, 5}, {6})
-    node.get_parameter = lambda _name: SimpleNamespace(value=rate)
-    logger = Logger()
-    node.get_logger = lambda: logger
-    return node, logger
-
-
-def test_terminal_track_is_limited_to_one_hz(monkeypatch):
-    node, logger = _terminal_log_harness()
-    clock = iter((10.0, 10.2, 10.99, 11.0))
-    monkeypatch.setattr(
-        'wvcsc_visual_servo.visual_servo_node.time.monotonic',
-        lambda: next(clock))
-    latest = {
-        'error_u': 3.2, 'error_v': -1.4, 'confidence': 0.83,
-        'stable_frames': 4,
-    }
-
-    node._log_terminal_status('TRACK', 6.5, latest)
-    node._log_terminal_status('TRACK', 6.6, latest)
-    node._log_terminal_status('TRACK', 7.0, latest)
-    node._log_terminal_status('TRACK', 7.5, latest)
-
-    assert len(logger.lines) == 2
-    assert 'cmd_velocity_mps=(0.018,-0.009)' in logger.lines[0]
-    assert 'servo_status=' not in logger.lines[0]
-
-
-def test_terminal_wait_logs_once_without_fake_zero_error_and_track_recovers(
-        monkeypatch):
-    node, logger = _terminal_log_harness()
-    clock = iter((10.0, 10.1, 10.2))
-    monkeypatch.setattr(
-        'wvcsc_visual_servo.visual_servo_node.time.monotonic',
-        lambda: next(clock))
-    latest = {'confidence': 0.12}
-
-    node._log_terminal_status(
-        'WAIT', 6.0, latest, reason='target_unavailable')
-    node._log_terminal_status(
-        'WAIT', 6.1, latest, reason='target_unavailable')
-    node._log_terminal_status('TRACK', 6.2, {
-        'error_u': 2.0, 'error_v': -1.0, 'confidence': 0.80})
-
-    assert len(logger.lines) == 2
-    assert 'error_px=n/a' in logger.lines[0]
-    assert 'reason=target_unavailable' in logger.lines[0]
-    assert 'error_px=(0.0,0.0)' not in logger.lines[0]
-    assert 'TRACK target=fruit-1' in logger.lines[1]
-
-
-def test_terminal_track_expands_only_nonzero_servo_status(monkeypatch):
-    node, logger = _terminal_log_harness()
-    node._servo_status = 1
-    monkeypatch.setattr(
-        'wvcsc_visual_servo.visual_servo_node.time.monotonic',
-        lambda: 10.0)
-
-    node._log_terminal_status('TRACK', 6.0, {
-        'error_u': 2.0, 'error_v': -1.0, 'confidence': 0.80})
-
-    assert 'servo_status=1(' in logger.lines[0]
-
-
-@pytest.mark.parametrize('name', ['terminal_status_rate_hz', 'debug_rate_hz'])
-@pytest.mark.parametrize('value', [0.0, -1.0, math.nan, math.inf, -math.inf])
-def test_terminal_and_debug_rates_require_positive_finite_values(name, value):
-    node = SimpleNamespace(
-        get_parameter=lambda _name: SimpleNamespace(value=value))
-    with pytest.raises(ValueError, match='finite and positive'):
-        _positive_finite_rate(node, name)
 
 
 def test_predictor_uses_bounded_horizon():
@@ -695,7 +615,6 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
     node._servo_lifecycle = 'never_started'
     node._last_lifecycle_transition = ''
     node._last_service_latency_sec = 0.0
-    node._publish_debug = lambda *_args, **_kwargs: None
     node._publish_zero = lambda: None
     node._publish_zero_count = lambda: None
     node.get_parameter = lambda _name: SimpleNamespace(value=True)

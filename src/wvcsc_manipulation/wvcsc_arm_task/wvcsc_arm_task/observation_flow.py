@@ -1,9 +1,8 @@
-"""观察位姿、运动学优化与 ROS 观察流程。
+"""ROS 观察流程与共享候选执行。
 
-本模块将原先分开的三个观察层集中管理：纯几何函数负责相机与 tool0 的坐标
-变换，ObservationOptimizer 负责 URDF/NumPy 雅可比与安全筛选，ObservationFlowMixin
-负责 ROS 输入、候选执行、目标重心和观察位切换。三者仍保持原有类与函数边界，
-这里只收敛物理文件，避免改变任务状态机和安全语义。
+IK 几何/运动学公开边界由 :mod:`ik_observation` 导出，固定关节扫描策略位于
+:mod:`joint_preset_observation`。本模块只保留二者共用的 ROS 快照、候选执行、
+目标重心、观察位切换和调试发布逻辑，避免两种模式重复实现安全恢复。
 
 位置单位为米，角度单位为弧度或函数名明确标注的度，四元数统一使用 (x, y, z, w)。
 相机 optical frame 遵循 ROS 约定：+Z 向前、+X 向右、+Y 向下。
@@ -20,7 +19,7 @@ from std_msgs.msg import String
 from tf2_ros import TransformException
 from urdf_parser_py.urdf import URDF
 
-from .target_flow import target_pixel_error, target_requires_recenter
+from .target_flow import target_pixel_error
 
 
 def transform_point(point, translation, quat_xyzw):
@@ -98,6 +97,49 @@ def camera_look_at_pose(
         optical_z[0] * optical_x[1] - optical_z[1] * optical_x[0],
     )
     # 旋转矩阵的三列分别是 optical X/Y/Z 轴在机械臂 base 坐标系中的表达。
+    matrix = (
+        (optical_x[0], optical_y[0], optical_z[0]),
+        (optical_x[1], optical_y[1], optical_z[1]),
+        (optical_x[2], optical_y[2], optical_z[2]),
+    )
+    return camera, quaternion_from_matrix(matrix)
+
+
+def camera_pose_from_bearing(
+        tree_root, camera_reach, camera_height, pitch_degrees,
+        yaw_offset_degrees=0.0):
+    """Create an IK observation pose without classifying tree/leaf height.
+
+    The camera is placed on a short radial grid around ``alicia_base_link``.
+    Its optical +Z points along the tree bearing with a distance-adaptive
+    downward pitch.  Unlike the retired fruit-zone envelope this contains no
+    target-height or fixed camera-to-tree acceptance gate.
+    """
+    tree_x, tree_y, _tree_z = (float(value) for value in tree_root)
+    camera_reach = float(camera_reach)
+    camera_height = float(camera_height)
+    pitch = math.radians(float(pitch_degrees))
+    yaw = math.atan2(tree_y, tree_x) + math.radians(float(yaw_offset_degrees))
+    values = (tree_x, tree_y, camera_reach, camera_height, pitch, yaw)
+    if (not all(math.isfinite(value) for value in values) or
+            math.hypot(tree_x, tree_y) <= 0.0 or camera_reach <= 0.0):
+        raise ValueError('bearing observation inputs are invalid')
+    camera = (
+        camera_reach * math.cos(yaw),
+        camera_reach * math.sin(yaw),
+        camera_height,
+    )
+    optical_z = (
+        math.cos(pitch) * math.cos(yaw),
+        math.cos(pitch) * math.sin(yaw),
+        math.sin(pitch),
+    )
+    optical_x = (math.sin(yaw), -math.cos(yaw), 0.0)
+    optical_y = (
+        optical_z[1] * optical_x[2] - optical_z[2] * optical_x[1],
+        optical_z[2] * optical_x[0] - optical_z[0] * optical_x[2],
+        optical_z[0] * optical_x[1] - optical_z[1] * optical_x[0],
+    )
     matrix = (
         (optical_x[0], optical_y[0], optical_z[0]),
         (optical_x[1], optical_y[1], optical_z[1]),
@@ -455,56 +497,51 @@ class ObservationOptimizer:
             raise ValueError('URDF does not provide limits for every arm joint')
 
     def generate(self, tree_in_base, camera_mount, camera):
-        """枚举观察网格，并保留中心可见且覆盖率足够的相机位姿。"""
+        """Enumerate the radial IK grid without height-zone filtering."""
         tree_x, tree_y, _tree_z = (float(value) for value in tree_in_base)
         horizontal_distance = math.hypot(tree_x, tree_y)
-        aim_height = (
-            float(self._config['fruit_zone_height_min_m']) +
-            float(self._config['fruit_zone_height_max_m'])) / 2.0
+        near_range = float(self._config['tree_range_min_m'])
+        far_range = float(self._config['tree_range_max_m'])
+        progress = min(1.0, max(
+            0.0, (horizontal_distance - near_range) / (far_range - near_range)))
+        pitch = (
+            float(self._config['pitch_near_deg']) + progress * (
+                float(self._config['pitch_far_deg']) -
+                float(self._config['pitch_near_deg'])))
         candidates = []
-        # 遍历距离、高度、方位角网格
-        for distance in _values(
-                self._config['distance_min_m'], self._config['distance_max_m'],
-                self._config['distance_step_m']):
-            if horizontal_distance <= distance + 0.05:
-                continue
+        for reach in _values(
+                self._config['camera_reach_min_m'],
+                self._config['camera_reach_max_m'],
+                self._config['camera_reach_step_m']):
             for height in _values(
                     self._config['camera_height_min_m'],
                     self._config['camera_height_max_m'],
                     self._config['camera_height_step_m']):
                 for azimuth in self._config['azimuth_offsets_deg']:
-                    camera_position, camera_quat = camera_look_at_pose(
-                        tree_in_base, aim_height, height, distance, azimuth)
-                    target_point = (
-                        float(tree_in_base[0]), float(tree_in_base[1]),
-                        float(tree_in_base[2]) + aim_height)
-                    camera_quat = camera_orientation_for_pixel(
-                        camera_position, camera_quat, target_point, camera,
-                        float(camera[4]) / 2.0, float(camera[5]) / 2.0)
-                    visible, margin, fraction, bbox, target_pixel, reason = (
-                        self._envelope_visible(
-                        tree_in_base, camera_position, camera_quat, camera)
-                    )
-                    # 转换相机位姿为 tool0 位姿
+                    camera_position, camera_quat = camera_pose_from_bearing(
+                        tree_in_base, reach, height, pitch, azimuth)
                     tool_position, tool_quat = tool_pose_from_camera_pose(
                         camera_position, camera_quat, camera_mount[0], camera_mount[1])
+                    optical_depth = (
+                        (horizontal_distance - reach) /
+                        max(1e-6, math.cos(math.radians(pitch))))
                     candidates.append(_build_candidate(
                         candidate_id=(
-                            f'd{distance:.2f}_h{height:.2f}_a{float(azimuth):+.0f}'),
-                        distance_m=distance,
+                            f'r{reach:.2f}_h{height:.2f}_a{float(azimuth):+.0f}'),
+                        distance_m=optical_depth,
                         camera_height_m=height,
                         azimuth_deg=azimuth,
                         camera_position=camera_position,
                         camera_quat=camera_quat,
                         tool_position=tool_position,
                         tool_quat=tool_quat,
-                        visible=visible,
-                        visible_margin_px=margin,
-                        visible_fraction=fraction,
-                        projected_bbox=bbox,
-                        target_u_px=target_pixel[0],
-                        target_v_px=target_pixel[1],
-                        rejection_reason=reason,
+                        visible=True,
+                        visible_margin_px=math.inf,
+                        visible_fraction=1.0,
+                        projected_bbox=(0.0, 0.0, 0.0, 0.0),
+                        target_u_px=float(camera[4]) / 2.0,
+                        target_v_px=float(camera[5]) / 2.0,
+                        rejection_reason='',
                     ))
         return candidates
 
@@ -633,90 +670,9 @@ class ObservationOptimizer:
         linear = [np.cross(axis, end - origin) for axis, origin in zip(axes, origins)]
         return np.vstack((np.column_stack(linear), np.column_stack(axes)))
 
-    def _envelope_visible(self, tree, camera_position, camera_quat, camera):
-        """Project the camera-facing work envelope and return its usable coverage."""
-        fx, fy, cx, cy, width, height = camera
-        rotation = np.asarray(
-            rotation_matrix_from_quaternion(camera_quat), dtype=float)
-        camera_position = np.asarray(camera_position, dtype=float)
-        border_x = float(width) * float(self._config['image_margin_ratio'])
-        border_y = float(height) * float(self._config['image_margin_ratio'])
-        horizontal = np.asarray((
-            float(tree[0]) - camera_position[0],
-            float(tree[1]) - camera_position[1],
-        ), dtype=float)
-        horizontal_norm = float(np.linalg.norm(horizontal))
-        if horizontal_norm <= 1e-9:
-            return False, -math.inf, 0.0, (), (0.0, 0.0), (
-                'target_center_outside_usable_image')
-        lateral = np.asarray((
-            horizontal[1] / horizontal_norm,
-            -horizontal[0] / horizontal_norm,
-            0.0,
-        ))
-        radius = float(self._config['fruit_zone_radius_m'])
-        pixels = []
-        for height_m in (
-                float(self._config['fruit_zone_height_min_m']),
-                float(self._config['fruit_zone_height_max_m'])):
-            for side in (-1.0, 1.0):
-                point = np.asarray((
-                    float(tree[0]), float(tree[1]), float(tree[2]) + height_m,
-                )) + side * radius * lateral
-                optical = rotation.T @ (point - camera_position)
-                if optical[2] <= 1e-6:
-                    return False, -math.inf, 0.0, (), (0.0, 0.0), (
-                        'target_center_outside_usable_image')
-                u = fx * optical[0] / optical[2] + cx
-                v = fy * optical[1] / optical[2] + cy
-                pixels.append((float(u), float(v)))
-
-        center = np.asarray((
-            float(tree[0]), float(tree[1]),
-            float(tree[2]) + 0.5 * (
-                float(self._config['fruit_zone_height_min_m']) +
-                float(self._config['fruit_zone_height_max_m'])),
-        ))
-        center_optical = rotation.T @ (center - camera_position)
-        if center_optical[2] <= 1e-6:
-            return False, -math.inf, 0.0, (), (0.0, 0.0), (
-                'target_center_outside_usable_image')
-        center_u = float(fx * center_optical[0] / center_optical[2] + cx)
-        center_v = float(fy * center_optical[1] / center_optical[2] + cy)
-        min_u = min(pixel[0] for pixel in pixels)
-        max_u = max(pixel[0] for pixel in pixels)
-        min_v = min(pixel[1] for pixel in pixels)
-        max_v = max(pixel[1] for pixel in pixels)
-        bbox = (min_u, min_v, max_u, max_v)
-        bbox_area = max(0.0, max_u - min_u) * max(0.0, max_v - min_v)
-        intersection_width = max(
-            0.0, min(max_u, float(width) - border_x) - max(min_u, border_x))
-        intersection_height = max(
-            0.0, min(max_v, float(height) - border_y) - max(min_v, border_y))
-        visible_fraction = (
-            intersection_width * intersection_height / bbox_area
-            if bbox_area > 1e-9 else 0.0)
-        margin = min(
-            min_u - border_x, float(width) - border_x - max_u,
-            min_v - border_y, float(height) - border_y - max_v)
-        center_visible = (
-            border_x <= center_u <= float(width) - border_x and
-            border_y <= center_v <= float(height) - border_y)
-        required = float(self._config['min_visible_fraction'])
-        if not center_visible:
-            reason = 'target_center_outside_usable_image'
-        elif visible_fraction < required:
-            reason = 'fruit_zone_coverage_below_threshold'
-        else:
-            reason = ''
-        return (
-            not reason, float(margin), float(visible_fraction), bbox,
-            (center_u, center_v), reason)
-
-
 class ObservationFlowMixin:
     # --------- 扫描与确认树 ---------
-    def _scan_for_tree(self, cancel_requested):
+    def _scan_for_tree(self, cancel_requested, *, fan_only=False):
         while not self._aborted(cancel_requested):
             candidate = self._active_observation_candidate()
             self._reset_tree_tracking()
@@ -727,9 +683,23 @@ class ObservationFlowMixin:
             self._publish_observation_debug(
                 'tree_not_confirmed', candidate,
                 rejection_reason='tree_not_confirmed')
-            if not self._move_to_next_observation():
+            if fan_only:
+                if not self._move_to_next_fan_observation():
+                    return False
+            elif not self._move_to_next_observation():
                 return False
         return False
+
+    def _move_to_next_fan_observation(self):
+        """Advance center -> left fan -> right fan, never into recovery views."""
+        next_index = self._observation_candidate_index + 1
+        if next_index >= len(self._observation_candidates):
+            return False
+        phase = getattr(
+            self._observation_candidates[next_index], 'selection_phase', '')
+        if not str(phase).startswith('fan_'):
+            return False
+        return self._move_to_next_observation()
 
     def _active_observation_candidate(self):
         index = self._observation_candidate_index
@@ -824,8 +794,7 @@ class ObservationFlowMixin:
         post_error_u, post_error_v = target_pixel_error(
             confirmed.center_u, confirmed.center_v, desired_u, desired_v)
         post_error_norm = math.hypot(post_error_u, post_error_v)
-        entry_px = self._recenter_config.get(
-            'servo_entry_px', self._recenter_config['workspace_px'])
+        entry_px = self._recenter_config['servo_entry_px']
         if post_error_norm > entry_px:
             self._publish_observation_debug(
                 'target_recenter_failed', candidate,
@@ -885,22 +854,18 @@ class ObservationFlowMixin:
         pre_error_u, pre_error_v = target_pixel_error(
             target.center_u, target.center_v, desired_u, desired_v)
         
-        entry_px = self._recenter_config.get(
-            'servo_entry_px', self._recenter_config['workspace_px'])
+        trigger_px = self._recenter_config['trigger_px']
         pre_error_norm = math.hypot(pre_error_u, pre_error_v)
-        if pre_error_norm <= entry_px:
-            source = (
-                'inside_recenter_trigger' if not target_requires_recenter(
-                    target.center_u, target.center_v, desired_u, desired_v,
-                    self._recenter_config['trigger_px'])
-                else 'bounded_servo_entry')
+        if pre_error_norm <= trigger_px:
             return self._confirm_servo_handoff(
                 target, current_joints, desired_u, desired_v, cancel_requested,
                 pre_error_u=pre_error_u, pre_error_v=pre_error_v,
                 planned_angle_deg=0.0,
-                event='target_recenter_not_required', source=source)
-        
-        # 若目标不在工作空间内，开始计算重心候选
+                event='target_recenter_not_required',
+                source='inside_recenter_trigger')
+        # 目标偏离多少像素不再是重心准入条件。真正的物理边界由单步/累计
+        # 旋转角、碰撞 IK、关节余量及 MoveIt 规划共同决定；固定 128 px
+        # 门限曾错误拒绝约 19°、但仍在 20°安全重心范围内的病果。
         index = self._observation_candidate_index
         if index < 0 or index >= len(self._observation_candidates):
             return False, 'no active observation candidate for target recenter'
@@ -1216,24 +1181,18 @@ class ObservationFlowMixin:
         self._tree_in_base = tree_in_base
 
         if self._observation_mode == 'joint_presets':
-            epsilon = self._joint_preset_side_epsilon_m
-            if tree_in_base[1] > epsilon:
-                self._joint_preset_side = 'left'
-            elif tree_in_base[1] < -epsilon:
-                self._joint_preset_side = 'right'
-            else:
-                self._joint_preset_side = ''
+            if not self._select_joint_preset_side(tree_in_base):
+                return False
+        else:
+            range_m = math.hypot(tree_in_base[0], tree_in_base[1])
+            minimum = float(self._observation_config['tree_range_min_m'])
+            maximum = float(self._observation_config['tree_range_max_m'])
+            if not minimum <= range_m <= maximum:
                 self._observation_failure_reason = (
-                    'joint_preset_tree_side_ambiguous '
-                    f'(tree_y_m={tree_in_base[1]:.3f}, '
-                    f'requires_abs_y>{epsilon:.3f})')
-                self.get_logger().error(
-                    '[ARM][OBSERVE] mode=joint_presets rejects tree too close '
-                    f'to the base Y axis: y={tree_in_base[1]:.3f} m, '
-                    f'epsilon={epsilon:.3f} m')
+                    'ik_tree_range_out_of_range '
+                    f'(range={range_m:.3f}m, allowed={minimum:.3f}-{maximum:.3f}m)')
                 self._publish_observation_debug(
-                    'search_failed',
-                    rejection_reason=self._observation_failure_reason)
+                    'search_failed', rejection_reason=self._observation_failure_reason)
                 return False
 
         try:
@@ -1259,45 +1218,6 @@ class ObservationFlowMixin:
             return False
         return self._move_to_next_observation()
 
-    def _prepare_joint_preset_observation_candidates(self):
-        """Prepare the fixed real-arm scan order without camera look-at IK."""
-        self._observation_candidates = []
-        self._observation_candidate_index = -1
-        presets = self._joint_preset_positions.get(self._joint_preset_side, ())
-        if not presets:
-            self._observation_failure_reason = (
-                f'joint_preset_side_unconfigured ({self._joint_preset_side or "none"})')
-            self.get_logger().error(
-                '[ARM][OBSERVE] mode=joint_presets has no configured presets '
-                f'for side={self._joint_preset_side or "none"}')
-            self._publish_observation_debug(
-                'search_failed', rejection_reason=self._observation_failure_reason)
-            return False
-        for index, (name, joints) in enumerate(presets):
-            self._observation_candidates.append(_build_candidate(
-                candidate_id=f'joint_preset_{self._joint_preset_side}_{name}',
-                distance_m=self._spray_working_distance,
-                camera_height_m=0.0,
-                azimuth_deg=(0.0, -1.0, 1.0)[index],
-                camera_position=(0.0, 0.0, 0.0),
-                camera_quat=(0.0, 0.0, 0.0, 1.0),
-                tool_position=(0.0, 0.0, 0.0),
-                tool_quat=(0.0, 0.0, 0.0, 1.0),
-                visible=True,
-                visible_margin_px=math.inf,
-                visible_fraction=1.0,
-                observation_mode='joint_presets',
-                joint_positions=joints,
-            ))
-            self._observation_candidates[-1].selection_phase = (
-                'center_initial' if index == 0 else 'fan_scan')
-        self.get_logger().info(
-            '[ARM][OBSERVE] mode=joint_presets tree_in_base='
-            f'({self._tree_in_base[0]:.2f},{self._tree_in_base[1]:.2f},'
-            f'{self._tree_in_base[2]:.2f}) side={self._joint_preset_side} prepared='
-            f'{len(self._observation_candidates)}')
-        return True
-
     def _prepare_observation_candidates(self):
         """生成观察网格，结合碰撞 IK 和 URDF 指标保留少量安全候选。"""
         inputs = self._wait_for_observation_inputs()
@@ -1310,7 +1230,7 @@ class ObservationFlowMixin:
         started = time.monotonic()
         candidates = self._observation_optimizer.generate(
             self._tree_in_base, self._camera_mount, camera)
-        visible_count = sum(candidate.visible for candidate in candidates)
+        visible_count = len(candidates)
         for candidate in candidates:
             if not candidate.visible:
                 self._publish_observation_debug('candidate_rejected', candidate)
@@ -1340,31 +1260,18 @@ class ObservationFlowMixin:
         servo_safe_count = sum(
             candidate.visible and not candidate.rejection_reason
             for candidate in candidates)
-        best_fraction = max(
-            (candidate.visible_fraction for candidate in candidates), default=0.0)
         self.get_logger().info(
             f'[ARM][OBSERVE] tree_in_base=({self._tree_in_base[0]:.2f},'
             f'{self._tree_in_base[1]:.2f},{self._tree_in_base[2]:.2f}) '
             f'camera={camera[4]}x{camera[5]} fx={camera[0]:.1f} fy={camera[1]:.1f} '
             f'generated={len(candidates)} view_usable={visible_count} '
-            f'ik_valid={ik_count} servo_safe={servo_safe_count} '
-            f'best_visible_fraction={best_fraction:.3f}')
+            f'ik_valid={ik_count} servo_safe={servo_safe_count}')
         self._observation_candidate_index = -1
         if not self._observation_candidates:
             if not candidates:
-                tree_range = math.hypot(
-                    float(self._tree_in_base[0]),
-                    float(self._tree_in_base[1]))
-                minimum_range = (
-                    float(self._observation_config['distance_min_m']) + 0.05)
-                if tree_range <= minimum_range:
-                    reason = (
-                        'tree_too_close_for_observation_standoff '
-                        f'(range={tree_range:.3f}m, requires>{minimum_range:.3f}m)')
-                else:
-                    reason = 'no_camera_coverage_candidate'
+                reason = 'no_observation_candidate'
             elif visible_count == 0:
-                reason = 'no_camera_coverage_candidate'
+                reason = 'no_observation_candidate'
             elif ik_count == 0:
                 reason = 'no_collision_free_ik_candidate'
             else:
@@ -1407,7 +1314,8 @@ class ObservationFlowMixin:
                 if camera_pose is not None:
                     candidate.camera_position, candidate.camera_quat = camera_pose
                     candidate.camera_height_m = candidate.camera_position[2]
-                self._observation_distance = self._spray_working_distance
+                working_range, _error = self._dynamic_nozzle_range()
+                self._observation_distance = working_range
                 self._observation_pose = None
                 joints_deg = ','.join(
                     f'{math.degrees(value):.1f}'
@@ -1556,8 +1464,9 @@ class ObservationFlowMixin:
             'joint_positions_deg': joint_positions_deg,
             'visible': visible,
             'visible_fraction': visible_fraction,
-            'required_visible_fraction': self._observation_config[
-                'min_visible_fraction'],
+            # 候选不再以树/叶高度包络作为准入条件；最终可见性由实际 YOLO
+            # 检测和锁定流程判定，因此这里明确标出该旧阈值不再适用。
+            'required_visible_fraction': None,
             'projected_bbox_xyxy': projected_bbox,
             'target_u_px': target_u,
             'target_v_px': target_v,

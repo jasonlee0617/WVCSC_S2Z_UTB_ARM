@@ -74,8 +74,6 @@ wvcsc_spray_task:
     target_class_name: diseased_target
     # 仿真保留一个或多个目标的完整队列。
     max_targets_per_tree: 0
-    # 仅用于喷嘴轴线在图像中的标定投影，不作为实际喷洒距离门控。
-    spray_working_distance_m: 1.30
 
     # 视觉确认帧数：连续 3 帧满足条件，才认为目标有效，防止单帧误检。
     confirmation_frames: 3
@@ -91,11 +89,14 @@ wvcsc_spray_task:
     # ----------------------------------------------------------------------
     # 7. 目标重心修正 (Recenter) 与 IBVS 视觉伺服配置
     # ----------------------------------------------------------------------
-    # 16px 内无需 MoveIt 粗对准。更大的误差在 128px 内可通过当前姿态
-    # 的关节余量/Jacobian 预检后交给 Servo；超过 128px 仍必须安全粗对准。
+    # 16px 内无需 MoveIt 粗对准；16~128px 必须先进行碰撞感知的粗对准，
+    # 先由观察重心将目标移入视觉伺服入口；不再以固定像素工作区拒绝远离
+    # 光轴、但仍处于机械臂安全角度范围内的目标。视觉伺服只接收下方的入口残差。
     target_recenter_trigger_px: 16.0
-    target_recenter_workspace_px: 128.0
-    visual_servo_entry_max_error_px: 128.0
+    visual_servo_entry_max_error_px: 16.0
+    # 相机重心或扇形观察切换后，任务账本允许以受限最近邻重新关联同一物理目标。
+    # 该门限只用于逻辑关联，不是机械臂运动或视觉伺服准入门限。
+    cross_view_reassociation_max_distance_px: 320.0
 
     # 单步重心的最大旋转角度，防止大角度规划导致机械臂撞击或奇异点。
     target_recenter_max_angle_deg: 20.0
@@ -123,21 +124,21 @@ wvcsc_spray_task:
     # ----------------------------------------------------------------------
     # 8. 目标后处理稳定性校验 (Post-Recenter Check)
     # ----------------------------------------------------------------------
-    # 以下统计保留给观测调试；粗对准到 Servo 的交接只要求目标新鲜且处于
-    # workspace，最终 4px/0.5s 稳定性由 VisualServo Action 统一判定。
-    target_post_recenter_stable_sec: 0.20
+    # 粗对准后先确认目标持续稳定，避免低置信度重关联目标直接进入 Servo。
+    # 最终像素收敛仍由 VisualServo Action 统一判定。
+    target_post_recenter_stable_sec: 0.50
     target_post_recenter_max_drift_px: 4.0
     target_post_recenter_max_gap_sec: 0.20          # 允许的最大帧漏检间隙
-    # 与任务队列的 0.20 准入线一致；低于 0.20 不进入 Servo，低于 0.10
-    # 的感知结果更不会进入喷洒闭环。
-    target_post_recenter_min_confidence: 0.20
+    # 低于 0.30 的短暂检测只保留给跟踪，不进入喷洒闭环。
+    target_post_recenter_min_confidence: 0.30
 
     # ----------------------------------------------------------------------
     # 9. 目标去重 (De-duplication) 配置
     # ----------------------------------------------------------------------
-    # 若新检测与已处理目标的 IoU > 0.3，或中心距离 < 40px，视为同一目标。
+    # 任务账本只把同一物理病果的紧邻检测合并；18 px 避免两颗相近病果
+    # 在复检时被错误当作已经喷洒的同一目标。
     processed_iou_threshold: 0.30
-    processed_center_distance_px: 40.0
+    processed_center_distance_px: 18.0
 
     # YOLO 输入图像尺寸。必须是 GPU 推理的精确尺寸，否则像素误差计算会漂移。
     image_width: 640
@@ -146,22 +147,22 @@ wvcsc_spray_task:
     # ----------------------------------------------------------------------
     # 11. 观察位姿参数 (Observation Optimizer)
     # ----------------------------------------------------------------------
-    # 病树在视野中的果实的纵向分布范围 (离地面的高度)。
-    fruit_zone_height_min_m: 0.80
-    fruit_zone_height_max_m: 1.60
-    fruit_zone_radius_m: 0.50          # 病斑水平散布半径（玉米叶片外展）
+    # IK 模式才检查树根到 Alicia 基座的平面距离；joint_presets 不使用该门控。
+    ik_tree_range_min_m: 0.80
+    ik_tree_range_max_m: 1.50
 
-    # 观察候选网格的生成参数。
-    observation_distance_min_m: 1.0
-    observation_distance_max_m: 1.50
-    observation_distance_step_m: 0.1
+    # 相机围绕 Alicia 基座的径向观察网格。它不再硬编码相机到树的喷洒距离。
+    observation_camera_reach_min_m: 0.20
+    observation_camera_reach_max_m: 0.40
+    observation_camera_reach_step_m: 0.10
     # 相机光心相对 alicia_base_link 的 Z 高度；0.15 m 为确认的最小车顶净空。
     camera_height_min_m: 0.15
     camera_height_max_m: 0.40
     camera_height_step_m: 0.10
-    observation_azimuth_offsets_deg: [0.0, -5.0, 5.0] # 观察时的左右扇形偏置角度
-    observation_image_margin_ratio: 0.07                # 图像边缘内缩留白防止出界
-    observation_min_visible_fraction: 0.60              # 果实区域最低有效图像覆盖率
+    observation_azimuth_offsets_deg: [0.0, -12.0, 12.0]
+    # 树距 0.8m 时向下 -35°，1.5m 时向下 -20°，中间线性插值。
+    observation_pitch_near_deg: -35.0
+    observation_pitch_far_deg: -20.0
 
     # 系统输入的等待与搜索超时限制。
     observation_input_timeout_sec: 2.0

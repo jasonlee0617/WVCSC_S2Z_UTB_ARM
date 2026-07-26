@@ -4,7 +4,7 @@
 # ============================================================================
 #
 # 职责：
-# 控制 YAML/RViz 任务的执行节奏：从加载实测或仿真目标，到控制 Nav2 进行点到点
+# 控制 Qt/RViz 人工任务的执行节奏：从加载任务点，到控制 Nav2 进行点到点
 # 导航，再到调用机械臂喷洒闭环，最后循环推进至任务完成。
 #
 # 核心原则：
@@ -14,9 +14,6 @@
 
 mission_manager:
   ros__parameters:
-    # 是否在任务通过 /mission/load_manual 加载后立即开始执行。
-    auto_start: false
-
     # 机器人导航与任务使用的全局坐标系 (必须与 Nav2 和 Cartographer 一致)
     map_frame: map
 
@@ -25,26 +22,27 @@ mission_manager:
     # 机械臂喷洒动作的 Action 服务名称 (调用 `wvcsc_spray_task`)
     spray_action_name: /arm/execute_spray
 
-    # 道路中心在 map 坐标系中的 Y 轴坐标。
-    road_center_y: 0.0
-    # 道路的航向角 (弧度)。
-    road_yaw: 0.0
-
-    # 【核心几何参数】小车停靠点距离道路中心的横向偏移量。
-    # 确保小车停稳后，机械臂基座 (alicia_base_link) 与树的距离大约在 1.8m 以内，
-    # 满足 C10 相机观察基线 (observation_distance 1.0~1.5m) 的可达范围。
-    docking_lateral_offset: 0.2
-
     # 机械臂基座原点相对 base_footprint 的平面安装偏移，须与整车 URDF 一致。
     arm_base_forward_offset_m: -0.40
     arm_base_left_offset_m: 0.0
     # 仿真通用默认值；实车入口按 alicia_mount_joint 覆盖为 pi。
     arm_base_yaw_rad: 0.0
 
-    # 实机逐树实测任务启用；仿真保持 false，避免依赖 AMCL。
+    # 实机逐树实测任务启用；默认由 AMCL 提供 map 中的停靠质量位姿。
+    # system_sim 会以参数覆盖为 odom，因为该仿真 map->odom 恒等。
     require_docking_quality: false
+    docking_pose_source: localization
+    # 仅仿真可在 Nav2 近目标 ABORTED 时，经停靠质量门控后继续停稳检查；
+    # 实机保持 false，避免用控制器失败掩盖定位或底盘故障。
+    accept_aborted_near_goal: false
     localization_pose_topic: /amcl_pose
     localization_max_age_sec: 1.0
+    # 机械臂观察距离对停靠误差敏感。Nav2 成功后仍必须满足这组独立
+    # 门槛，才能把 ExecuteSpray Goal 交给机械臂。
+    # 这两个 Nav2 值仅用于停靠诊断日志；实机入口按实际 Nav2 配置覆盖，
+    # 不参与任务门控计算。
+    nav_goal_xy_tolerance_m: 0.10
+    nav_goal_yaw_tolerance_rad: 0.10
     max_localization_position_stddev_m: 0.12
     max_localization_yaw_stddev_rad: 0.12
     max_docking_position_error_m: 0.12
@@ -66,8 +64,10 @@ mission_manager:
     # 对准过程会转发视觉伺服反馈；40 秒无反馈才认为子 Action 真正失联。
     spray_progress_timeout_sec: 40.0
 
-    # 第 1 路广域喷洒。继电器失败只记录告警，路线继续执行。
+    # 第 1 路广域喷洒。生产闭环必须确认继电器服务可用；ON/OFF 命令失败
+    # 会停住车辆并使任务失败，禁止在喷洒状态未知时继续行驶。
     relay_service_name: /relay/set
+    require_relay_service: true
     wide_relay_channel: 1
     arm_relay_channel: 2
     wide_spray_motion_linear_threshold: 0.03

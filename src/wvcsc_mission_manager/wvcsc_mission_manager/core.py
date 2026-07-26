@@ -6,7 +6,7 @@
 # 职责：
 # 1. 定义任务状态枚举 (`MissionState`)。
 # 2. 管理任务队列、当前进度与目标状态流转 (`MissionCore`)。
-# 3. 计算停车几何位置 (`docking_pose`)。
+# 3. 保存 Qt/RViz 给出的停车位，并提供车辆与机械臂基座坐标转换。
 # 4. 提供里程计停稳检测器 (`StopDetector`)。
 #
 # 设计目的：
@@ -18,7 +18,6 @@ from enum import IntEnum
 import math
 
 
-DEFAULT_DOCKING_LATERAL_OFFSET = 0.2
 DEFAULT_ARM_BASE_FORWARD_OFFSET = -0.40
 DEFAULT_ARM_BASE_LEFT_OFFSET = 0.0
 
@@ -56,16 +55,15 @@ class WorkSide(IntEnum):
 
 @dataclass(frozen=True)
 class Target:
-    """单棵目标病树的固定任务数据。"""
+    """Qt/RViz 人工任务的固定数据；树根坐标仅由基座相对偏移派生。"""
     tree_id: str
     x: float
     y: float
     z: float
-    confidence: float
     spray_duration: float
-    evidence_uri: str = ''
-    docking_pose_override: tuple | None = None  # 如果手动注入任务，可覆盖自动生成的停靠点
-    tree_hint_override: tuple | None = None  # 实测任务可显式提供树根 map 坐标
+    docking_pose: tuple
+    tree_x_m: float = 0.0
+    tree_y_m: float = 0.0
     point_type: int = PointType.INSPECT
     wide_spray_on_approach: bool = False
     dwell_time_sec: float = 0.0
@@ -268,7 +266,11 @@ class MissionCore:
         return self._transition(MissionState.RETURNING_HOME, target)
 
     def pause(self):
-        return self._transition(MissionState.NAVIGATING, MissionState.PAUSED)
+        if self.state not in {
+                MissionState.NAVIGATING}:
+            return False
+        self.state = MissionState.PAUSED
+        return True
 
     def pause_for_recovery(self):
         if self.state not in {
@@ -319,52 +321,25 @@ class MissionCore:
         return True
 
 
-def docking_pose(
-        target, road_center_y=0.0, road_yaw=0.0,
-        lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET,
+def arm_base_xy(
+        vehicle_pose,
         arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
         arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
-    """Compute a parking pose from the tree's signed road-normal position."""
-    values = (
-        target.x, target.y, road_center_y, road_yaw, lateral_offset,
-        arm_base_forward_offset, arm_base_left_offset)
-    if not all(math.isfinite(value) for value in values):
-        raise ValueError(f'{target.tree_id}: non-finite docking pose')
-    if lateral_offset < 0.0:
-        raise ValueError('lateral_offset must be non-negative')
-    cosine, sine = math.cos(road_yaw), math.sin(road_yaw)
-    normal_x, normal_y = -sine, cosine
-    relative_x, relative_y = target.x, target.y - road_center_y
-    lateral = relative_x * normal_x + relative_y * normal_y
-    if abs(lateral) < 1e-6:
-        raise ValueError(f'{target.tree_id}: tree lies on the road center line')
-    longitudinal = relative_x * cosine + relative_y * sine
-    lateral_goal = lateral_offset if lateral > 0.0 else -lateral_offset
-    arm_x = cosine * longitudinal + normal_x * lateral_goal
-    arm_y = road_center_y + sine * longitudinal + normal_y * lateral_goal
-    mount_x = (
-        cosine * arm_base_forward_offset -
-        sine * arm_base_left_offset)
-    mount_y = (
-        sine * arm_base_forward_offset +
-        cosine * arm_base_left_offset)
+    """Return the map XY position of ``alicia_base_link``.
+
+    ``vehicle_pose`` is an ``(x, y, yaw)`` pose for ``base_footprint``.  The
+    yaw remains the vehicle heading; only the fixed planar mounting offset is
+    applied here.
+    """
+    x, y, yaw = (float(value) for value in vehicle_pose)
+    if not all(math.isfinite(value) for value in (
+            x, y, yaw, arm_base_forward_offset, arm_base_left_offset)):
+        raise ValueError('arm base pose values must be finite')
+    cosine, sine = math.cos(yaw), math.sin(yaw)
     return (
-        arm_x - mount_x,
-        arm_y - mount_y,
-        road_yaw,
+        x + cosine * arm_base_forward_offset - sine * arm_base_left_offset,
+        y + sine * arm_base_forward_offset + cosine * arm_base_left_offset,
     )
-
-
-def navigation_pose(
-        target, road_center_y=0.0, road_yaw=0.0,
-        lateral_offset=DEFAULT_DOCKING_LATERAL_OFFSET,
-        arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
-        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
-    if target.docking_pose_override is not None:
-        return target.docking_pose_override
-    return docking_pose(
-        target, road_center_y, road_yaw, lateral_offset,
-        arm_base_forward_offset, arm_base_left_offset)
 
 
 def tree_hint_from_arm_base_offset(

@@ -23,6 +23,5 @@ setup(
     license='Apache-2.0',
     entry_points={'console_scripts': [
         'mission_manager = wvcsc_mission_manager.mission_manager:main',
-        'mock_target_loader = wvcsc_mission_manager.mock_target_loader:main',
     ]},
 )

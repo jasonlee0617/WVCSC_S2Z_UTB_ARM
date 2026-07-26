@@ -10,11 +10,12 @@ from wvcsc_interfaces.action import AlignTarget, ExecuteSpray
 from wvcsc_arm_task.spray_task import SprayTask
 from wvcsc_arm_task.target_flow import (
     FruitTarget, TargetAttempt, completion_feedback_allowed,
+    associate_known_targets,
     deduplicate_candidates, detection_candidates, final_spray_outcome,
     limit_targets_per_tree, spray_summary, target_accounting,
-    target_accounting_is_complete,
+    stable_candidates_from_frames, target_accounting_is_complete,
     target_requires_recenter)
-from wvcsc_arm_task.observation import ObservationCandidate
+from wvcsc_arm_task.ik_observation import ObservationCandidate
 
 
 def _target(target_id, center_u, center_v, confidence=0.9):
@@ -33,7 +34,7 @@ class _QueueHarness:
     def get_parameter(self, name):
         return SimpleNamespace(value={
             'processed_iou_threshold': 0.30,
-            'processed_center_distance_px': 40.0,
+            'processed_center_distance_px': 18.0,
             'image_width': 1280,
             'image_height': 720,
         }[name])
@@ -46,6 +47,14 @@ def test_queue_excludes_processed_target_by_geometry_not_only_tracker_id():
     other = _target('other', 800.0, 360.0)
     queue = task._queue([same_fruit_new_id, other], [processed])
     assert queue == [other]
+
+
+def test_queue_does_not_merge_a_nearby_second_physical_fruit():
+    task = _QueueHarness()
+    processed = _target('fruit-1', 640.0, 360.0)
+    second_fruit = _target('fruit-2', 665.0, 360.0)
+
+    assert task._queue([second_fruit], [processed]) == [second_fruit]
 
 
 def test_queue_prefers_the_fruit_nearest_the_image_center():
@@ -131,8 +140,8 @@ def test_target_accounting_requires_every_detection_to_be_resolved():
 def test_target_accounting_merges_transitive_recovery_snapshots():
     task = _QueueHarness()
     first = _target('fruit-1', 640.0, 360.0)
-    bridge = _target('fruit-9', 675.0, 360.0)
-    latest = _target('fruit-18', 710.0, 360.0)
+    bridge = _target('fruit-9', 655.0, 360.0)
+    latest = _target('fruit-18', 670.0, 360.0)
     other = _target('fruit-2', 900.0, 360.0)
 
     detected, sprayed, unresolved, pending = target_accounting(
@@ -167,10 +176,16 @@ class _FruitCollectionHarness:
 
     def __init__(self):
         first = _target('fruit-1', 640.0, 360.0)
+        now = time.monotonic()
         self._vision_mutex = threading.Lock()
         self._fruit_frames = 3
         self._fruit_counts = {'fruit-1': 3}
         self._fruit_latest = {'fruit-1': first}
+        self._fruit_history = [
+            (now, [first]),
+            (now + 0.001, [first]),
+            (now + 0.002, [first]),
+        ]
 
     @staticmethod
     def _aborted(_cancel_requested):
@@ -182,6 +197,8 @@ class _FruitCollectionHarness:
             'detection_timeout_sec': 0.20,
             'fruit_collection_settle_sec': 0.06,
             'confirmation_frames': 3,
+            'processed_iou_threshold': 0.30,
+            'processed_center_distance_px': 18.0,
         }[name])
 
 
@@ -194,6 +211,12 @@ def test_fruit_collection_waits_for_a_later_stable_target():
         with task._vision_mutex:
             task._fruit_counts['fruit-2'] = 3
             task._fruit_latest['fruit-2'] = second
+            now = time.monotonic()
+            task._fruit_history.extend([
+                (now, [second]),
+                (now + 0.001, [second]),
+                (now + 0.002, [second]),
+            ])
 
     worker = threading.Thread(target=add_second_target)
     worker.start()
@@ -202,6 +225,22 @@ def test_fruit_collection_waits_for_a_later_stable_target():
 
     assert {candidate.target_id for candidate in candidates} == {
         'fruit-1', 'fruit-2'}
+
+
+def test_stable_collection_keeps_two_fruits_when_tracker_ids_change():
+    frames = [
+        [_target('fruit-1', 200.0, 220.0),
+         _target('fruit-2', 260.0, 220.0)],
+        [_target('fruit-5', 202.0, 220.0),
+         _target('fruit-6', 258.0, 220.0)],
+        [_target('fruit-9', 201.0, 221.0),
+         _target('fruit-10', 259.0, 221.0)],
+    ]
+
+    stable = stable_candidates_from_frames(frames, 3, 0.30, 18.0)
+
+    assert [candidate.target_id for candidate in stable] == [
+        'fruit-9', 'fruit-10']
 
 
 def test_retry_matches_the_same_fruit_after_tracker_id_changes():
@@ -240,8 +279,7 @@ class _RecenterParameterHarness:
     def get_parameter(name):
         return SimpleNamespace(value={
             'target_recenter_trigger_px': 48.0,
-            'target_recenter_workspace_px': 128.0,
-            'visual_servo_entry_max_error_px': 128.0,
+            'visual_servo_entry_max_error_px': 48.0,
             'target_recenter_max_angle_deg': 45.0,
             'target_recenter_max_total_angle_deg': 45.0,
             'target_recenter_refine_goal_px': 8.0,
@@ -249,28 +287,27 @@ class _RecenterParameterHarness:
             'target_recenter_residual_candidates_px': [0.0],
             'target_recenter_position_tolerance_m': 0.002,
             'target_recenter_orientation_tolerance_rad': 0.002,
-            'target_post_recenter_stable_sec': 0.20,
+            'target_post_recenter_stable_sec': 0.50,
             'target_post_recenter_max_drift_px': 4.0,
             'target_post_recenter_max_gap_sec': 0.20,
             'target_post_recenter_min_confidence': 0.30,
         }[name])
 
 
-def test_closed_loop_uses_a_servo_entry_window_at_least_as_large_as_recenter():
+def test_closed_loop_requires_coarse_recenter_before_servo_handoff():
     config = _RecenterParameterHarness()._target_recenter_parameters()
 
     assert config['trigger_px'] == 48.0
-    assert config['workspace_px'] == 128.0
-    assert config['servo_entry_px'] == 128.0
+    assert config['servo_entry_px'] == 48.0
 
 
-def test_closed_loop_rejects_a_workspace_wider_than_servo_entry():
+def test_closed_loop_rejects_a_servo_window_wider_than_recenter_trigger():
     class InvalidHarness(_RecenterParameterHarness):
         @staticmethod
         def get_parameter(name):
             value = _RecenterParameterHarness.get_parameter(name).value
             if name == 'visual_servo_entry_max_error_px':
-                value = 48.0
+                value = 49.0
             return SimpleNamespace(value=value)
 
     try:
@@ -290,6 +327,10 @@ class _ClosedLoopSequenceHarness:
     _attempt_for = SprayTask._attempt_for
     _same_target = SprayTask._same_target
     _mark_unresolved = SprayTask._mark_unresolved
+
+    def _associate_known_targets(self, known, candidates):
+        return associate_known_targets(
+            known, candidates, self._same_target, 320.0)
 
     def __init__(self, *, alignment_ok=True, fallback_enabled=True,
                  recenter_ok=True, alignment_code=None, targets=None,
@@ -320,6 +361,7 @@ class _ClosedLoopSequenceHarness:
             'max_targets_per_tree': 0,
             'processed_iou_threshold': 0.30,
             'processed_center_distance_px': 40.0,
+            'cross_view_reassociation_max_distance_px': 320.0,
             'image_width': 1280,
             'image_height': 720,
         }[name])
@@ -346,7 +388,7 @@ class _ClosedLoopSequenceHarness:
         return True
 
     @staticmethod
-    def _scan_for_tree(_cancel_requested):
+    def _scan_for_tree(_cancel_requested, **_kwargs):
         return True
 
     def _wait_for_fruits(self, _cancel_requested):
@@ -459,6 +501,34 @@ def test_completed_queue_returns_home_without_an_extra_observation_scan():
     assert task.calls.count('spray') == 1
     assert task.calls.count('return_to_observation') == 1
     assert task.calls[-1] == 'return_home'
+
+
+def test_first_nonempty_detection_locks_the_tree_target_set():
+    initial = _target('target-1', 200.0, 200.0)
+    discovered_later = _target('target-late', 900.0, 220.0)
+
+    class InitialSetHarness(_ClosedLoopSequenceHarness):
+        def _wait_for_fruits(self, _cancel_requested):
+            self._fruit_calls += 1
+            if self._fruit_calls == 1:
+                return [initial]
+            if self._fruit_calls == 2:
+                return [initial, discovered_later]
+            return []
+
+    task = InitialSetHarness(targets=[initial])
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.OK
+    assert 'detected=1 sprayed=1 unresolved=0' in message
+    assert 'lock:target-1' in task.calls
+    assert 'lock:target-late' not in task.calls
+    assert task.calls.count('spray') == 1
 
 
 def test_real_alignment_timeout_sprays_from_current_pose_then_rechecks_before_home():
@@ -645,9 +715,7 @@ class _ObservationDebugHarness:
     def __init__(self):
         self._active_mission = 'mission-1'
         self._active_tree = 'tree-1'
-        self._observation_config = {
-            'min_visible_fraction': 0.60,
-        }
+        self._observation_config = {}
         self._observation_debug_pub = _ObservationDebugPublisher()
 
     @staticmethod
@@ -655,7 +723,7 @@ class _ObservationDebugHarness:
         return SimpleNamespace(debug=lambda *_args: None)
 
 
-def test_observation_debug_reports_coverage_bbox_and_compensated_aim_point():
+def test_observation_debug_reports_candidate_geometry_and_compensated_aim_point():
     task = _ObservationDebugHarness()
     candidate = ObservationCandidate(
         candidate_id='observe', distance_m=1.2, camera_height_m=1.5,
@@ -672,7 +740,7 @@ def test_observation_debug_reports_coverage_bbox_and_compensated_aim_point():
 
     payload = task._observation_debug_pub.payloads[0]
     assert payload['visible_fraction'] == 0.75
-    assert payload['required_visible_fraction'] == 0.60
+    assert payload['required_visible_fraction'] is None
     assert payload['camera_z_in_base_m'] == 1.0
     assert payload['camera_height_in_base_m'] == 1.5
     assert payload['observation_phase'] == 'center_initial'
@@ -909,7 +977,7 @@ class _TargetStateHarness:
         self._active_aim = (640.0, 388.0, 1280, 720, 1.30)
         self._recenter_config = {
             'trigger_px': 48.0,
-            'workspace_px': 48.0,
+            'servo_entry_px': 48.0,
             'post_stable_sec': 0.50,
             'post_max_drift_px': 0.75,
             'post_max_gap_sec': 0.25,
@@ -1120,7 +1188,8 @@ class _RecenterAttemptHarness:
         self._camera_mount = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
         self._active_aim = (640.0, 388.0, 1280, 720, 1.30)
         self._recenter_config = {
-            'trigger_px': 48.0, 'workspace_px': 48.0,
+            'trigger_px': 48.0,
+            'servo_entry_px': 48.0,
             'max_angle_deg': 18.0,
             'refine_goal_px': 8.0, 'max_iterations': 1,
             'residual_candidates_px': (
@@ -1134,6 +1203,10 @@ class _RecenterAttemptHarness:
     @staticmethod
     def _current_camera_pose():
         return (1.0, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)
+
+    @staticmethod
+    def _publish_observation_debug(*_args, **_kwargs):
+        pass
 
 
 def test_recenter_angle_rejection_is_recoverable_and_not_retried_at_same_view():
@@ -1204,42 +1277,47 @@ def test_recenter_uses_a_larger_residual_when_precise_rotation_lacks_margin():
     assert task.debug_events == ['target_recenter_confirmed']
 
 
-def test_recenter_residual_outside_strict_tolerance_is_not_sent_to_servo():
+def test_recenter_residual_inside_angular_limit_is_recentered():
     task = _PartialRecenterHarness()
     task._recenter_config['trigger_px'] = 1.5
-    task._recenter_config['workspace_px'] = 1.5
     attempt = TargetAttempt(_target('fruit-1', 740.0, 360.0))
 
     ok, message = task._recenter_target(
         attempt.target, attempt, lambda: False)
 
-    assert not ok
-    assert 'Servo entry tolerance 1.5px' in message
-    assert task.debug_events == ['target_recenter_failed']
+    assert ok
+    assert message == 'target reconfirmed after recenter'
+    assert task.debug_events == ['target_recenter_confirmed']
 
 
-def test_bounded_servo_entry_skips_coarse_motion_for_a_safe_110px_residual():
+def test_large_residual_runs_coarse_recenter_before_servo_handoff():
     task = _PartialRecenterHarness()
     task._recenter_config.update({
         'trigger_px': 48.0,
-        'workspace_px': 128.0,
+        'servo_entry_px': 48.0,
         'max_iterations': 1,
     })
-    task._latest_target = lambda: _target('fruit-1', 730.0, 388.0)
+    task._latest_target = lambda: _target('fruit-1', 650.0, 390.0)
     attempt = TargetAttempt(_target('fruit-1', 750.0, 388.0))
 
     ok, message = task._recenter_target(
         attempt.target, attempt, lambda: False)
 
     assert ok
-    assert message == 'target reconfirmed for visual servo'
-    assert task.trials == []
-    assert task.debug_events == ['target_recenter_not_required']
+    assert message == 'target reconfirmed after recenter'
+    assert task.trials == [
+        'observe_target_fruit-1_r12',
+        'observe_target_fruit-1_r16',
+    ]
+    assert task.debug_events == ['target_recenter_confirmed']
 
 
-def test_bounded_servo_entry_rejects_current_joint_limit_margin():
+def test_coarse_recenter_rejects_current_joint_limit_margin():
     task = _PartialRecenterHarness()
-    task._recenter_config['servo_entry_px'] = 128.0
+    task._recenter_config.update({
+        'trigger_px': 48.0,
+        'servo_entry_px': 48.0,
+    })
 
     def reject(candidate, *_args):
         candidate.rejection_reason = 'joint_limit_margin'
@@ -1253,7 +1331,10 @@ def test_bounded_servo_entry_rejects_current_joint_limit_margin():
 
     assert not ok
     assert message == 'Servo preflight rejected: joint_limit_margin'
-    assert task.trials == []
+    assert task.trials == [
+        'observe_target_fruit-1_r12',
+        'observe_target_fruit-1_r16',
+    ]
     assert task.debug_events == ['target_recenter_failed']
 
 
@@ -1266,7 +1347,8 @@ class _NoRecenterDriftHarness:
 
     def __init__(self):
         self._recenter_config = {
-            'trigger_px': 48.0, 'workspace_px': 48.0,
+            'trigger_px': 48.0,
+            'servo_entry_px': 48.0,
         }
         self._active_aim = (640.0, 388.0, 1280, 720, 1.30)
         self._observation_candidate_index = 0
@@ -1431,7 +1513,8 @@ class _PostRecenterHarness:
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
         self._active_aim = (640.0, 388.0, 1280, 720, 1.30)
         self._recenter_config = {
-            'trigger_px': 48.0, 'workspace_px': 48.0,
+            'trigger_px': 48.0,
+            'servo_entry_px': 48.0,
             'max_angle_deg': 18.0,
             'refine_goal_px': 8.0, 'max_iterations': 1,
             'residual_candidates_px': (

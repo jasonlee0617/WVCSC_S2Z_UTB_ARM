@@ -3,6 +3,19 @@ project(wvcsc_simulation)
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
+find_package(gazebo REQUIRED)
+find_package(gazebo_ros REQUIRED)
+find_package(Qt5 REQUIRED COMPONENTS Core Widgets)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+
+add_library(wvcsc_spray_visual_plugin SHARED src/spray_visual_plugin.cpp)
+target_include_directories(wvcsc_spray_visual_plugin PRIVATE ${GAZEBO_INCLUDE_DIRS})
+target_link_libraries(wvcsc_spray_visual_plugin
+  ${GAZEBO_LIBRARIES}
+  Qt5::Core
+  Qt5::Widgets)
+ament_target_dependencies(wvcsc_spray_visual_plugin gazebo_ros rclcpp std_msgs)
 
 ament_python_install_package(${PROJECT_NAME})
 
@@ -15,8 +28,10 @@ install(
   PATTERN "__pycache__" EXCLUDE)
 
 install(DIRECTORY config data_acquisition launch maps models worlds rviz DESTINATION share/${PROJECT_NAME})
+install(TARGETS wvcsc_spray_visual_plugin LIBRARY DESTINATION lib)
 install(PROGRAMS
   scripts/ackermann_sim.py
+  wvcsc_simulation/sim_relay.py
   data_acquisition/scripts/capture_yolo_seed.py
   data_acquisition/scripts/capture_yolo_seed_direct.py
   data_acquisition/scripts/replace_yolo_seed_datasets.py
@@ -40,6 +55,17 @@ if(BUILD_TESTING)
   ament_add_pytest_test(
     test_system_sim_launch test/test_system_sim_launch.py
     ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+    APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+  ament_add_pytest_test(
+    test_ackermann_math test/test_ackermann_math.py
+    ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+    APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+  ament_add_pytest_test(
+    test_sim_relay test/test_sim_relay.py
+    ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+    APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}"
   )
   ament_add_pytest_test(
     test_calibration_sim_launch test/test_calibration_sim_launch.py

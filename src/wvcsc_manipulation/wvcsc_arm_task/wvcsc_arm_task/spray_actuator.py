@@ -192,7 +192,7 @@ class SprayActuator(Node):
             self._pump_off()
 
     def _set_active(self, active):
-        """发布喷洒活跃状态，供任务管理器或 Web 界面监控。"""
+        """发布喷洒活跃状态，供任务管理器或 Qt 界面监控。"""
         message = Bool()
         message.data = bool(active)
         self._active_pub.publish(message)

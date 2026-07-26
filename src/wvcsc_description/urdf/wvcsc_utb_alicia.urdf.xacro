@@ -97,7 +97,54 @@
       rpy="$(arg arm_mount_rpy)"/>
   </joint>
 
-  <link name="spray_nozzle_link"/>
+  <!-- 车顶广域喷洒柱：底面中心位于 base_link (0.10, 0, 0.675)。
+       该模型既是 Gazebo 中的广域喷洒出雾原点，也是 MoveIt 必须避开的
+       自碰撞实体；+Z 为柱体和环喷的轴线方向。 -->
+  <link name="wide_sprayer_link">
+    <visual>
+      <origin xyz="0 0 0.250" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.030" length="0.500"/></geometry>
+      <material name="wide_sprayer_blue"><color rgba="0.08 0.24 0.34 1"/></material>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.500" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.034" length="0.012"/></geometry>
+      <material name="wide_sprayer_cap"><color rgba="0.30 0.72 0.78 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.255" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.510"/></geometry>
+    </collision>
+  </link>
+  <joint name="wide_sprayer_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="wide_sprayer_link"/>
+    <origin xyz="0.10 0 $(arg vehicle_roof_z)" rpy="0 0 0"/>
+  </joint>
+
+  <!-- tool0 即当前喷嘴安装基准；局部 +Z 为喷流中心轴。使用三级圆柱形成
+       紧凑的中空喷嘴外观，碰撞包络只略大于真实外观。 -->
+  <link name="spray_nozzle_link">
+    <visual>
+      <origin xyz="0 0 0.004" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.011" length="0.008"/></geometry>
+      <material name="nozzle_mount"><color rgba="0.16 0.18 0.20 1"/></material>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.009" length="0.014"/></geometry>
+      <material name="nozzle_brass"><color rgba="0.70 0.48 0.12 1"/></material>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.031" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.005" length="0.010"/></geometry>
+      <material name="nozzle_exit"><color rgba="0.06 0.06 0.06 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.0175" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.012" length="0.035"/></geometry>
+    </collision>
+  </link>
   <joint name="spray_nozzle_joint" type="fixed">
     <parent link="tool0"/>
     <child link="spray_nozzle_link"/>

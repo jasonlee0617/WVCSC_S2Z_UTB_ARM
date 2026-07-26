@@ -3,8 +3,8 @@
 ROS 任务节点：Alicia-M 机械臂果园喷洒作业工作流 (Orchard Spraying Workflow)。
 
 本节点是一个长时 Action Server，负责执行 `/arm/execute_spray` 接口。
-它集成了 `TargetFlowMixin` (视觉目标流)、`ObservationFlowMixin` (动态观察位姿生成)
-和 `DownstreamActionMixin` (下游 Action 通讯) 三个核心混入类。
+它集成了视觉目标、IK/预设观察、下游 Action 三类职责；复杂观察策略分别位于
+`ik_observation.py`、`joint_preset_observation.py` 与 `observation_flow.py`。
 
 核心业务流程：
 MOVING_TO_OBSERVE (观察位姿) -> SCANNING_TREE (树检测) -> DETECTING_FRUITS (果实分割)
@@ -29,30 +29,25 @@ from wvcsc_interfaces.msg import Target2D
 from wvcsc_interfaces.srv import ComputeSprayAim
 
 from .action_flow import DownstreamActionMixin
+from .ik_observation import ObservationOptimizer
+from .joint_preset_observation import (
+    DEFAULT_JOINT_PRESETS_DEG,
+    JointPresetObservationMixin,
+)
 from .motion_state import MotionControlState
 from .node_parameters import create_alicia_moveit
-from .observation import ObservationFlowMixin, ObservationOptimizer
+from .observation_flow import ObservationFlowMixin
+from .spray_aim import SprayAimMixin
+from .spray_sequence import SpraySequenceMixin
 from .target_flow import (TargetAttempt, TargetFlowMixin,
                           completion_feedback_allowed, final_spray_outcome,
-                          limit_targets_per_tree, spray_summary, target_accounting,
+                          deduplicate_candidates, limit_targets_per_tree,
+                          spray_summary, target_accounting,
                           target_accounting_is_complete)
 
-
-DEFAULT_JOINT_PRESETS_DEG = {
-    # The original field-validated scan set for trees at +Y of
-    # ``alicia_base_link``.
-    'center': (95.3, -136.9, -71.0, 7.7, 57.3, -4.4),
-    'fan_left': (52.2, -131.7, -55.4, -58.9, 76.5, 18.2),
-    'fan_right': (118.5, -129.4, -55.8, 47.6, 66.2, -17.1),
-    # Independently field-validated scan set for trees at -Y.  These values
-    # are intentionally not a mathematical mirror of the +Y presets.
-    'right_center': (-105.4, -127.8, -50.5, -15.4, 71.2, -4.9),
-    'right_fan_left': (-139.8, -128.6, -57.3, -70.1, 79.7, 13.0),
-    'right_fan_right': (-70.8, -126.8, -50.6, 32.2, 69.8, -12.1),
-}
-
-
-class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, Node):
+class SprayTask(
+        TargetFlowMixin, JointPresetObservationMixin, ObservationFlowMixin,
+        DownstreamActionMixin, SprayAimMixin, SpraySequenceMixin, Node):
     """
     协调 MoveIt、YOLO、视觉伺服和喷洒执行器的长时 Action Server。
 
@@ -76,11 +71,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             self.get_parameter('downstream_result_margin_sec').value)
         self._camera_frame = str(self.get_parameter('camera_frame').value)
         self._base_frame = str(self.get_parameter('base_frame').value)
-        self._spray_working_distance = float(
-            self.get_parameter('spray_working_distance_m').value)
-        if (not math.isfinite(self._spray_working_distance)
-                or self._spray_working_distance <= 0.0):
-            raise ValueError('spray working range is invalid')
         self._spray_on_alignment_failure = bool(
             self.get_parameter('spray_on_alignment_failure').value)
         self._observation_mode, self._joint_preset_positions = (
@@ -185,6 +175,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self._fruit_frames = 0
         self._fruit_counts = {}
         self._fruit_latest = {}
+        self._fruit_history = []
         self._target_confirmation_id = ''
         self._target_valid_frames = 0
         self._target_confirmation_frames = 0
@@ -241,9 +232,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'target_class_name': 'diseased_target',
             # 0 keeps simulation's one-or-more target behavior.
             'max_targets_per_tree': 0,
-            # Calibrated nozzle-aim plane; this is not a measured-distance
-            # acceptance gate for the task state machine.
-            'spray_working_distance_m': 1.0,
             # Real hardware may spray from a re-confirmed safe observation
             # pose when visual alignment cannot complete.  Simulation keeps
             # this disabled and therefore remains fail-closed.
@@ -272,8 +260,11 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             # A bounded residual can enter Servo after the stationary safety
             # preflight, without weakening IK/MoveIt/kinematic gates.
             'target_recenter_trigger_px': 48.0,
-            'target_recenter_workspace_px': 48.0,
-            'visual_servo_entry_max_error_px': 128.0,
+            'visual_servo_entry_max_error_px': 48.0,
+            # Cross-view association remains bounded.  This protects the
+            # logical tree ledger when a safe observation/recenter changes
+            # perception tracker IDs and image coordinates.
+            'cross_view_reassociation_max_distance_px': 320.0,
             'target_recenter_max_angle_deg': 20.0,
             'target_recenter_max_total_angle_deg': 30.0,
             'target_recenter_refine_goal_px': 8.0,
@@ -288,7 +279,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'target_post_recenter_max_gap_sec': 0.20,
             'target_post_recenter_min_confidence': 0.30,
             'processed_iou_threshold': 0.30,
-            'processed_center_distance_px': 40.0,
+            'processed_center_distance_px': 18.0,
             'image_width': 640,
             'image_height': 480,
             'base_frame': 'alicia_base_link',
@@ -300,18 +291,20 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'observation_input_timeout_sec': 2.0,
             'observation_search_timeout_sec': 8.0,
             'observation_max_plans': 8,
-            'fruit_zone_height_min_m': 0.70,
-            'fruit_zone_height_max_m': 1.70,
-            'fruit_zone_radius_m': 0.50,
-            'observation_distance_min_m': 0.90,
-            'observation_distance_max_m': 1.50,
-            'observation_distance_step_m': 0.10,
+            # IK only: tree-root planar range from alicia_base_link.
+            'ik_tree_range_min_m': 0.80,
+            'ik_tree_range_max_m': 1.50,
+            # Radial camera grid around the arm base.  This is not a fixed
+            # camera-to-tree spray-distance gate.
+            'observation_camera_reach_min_m': 0.20,
+            'observation_camera_reach_max_m': 0.40,
+            'observation_camera_reach_step_m': 0.10,
             'camera_height_min_m': 0.20,
             'camera_height_max_m': 0.40,
             'camera_height_step_m': 0.10,
             'observation_azimuth_offsets_deg': [0.0, -12.0, 12.0],
-            'observation_image_margin_ratio': 0.07,
-            'observation_min_visible_fraction': 0.60,
+            'observation_pitch_near_deg': -35.0,
+            'observation_pitch_far_deg': -20.0,
             'observation_max_condition_number': 16.5,   # 雅可比条件数阈值（防止奇异点）
             'observation_min_joint_margin_rad': 0.22,   # 关节限位最小余量（安全距离）
             'observation_preferred_joint_margin_rad': 0.35,
@@ -329,54 +322,19 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             raise ValueError(f'{name} must contain six finite joint positions')
         return values
 
-    def _joint_preset_parameters(self):
-        mode = str(self.get_parameter('observation_mode').value).strip().lower()
-        if mode not in {'ik', 'joint_presets'}:
-            raise ValueError('observation_mode must be ik or joint_presets')
-        if mode == 'ik':
-            return mode, ()
-        presets_by_side = {}
-        for side, definitions in (
-                ('left', (
-                    ('center', 'joint_preset_center_deg'),
-                    ('fan_left', 'joint_preset_fan_left_deg'),
-                    ('fan_right', 'joint_preset_fan_right_deg'),
-                )),
-                ('right', (
-                    ('center', 'joint_preset_right_center_deg'),
-                    ('fan_left', 'joint_preset_right_fan_left_deg'),
-                    ('fan_right', 'joint_preset_right_fan_right_deg'),
-                ))):
-            presets = []
-            for name, parameter in definitions:
-                try:
-                    degrees = tuple(
-                        float(value) for value in self.get_parameter(parameter).value)
-                except (TypeError, ValueError) as error:
-                    raise ValueError(
-                        f'{parameter} must contain six finite degrees') from error
-                if (len(degrees) != 6
-                        or not all(math.isfinite(value) for value in degrees)):
-                    raise ValueError(f'{parameter} must contain six finite degrees')
-                presets.append((name, tuple(math.radians(value) for value in degrees)))
-            presets_by_side[side] = tuple(presets)
-        return mode, presets_by_side
-
     def _observation_parameters(self):
         """解析观察位姿生成的网格参数与运动学安全阈值"""
         values = {
-            'fruit_zone_height_min_m': float(
-                self.get_parameter('fruit_zone_height_min_m').value),
-            'fruit_zone_height_max_m': float(
-                self.get_parameter('fruit_zone_height_max_m').value),
-            'fruit_zone_radius_m': float(
-                self.get_parameter('fruit_zone_radius_m').value),
-            'distance_min_m': float(
-                self.get_parameter('observation_distance_min_m').value),
-            'distance_max_m': float(
-                self.get_parameter('observation_distance_max_m').value),
-            'distance_step_m': float(
-                self.get_parameter('observation_distance_step_m').value),
+            'tree_range_min_m': float(
+                self.get_parameter('ik_tree_range_min_m').value),
+            'tree_range_max_m': float(
+                self.get_parameter('ik_tree_range_max_m').value),
+            'camera_reach_min_m': float(
+                self.get_parameter('observation_camera_reach_min_m').value),
+            'camera_reach_max_m': float(
+                self.get_parameter('observation_camera_reach_max_m').value),
+            'camera_reach_step_m': float(
+                self.get_parameter('observation_camera_reach_step_m').value),
             'camera_height_min_m': float(
                 self.get_parameter('camera_height_min_m').value),
             'camera_height_max_m': float(
@@ -386,10 +344,10 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             'azimuth_offsets_deg': tuple(
                 float(value) for value in
                 self.get_parameter('observation_azimuth_offsets_deg').value),
-            'image_margin_ratio': float(
-                self.get_parameter('observation_image_margin_ratio').value),
-            'min_visible_fraction': float(
-                self.get_parameter('observation_min_visible_fraction').value),
+            'pitch_near_deg': float(
+                self.get_parameter('observation_pitch_near_deg').value),
+            'pitch_far_deg': float(
+                self.get_parameter('observation_pitch_far_deg').value),
             'max_condition_number': float(
                 self.get_parameter('observation_max_condition_number').value),
             'min_joint_margin_rad': float(
@@ -406,23 +364,22 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         }
         # 校验参数合法性
         positive = (
-            'fruit_zone_height_min_m', 'fruit_zone_height_max_m',
-            'fruit_zone_radius_m', 'distance_min_m', 'distance_max_m',
-            'distance_step_m', 'camera_height_min_m', 'camera_height_max_m',
+            'tree_range_min_m', 'tree_range_max_m', 'camera_reach_min_m',
+            'camera_reach_max_m', 'camera_reach_step_m',
+            'camera_height_min_m', 'camera_height_max_m',
             'camera_height_step_m', 'max_condition_number',
             'min_joint_margin_rad', 'preferred_joint_margin_rad',
             'position_tolerance_m', 'orientation_tolerance_rad')
         if (not all(math.isfinite(values[name]) and values[name] > 0.0
                     for name in positive) or
-                values['fruit_zone_height_min_m'] >=
-                values['fruit_zone_height_max_m'] or
-                values['distance_min_m'] > values['distance_max_m'] or
+                values['tree_range_min_m'] >= values['tree_range_max_m'] or
+                values['camera_reach_min_m'] > values['camera_reach_max_m'] or
                 values['camera_height_min_m'] > values['camera_height_max_m'] or
                 values['preferred_joint_margin_rad'] <
                 values['min_joint_margin_rad'] or
                 not values['azimuth_offsets_deg'] or
-                not 0.0 <= values['image_margin_ratio'] < 0.5 or
-                not 0.0 < values['min_visible_fraction'] <= 1.0):
+                not all(math.isfinite(values[name]) for name in (
+                    'pitch_near_deg', 'pitch_far_deg'))):
             raise ValueError('observation search parameters are invalid')
         return values
 
@@ -430,8 +387,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         """解析目标重心修正的像素级参数（与大范围轨迹和小范围视觉伺服挂钩）"""
         values = {
             'trigger_px': float(self.get_parameter('target_recenter_trigger_px').value),
-            'workspace_px': float(
-                self.get_parameter('target_recenter_workspace_px').value),
             'servo_entry_px': float(self.get_parameter(
                 'visual_servo_entry_max_error_px').value),
             'max_angle_deg': float(self.get_parameter('target_recenter_max_angle_deg').value),
@@ -467,8 +422,7 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 values['max_angle_deg'] > 180.0 or
                 values['max_total_angle_deg'] < values['max_angle_deg'] or
                 values['max_total_angle_deg'] > 180.0 or
-                values['workspace_px'] < values['trigger_px'] or
-                values['servo_entry_px'] < values['workspace_px'] or
+                values['servo_entry_px'] > values['trigger_px'] or
                 values['refine_goal_px'] <= 0.0 or
                 values['refine_goal_px'] > values['trigger_px'] or
                 values['position_tolerance_m'] <= 0.0 or
@@ -614,7 +568,9 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         self.get_logger().info(
             f'[ARM][{tree}] SCAN inference_mode=tree '
             f'conf={float(self.get_parameter("tree_confidence").value):.2f}')
-        if not self._scan_for_tree(cancel_requested):
+        # 第一观察位只在树尚未确认时才允许进入左右扇形位。树确认后先在
+        # 当前中心视野锁存病态目标；只有首帧集合为空才继续扇形搜索病叶。
+        if not self._scan_for_tree(cancel_requested, fan_only=True):
             return self._recover_failure(
                 ExecuteSpray.Result.VISION_FAILED,
                 'tree was not confirmed in the camera view', cancel_requested)
@@ -658,30 +614,88 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
                 f'confirmation={int(self.get_parameter("confirmation_frames").value)}')
             
             # 等待 YOLO 返回稳定的果实检测帧
-            candidates = self._wait_for_fruits(cancel_requested)
-            if candidates is None:
+            frame_candidates = self._wait_for_fruits(cancel_requested)
+            if frame_candidates is None:
                 return self._recover_failure(
                     ExecuteSpray.Result.VISION_FAILED,
                     'fruit detector did not provide frames', cancel_requested)
-            candidates = limit_targets_per_tree(
-                known_targets, candidates,
-                int(self.get_parameter('max_targets_per_tree').value),
-                self._same_target)
-            saw_disease = saw_disease or bool(candidates)
+
+            if not known_targets:
+                # 首个非空检测集合决定本树的逻辑目标账本。之后只允许对该
+                # 不可新增的集合做空间重关联，避免扇形扫描把新的病叶追加进
+                # 已执行任务而改变喷洒范围。
+                candidates = limit_targets_per_tree(
+                    (), frame_candidates,
+                    int(self.get_parameter('max_targets_per_tree').value),
+                    self._same_target)
+                if not candidates:
+                    if (self._move_to_next_fan_observation() and
+                            self._scan_for_tree(cancel_requested, fan_only=True)):
+                        self._reset_fruit_tracking()
+                        continue
+                    break
+                self._remember_targets(known_targets, candidates)
+                self.get_logger().info(
+                    f'[ARM][{tree}] TARGET_LEDGER stable={len(known_targets)} '
+                    f'ids=({",".join(target.target_id for target in known_targets)})')
+                associations = [
+                    (candidate, candidate, False) for candidate in candidates]
+            else:
+                # A new observation can legitimately produce new perception
+                # IDs and a large image displacement.  Associate detections to
+                # the frozen tree-level ledger before filtering treated targets;
+                # never add a new logical target after the first stable scan.
+                associations = self._associate_known_targets(
+                    known_targets, frame_candidates)
+                resolved = processed + exhausted
+                associations = [
+                    item for item in associations
+                    if not any(self._same_target(item[0], previous)
+                               for previous in resolved)
+                ]
+                candidates = [current for _logical, current, _forced in associations]
+                for logical, current, forced in associations:
+                    if forced:
+                        self.get_logger().info(
+                            f'[ARM][{tree}] TARGET_REASSOCIATED '
+                            f'logical={logical.target_id} observed={current.target_id} '
+                            f'distance={logical.distance_to(current):.1f}px')
+            saw_disease = bool(known_targets)
 
             # 阶段 4: QUEUING (基于 IoU 和中心距离去重排序)
             feedback(ExecuteSpray.Feedback.QUEUING, 0.35, 'QUEUING')
-            queue = self._queue(candidates, processed + exhausted)
+            # ``candidates`` already excludes targets whose logical ledger row
+            # is TREATED/UNRESOLVED.  Reapplying raw image-space exclusion here
+            # would lose the association after a camera view change.
+            queue = self._queue(candidates, ())
+            logical_by_current_id = {
+                current.target_id: logical
+                for logical, current, _forced in associations
+            }
             if pending_attempt is not None and queue:
+                pending_matches = [
+                    candidate for candidate in queue
+                    if self._same_target(
+                        logical_by_current_id.get(candidate.target_id, candidate),
+                        pending_attempt.target)
+                ]
                 target = min(
-                    queue, key=lambda item: item.distance_to(pending_attempt.target))
+                    pending_matches or queue,
+                    key=lambda item: item.distance_to(pending_attempt.target))
                 self._replace_known_target(
                     known_targets, pending_attempt.target, target)
                 self._remember_targets(
                     known_targets,
                     [candidate for candidate in candidates if candidate is not target])
             else:
-                self._remember_targets(known_targets, candidates)
+                # Preserve a current image snapshot for the selected logical
+                # target.  It keeps final accounting exact while avoiding any
+                # new target insertion after the initial stable scan.
+                for candidate in queue:
+                    logical = logical_by_current_id.get(candidate.target_id)
+                    if logical is not None:
+                        self._replace_known_target(
+                            known_targets, logical, candidate)
 
             self.get_logger().info(
                 f'[ARM][{tree}] DETECT_QUEUE candidates={len(candidates)} '
@@ -983,151 +997,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
             feedback(ExecuteSpray.Feedback.COMPLETED, 1.0, 'COMPLETED')
         return code, message
 
-    # ---------- 异常恢复与处理 ----------
-    def _recover_failure(self, result_code, message, cancel_requested, home_failure_message=None):
-        if self._aborted(cancel_requested):
-            return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
-        if not self._return_home(cancel_requested):
-            return ExecuteSpray.Result.HOME_FAILED, (
-                home_failure_message or f'{message}; HOME motion failed')
-        return result_code, message
-
-    def _alignment_retry_allowed(self, attempt_count):
-        return attempt_count < int(
-            self.get_parameter('max_alignment_attempts').value)
-
-    @staticmethod
-    def _alignment_code_allows_endpoint_spray(align_code):
-        return align_code in {
-            AlignTarget.Result.TIMEOUT,
-            AlignTarget.Result.TARGET_STALE,
-            AlignTarget.Result.SERVO_SINGULARITY,
-        }
-
-    @staticmethod
-    def _alignment_code_allows_fallback(align_code):
-        return align_code in {
-            AlignTarget.Result.TIMEOUT,
-            AlignTarget.Result.TARGET_STALE,
-        }
-
-    @staticmethod
-    def _is_recoverable_alignment_code(align_code):
-        return align_code in {
-            AlignTarget.Result.TIMEOUT,
-            AlignTarget.Result.TARGET_STALE,
-            AlignTarget.Result.SERVO_SINGULARITY,
-        }
-
-    def _alignment_fallback_target(self, target, cancel_requested):
-        """Return a freshly confirmed target only when direct spraying is safe.
-
-        The fallback is real-arm opt-in.  It never sprays from an interrupted
-        Servo endpoint: MoveIt first returns to the active, previously planned
-        observation pose, then a new joint-state and target confirmation are
-        required.
-        """
-        if not self._spray_on_alignment_failure:
-            return None, 'alignment fallback is disabled'
-        if target is None:
-            return None, 'target was not confirmed before alignment failure'
-        if self._aborted(cancel_requested) or self.state.locked:
-            return None, 'motion is canceled or locked'
-        if not self._return_to_observation():
-            return None, 'could not return to the safe observation pose'
-        with self._state_mutex:
-            sequence = self._joint_state_sequence
-        current_joints = self._wait_for_joint_state(after_sequence=sequence)
-        if current_joints is None:
-            return None, 'fresh joint state is unavailable after observation return'
-        if self._aborted(cancel_requested) or self.state.locked:
-            return None, 'motion became canceled or locked'
-        preflight_ok, preflight_message = self._motion_preflight(
-            target, current_joints, source='alignment_failure_fallback',
-            error_norm_px=0.0, stage='FALLBACK')
-        if not preflight_ok:
-            return None, preflight_message
-        self._reset_target_confirmation(target.target_id)
-        self._select_target(target.target_id)
-        self._set_inference_mode('target')
-        if not self._wait_for_target_confirmation(
-                target.target_id, cancel_requested, require_workspace=False):
-            return None, 'target was not reconfirmed at the safe observation pose'
-        confirmed = self._latest_target()
-        if confirmed is None:
-            return None, 'target snapshot is unavailable after reconfirmation'
-        return confirmed, ''
-
-    def _rewind_for_untried_observation(self, attempt):
-        current = self._observation_candidate_index
-        if current + 1 < len(self._observation_candidates):
-            return
-        if any(
-                index not in attempt.recentered_observation_indices
-                for index in range(max(0, current))):
-            self._observation_candidate_index = -1
-
-    def _recover_missing_target(self, target, pending_attempt, attempts, cancel_requested, feedback):
-        attempt = pending_attempt or self._attempt_for(target, attempts)
-        if attempt is None:
-            attempt = TargetAttempt(target)
-            attempts.append(attempt)
-        current = self._observation_candidate_index
-        if current >= 0:
-            attempt.recentered_observation_indices.add(current)
-        self._select_target('')
-        self._set_inference_mode('idle')
-        self._rewind_for_untried_observation(attempt)
-        recovered, moved = self._recover_to_next_observation(
-            cancel_requested, feedback,
-            attempt.recentered_observation_indices)
-        if recovered:
-            self._reset_fruit_tracking()
-            self.get_logger().info(
-                f'[ARM][QUEUE] target={target.target_id} missing in current view; '
-                f'retrying detection at observation '
-                f'index={self._observation_candidate_index}')
-        return attempt, recovered, moved
-
-    def _recover_to_next_observation(self, cancel_requested, feedback, excluded_indices=None):
-        moved = False
-        while not self._aborted(cancel_requested):
-            feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
-                     'ALIGN_RECOVERY')
-            if not self._move_to_next_observation(excluded_indices):
-                return False, moved
-            moved = True
-            self.get_logger().info(
-                f'[ARM][ALIGN] moved to recovery observation '
-                f'distance={self._observation_distance} m')
-            feedback(ExecuteSpray.Feedback.SCANNING_TREE, 0.42,
-                     'SCANNING_TREE')
-            if self._scan_for_tree(cancel_requested):
-                self.get_logger().info(
-                    f'[ARM][ALIGN] tree reconfirmed at '
-                    f'{self._observation_distance} m')
-                return True, moved
-            self._set_inference_mode('idle')
-            self.get_logger().warn(
-                f'[ARM][ALIGN] tree not confirmed at '
-                f'{self._observation_distance} m; trying next candidate')
-        return False, moved
-
-    def _alignment_recovery_failure(self, message, cancel_requested):
-        if self._aborted(cancel_requested):
-            return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
-        self._set_inference_mode('idle')
-        self.get_logger().error(f'[ARM][ALIGN] {message}; returning HOME')
-        if self._return_home(cancel_requested):
-            return ExecuteSpray.Result.VISION_FAILED, f'{message}; returned HOME'
-        locked_message = f'{message}; HOME motion failed; motion locked'
-        self.get_logger().error(f'[ARM][ALIGN] {locked_message}')
-        self._request_motion_stop()
-        return ExecuteSpray.Result.HOME_FAILED, locked_message
-
-    def _return_home(self, cancel_requested):
-        return not self._aborted(cancel_requested) and self.arm.move_joints(self._home)
-
     # ---------- 辅助/状态工具 ----------
     def _select_target(self, target_id):
         message = String()
@@ -1143,66 +1012,6 @@ class SprayTask(TargetFlowMixin, ObservationFlowMixin, DownstreamActionMixin, No
         message = String()
         message.data = 'stop'
         self._motion_command_pub.publish(message)
-
-    def _request_spray_aim(self, cancel_requested):
-        """Fetch the calibrated nozzle-axis pixel before any MoveIt recenter.
-
-        No image-centre fallback is allowed: a missing CameraInfo/TF/service is
-        a recoverable observation failure, not permission to aim geometrically
-        at the wrong point.
-        """
-        deadline = time.monotonic() + float(
-            self.get_parameter('aim_service_timeout_sec').value)
-        while not self._aim_client.service_is_ready():
-            if self._aborted(cancel_requested):
-                return False, 'spray goal canceled'
-            if time.monotonic() >= deadline:
-                return False, 'nozzle aim service is unavailable'
-            time.sleep(0.02)
-        request = ComputeSprayAim.Request()
-        request.working_range_m = float(self._spray_working_distance)
-        future = self._aim_client.call_async(request)
-        while not future.done():
-            if self._aborted(cancel_requested):
-                return False, 'spray goal canceled'
-            if time.monotonic() >= deadline:
-                return False, 'nozzle aim service timed out'
-            time.sleep(0.02)
-        try:
-            response = future.result()
-        except Exception as error:
-            return False, f'nozzle aim service failed: {error}'
-        if not response.success:
-            return False, f'nozzle aim unavailable: {response.message}'
-        values = (
-            float(response.desired_u_px), float(response.desired_v_px),
-            int(response.image_width), int(response.image_height),
-            float(self._spray_working_distance),
-        )
-        if (not all(math.isfinite(value) for value in values[:2]) or
-                values[2] <= 0 or values[3] <= 0 or
-                not 0.0 <= values[0] < values[2] or
-                not 0.0 <= values[1] < values[3]):
-            return False, 'nozzle aim service returned an invalid image point'
-        self._active_aim = values
-        self.get_logger().info(
-            '[ARM][AIM] calibrated nozzle target='
-            f'({values[0]:.1f},{values[1]:.1f})px '
-            f'aim_plane_range={values[4]:.2f}m image={values[2]}x{values[3]}')
-        return True, ''
-
-    def _active_aim_pixel(self, image_width, image_height):
-        """Scale the authoritative aim point to a Target2D image if needed."""
-        aim = self._active_aim
-        if aim is None:
-            return None
-        desired_u, desired_v, aim_width, aim_height, _range_m = aim
-        if image_width <= 0 or image_height <= 0:
-            return None
-        return (
-            desired_u * float(image_width) / float(aim_width),
-            desired_v * float(image_height) / float(aim_height),
-        )
 
     def _aborted(self, cancel_requested):
         return self._abort.is_set() or cancel_requested()

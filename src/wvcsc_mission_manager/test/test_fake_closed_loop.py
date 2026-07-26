@@ -108,7 +108,8 @@ class _Harness(Node):
         message.child_frame_id = 'base_footprint'
         self.odom_pub.publish(message)
 
-    def load_mock(self, mission_id, return_home=False, home=(0.0, 0.0, 0.0)):
+    def load_route(self, mission_id, return_home=False, home=(0.0, 0.0, 0.0)):
+        """Build the same explicit Qt/RViz route used by production code."""
         request = LoadManualMission.Request()
         request.header.stamp = self.get_clock().now().to_msg()
         request.header.frame_id = 'map'
@@ -118,18 +119,17 @@ class _Harness(Node):
         request.home_pose.position.y = home[1]
         request.home_pose.orientation.z = math.sin(home[2] / 2.0)
         request.home_pose.orientation.w = math.cos(home[2] / 2.0)
-        for tree_id, x, y in (
-                ('tree_01', 3.0, 2.0),
-                ('tree_02', 5.0, -2.0)):
+        for tree_id, dock_x, dock_y, tree_y_m in (
+                ('tree_01', 3.4, 0.2, 1.8),
+                ('tree_02', 5.4, -0.2, -1.8)):
             target = ManualMissionTarget()
             target.target_id = tree_id
-            target.tree_hint.x = x
-            target.tree_hint.y = y
-            target.tree_hint.z = 0.0
-            target.use_explicit_tree_hint = True
-            target.compute_docking_pose = True
-            target.confidence = 0.95
-            target.evidence_uri = f'mock://{tree_id}'
+            target.docking_pose.position.x = dock_x
+            target.docking_pose.position.y = dock_y
+            target.docking_pose.orientation.w = 1.0
+            target.tree_x_m = 0.0
+            target.tree_y_m = tree_y_m
+            target.tree_base_z_m = 0.0
             target.spray_duration = 0.2
             request.targets.append(target)
         return self.manual_client.call_async(request)
@@ -149,13 +149,9 @@ class _Harness(Node):
             target.docking_pose.orientation.z = math.sin(yaw / 2.0)
             target.docking_pose.orientation.w = math.cos(yaw / 2.0)
             target.spray_duration = 0.2
-            target.confidence = 1.0
-            target.evidence_uri = 'manual://test'
             target.tree_x_m = tree_x_m
             target.tree_y_m = tree_y_m
             target.tree_base_z_m = 0.0
-            target.use_tree_offset_from_arm_base = True
-            target.compute_docking_pose = False
             request.targets.append(target)
         return self.manual_client.call_async(request)
 
@@ -176,7 +172,6 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
     manager = MissionManager(
         context=context,
         parameter_overrides=[
-            Parameter('auto_start', value=True),
             Parameter('stop_stable_duration_sec', value=0.2),
             Parameter('odom_stale_timeout_sec', value=0.5),
             Parameter('stop_verify_timeout_sec', value=2.0),
@@ -195,9 +190,12 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
 
         for run in range(3):
             mission_id = f'fake_closed_loop_{run}'
-            load = harness.load_mock(mission_id)
+            load = harness.load_route(mission_id)
             assert _spin_until(executor, load.done)
             assert load.result().success
+            start = harness.start_client.call_async(Trigger.Request())
+            assert _spin_until(executor, start.done)
+            assert start.result().success
             assert _spin_until(
                 executor,
                 lambda: (
@@ -218,10 +216,13 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
             assert math.isclose(actual[0], expected[0], abs_tol=1e-6)
             assert math.isclose(actual[1], expected[1], abs_tol=1e-6)
         assert servers.spray_goals == ['tree_01', 'tree_02'] * 3
-        assert servers.tree_hints == [
+        expected_hints = [
             ('map', 3.0, 2.0, 0.0),
             ('map', 5.0, -2.0, 0.0),
         ] * 3
+        for actual, expected in zip(servers.tree_hints, expected_hints):
+            assert actual[0] == expected[0]
+            assert actual[1:] == pytest.approx(expected[1:])
         assert harness.plan.mission_id == 'fake_closed_loop_2'
         assert [item.target_id for item in harness.plan.targets] == [
             'tree_01', 'tree_02']
@@ -253,7 +254,6 @@ def test_optional_return_home_adds_final_nav_goal():
     manager = MissionManager(
         context=context,
         parameter_overrides=[
-            Parameter('auto_start', value=True),
             Parameter('return_home_after_finish', value=True),
             Parameter('home_x', value=0.25),
             Parameter('home_y', value=-0.1),
@@ -272,10 +272,13 @@ def test_optional_return_home_adds_final_nav_goal():
 
     try:
         assert _spin_until(executor, manager._servers_ready)
-        load = harness.load_mock(
+        load = harness.load_route(
             'return_home_loop', return_home=True, home=(0.25, -0.1, 0.0))
         assert _spin_until(executor, load.done)
         assert load.result().success
+        start = harness.start_client.call_async(Trigger.Request())
+        assert _spin_until(executor, start.done)
+        assert start.result().success
         assert _spin_until(
             executor,
             lambda: (
@@ -308,7 +311,6 @@ def test_manual_mission_preserves_rviz_pose_and_yaw():
     manager = MissionManager(
         context=context,
         parameter_overrides=[
-            Parameter('auto_start', value=False),
             Parameter('stop_stable_duration_sec', value=0.1),
             Parameter('odom_stale_timeout_sec', value=0.5),
             Parameter('stop_verify_timeout_sec', value=2.0),

@@ -1,6 +1,3 @@
-import os
-from glob import glob
-
 from setuptools import find_packages, setup
 
 
@@ -13,8 +10,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml', 'THIRD_PARTY.md']),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
-        (os.path.join('share', package_name, 'scripts'), glob('scripts/*.sh')),
+        ('share/' + package_name + '/config', ['config/moveit_servo.yaml', 'config/visual_servo.yaml']),
     ],
     install_requires=['setuptools'],
     tests_require=['pytest'],

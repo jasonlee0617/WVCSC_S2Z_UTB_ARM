@@ -42,9 +42,11 @@ command_out_type: trajectory_msgs/JointTrajectory
 
 # 是否通过输出话题发布期望的关节位置和速度。
 publish_joint_positions: true
-# JTC 虽然使用 position command interface，但速度字段会参与轨迹插值；保留
-# Servo 计算出的速度可避免连续短轨迹退化为重复的零边界速度插值。
-publish_joint_velocities: true
+# Alicia 的 Gazebo JTC 只接受 ``position`` command interface，并配置为拒绝
+# 轨迹终点非零速度。若这里附带 Servo 的 velocity 字段，控制器会拒绝整条
+# 轨迹，表现为 Twist 正常但机械臂不动。仅发布单点位置轨迹；位置控制器继续
+# 以自身 100 Hz 插值执行。
+publish_joint_velocities: false
 publish_joint_accelerations: false
 
 # 平滑滤波器。

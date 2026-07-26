@@ -7,8 +7,6 @@ wvcsc_spray_task:
     # One real-tree task may spray only the two highest-confidence leaves.
     max_targets_per_tree: 2
     target_post_recenter_min_confidence: 0.30
-    # 仅用于已标定喷嘴轴线投影，不作为实际喷洒距离门控。
-    spray_working_distance_m: 1.00
     # Real hardware follows the same coarse-MoveIt + Visual Servo path as
     # simulation.  A completed Servo TIMEOUT, TARGET_STALE, or singularity
     # result sprays once from the current servo pose, then rechecks pending targets;
@@ -31,11 +29,12 @@ wvcsc_spray_task:
 
     # ``joint_presets`` is MoveIt joint-space planning, not direct FK output.
     # A target outside 48px receives collision-aware MoveIt coarse alignment
-    # before Visual Servo takes over.  The Servo entry window matches the
-    # shared closed-loop workflow; it is not a spray-distance gate.
+    # before Visual Servo takes over.  The Servo entry window is deliberately
+    # no larger than the recenter trigger; it is not a spray-distance gate.
     target_recenter_trigger_px: 48.0
     target_recenter_workspace_px: 128.0
-    visual_servo_entry_max_error_px: 128.0
+    visual_servo_entry_max_error_px: 48.0
+    target_post_recenter_stable_sec: 0.50
     # A single field-of-view correction may exceed the generic 20deg default.
     # Final motion still must pass collision IK, kinematic and OMPL checks.
     target_recenter_max_angle_deg: 45.0
@@ -46,18 +45,20 @@ wvcsc_spray_task:
     spray_action_name: /spray/execute
     vision_action_name: /vision/align_target
 
-    # Corn canopy is approximately 1.8 m high.
-    fruit_zone_height_min_m: 0.80
-    fruit_zone_height_max_m: 1.60
-    fruit_zone_radius_m: 0.60
-    observation_min_visible_fraction: 0.60
-    observation_distance_min_m: 1.0
-    observation_distance_max_m: 1.5
-    observation_distance_step_m: 0.10
+    # Preset mode does not gate on tree range; keep valid IK defaults for
+    # an explicit future IK launch without encoding crop/leaf height.
+    ik_tree_range_min_m: 0.80
+    ik_tree_range_max_m: 1.50
+    observation_camera_reach_min_m: 0.20
+    observation_camera_reach_max_m: 0.40
+    observation_camera_reach_step_m: 0.10
     # 相机光心相对 alicia_base_link 的 Z 高度；0.20 m 为确认的最小车顶净空。
     camera_height_min_m: 0.15
     camera_height_max_m: 0.30
     camera_height_step_m: 0.10
+    observation_azimuth_offsets_deg: [0.0, -12.0, 12.0]
+    observation_pitch_near_deg: -35.0
+    observation_pitch_far_deg: -20.0
     observation_max_condition_number: 16.0
 
     # Keep automatic execution conservative until measured calibration exists.

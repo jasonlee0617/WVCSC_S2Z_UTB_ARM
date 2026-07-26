@@ -30,13 +30,6 @@ wvcsc_visual_servo:
     # MoveIt Servo 发给 ros2_control 的最终轨迹；仅订阅用于闭环执行诊断。
     servo_command_out_topic: /arm_controller/joint_trajectory
 
-    # 调试信息：以 JSON 格式发布的高频全状态诊断信息。
-    debug_topic: /vision/visual_servo_debug
-    # 调试信息发布频率 (5 Hz 足够记录控制周期的状态，不影响主循环)。
-    debug_rate_hz: 5.0
-    # 终端控制台的人类可读日志更新频率。
-    terminal_status_rate_hz: 1.0
-
     # MoveIt Servo 只在首个对齐任务启动一次。每颗果实结束时发送零 Twist
     # 制动，避免 Gazebo 组件容器内 pause/unpause 服务的响应阻塞。
     start_servo_service: /servo_node/start_servo
@@ -97,12 +90,12 @@ wvcsc_visual_servo:
     desired_offset_u_px: 0.0
     desired_offset_v_px: 0.0
 
-    # 仿真固定 1.30m 工距的喷嘴轴线投影补偿。任何CameraInfo/TF/几何异常均拒绝伺服，
-    # 禁止退化到图像中心后误喷。
+    # 喷嘴轴线投影补偿使用每个观察位的真实几何工距；任何CameraInfo/TF/几何
+    # 异常均拒绝伺服，禁止退化到图像中心后误喷。
     aim_compensation_enabled: true
-    aim_range_source: fixed
-    aim_fixed_range_m: 1.30
-    aim_range_tolerance_m: 0.20
+    aim_range_source: goal
+    aim_range_min_m: 0.20
+    aim_range_max_m: 2.00
     aim_nozzle_frame: spray_nozzle_link
     aim_min_forward_axis_z: 0.2
     aim_image_margin_px: 20.0
@@ -120,10 +113,9 @@ wvcsc_visual_servo:
     # ----------------------------------------------------------------------
     # 6. PID 控制器参数（图像平面 XY 轴独立控制）
     # ----------------------------------------------------------------------
-    # 像素误差会先除以焦距变为弧度。Gazebo 实测 8~15px 残差在 KP=4.0 时
-    # 只有约 0.03~0.05rad/s，4 秒内无法收敛；KP=12.0 仍受 0.45rad/s 上限、
-    # MoveIt Servo 碰撞检查、奇异性与关节限位保护共同约束。
-    pid_kp_xy: 12.00
+    # 像素误差先除以焦距变为弧度。执行链恢复后以中等增益作为基线，避免
+    # 曾经的 12.0 增益在控制器真正跟随轨迹后造成饱和、过冲或奇异点逼近。
+    pid_kp_xy: 4.00
     # 积分增益 (KI=0.0) 关闭。喷嘴几何补偿与 MoveIt 重心已消除稳态大误差，
     # 仅由比例和微分项完成 4px 内的稳定对准。
     pid_ki_xy: 0.0
@@ -188,6 +180,17 @@ wvcsc_visual_servo:
     # 角速度/角加速度限制。
     max_angular_speed: 0.45          # 最大角速度 0.45 rad/s
     max_angular_acceleration: 3.00   # 最大角加速度 3.00 rad/s²
+
+    # ----------------------------------------------------------------------
+    # 8.1 下游 MoveIt Servo / JTC 执行链看门狗
+    # ----------------------------------------------------------------------
+    # 视觉闭环不能把“发布 Twist”误认为“机械臂已运动”。若下游轨迹停止、
+    # 频率过低，或控制器拒绝全部轨迹，本节点在该窗口后安全退出并给任务层
+    # 明确错误，而不是无意义地等待视觉超时。
+    servo_response_timeout_sec: 0.75
+    servo_min_output_rate_hz: 8.0
+    servo_min_commanded_joint_delta_rad: 0.01
+    servo_min_actual_joint_delta_rad: 0.002
 
     # ----------------------------------------------------------------------
     # 9. 停止与状态码管理
