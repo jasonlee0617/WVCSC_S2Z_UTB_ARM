@@ -8,6 +8,7 @@ from action_msgs.msg import GoalStatus
 from wvcsc_interfaces.action import AlignTarget, ExecuteSpray
 
 from wvcsc_arm_task.spray_task import SprayTask
+from wvcsc_arm_task.spray_config import target_recenter_parameters
 from wvcsc_arm_task.target_flow import (
     FruitTarget, TargetAttempt, completion_feedback_allowed,
     associate_known_targets,
@@ -28,6 +29,7 @@ class _QueueHarness:
     _replace_known_target = SprayTask._replace_known_target
     _pending_targets = SprayTask._pending_targets
     _attempt_for = SprayTask._attempt_for
+    _rewind_for_untried_observation = SprayTask._rewind_for_untried_observation
     _same_target = SprayTask._same_target
     _mark_unresolved = SprayTask._mark_unresolved
 
@@ -273,7 +275,7 @@ def test_vision_failure_never_publishes_completed_feedback():
 
 
 class _RecenterParameterHarness:
-    _target_recenter_parameters = SprayTask._target_recenter_parameters
+    _target_recenter_parameters = target_recenter_parameters
 
     @staticmethod
     def get_parameter(name):
@@ -327,6 +329,7 @@ class _ClosedLoopSequenceHarness:
     _attempt_for = SprayTask._attempt_for
     _same_target = SprayTask._same_target
     _mark_unresolved = SprayTask._mark_unresolved
+    _wait_post_spray_home_delay = SprayTask._wait_post_spray_home_delay
 
     def _associate_known_targets(self, known, candidates):
         return associate_known_targets(
@@ -342,6 +345,13 @@ class _ClosedLoopSequenceHarness:
         self._observation_candidate_index = 0
         self._observation_distance = 1.0
         self._vision_timeout = 30.0
+        self.config = SimpleNamespace(
+            detection_timeout=2.0,
+            confirmation_frames=3,
+            max_alignment_attempts=2,
+            max_targets_per_tree=0,
+            post_spray_home_delay=0.0,
+        )
         self._active_aim = (640.0, 388.0, 1280, 720, 1.0)
         self._tree_in_base = (0.0, 1.6, 0.0)
         self._observed_targets = targets or [_target('target-1', 200.0, 200.0)]
@@ -354,7 +364,6 @@ class _ClosedLoopSequenceHarness:
 
     def get_parameter(self, name):
         return SimpleNamespace(value={
-            'tree_confidence': 0.25,
             'detection_timeout_sec': 2.0,
             'confirmation_frames': 3,
             'max_alignment_attempts': 2,
@@ -387,9 +396,8 @@ class _ClosedLoopSequenceHarness:
     def _move_to_observation(self, _hint):
         return True
 
-    @staticmethod
-    def _scan_for_tree(_cancel_requested, **_kwargs):
-        return True
+    def _move_to_next_fan_observation(self):
+        return False
 
     def _wait_for_fruits(self, _cancel_requested):
         self._fruit_calls += 1
@@ -503,6 +511,60 @@ def test_completed_queue_returns_home_without_an_extra_observation_scan():
     assert task.calls[-1] == 'return_home'
 
 
+def test_completed_tree_waits_once_before_final_home():
+    class DelayedHarness(_ClosedLoopSequenceHarness):
+        def _wait_post_spray_home_delay(
+                self, sprayed, _cancel_requested, _feedback):
+            self.calls.append(f'post_spray_wait:{sprayed}')
+            return True
+
+    task = DelayedHarness(targets=[
+        _target('target-1', 620.0, 360.0),
+        _target('target-2', 900.0, 200.0),
+    ])
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, _message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.OK
+    assert task.calls.count('spray') == 2
+    assert task.calls.count('post_spray_wait:2') == 1
+    assert task.calls[-2:] == ['post_spray_wait:2', 'return_home']
+
+
+def test_no_disease_scans_all_fan_observations_then_returns_home():
+    class NoDiseaseHarness(_ClosedLoopSequenceHarness):
+        def __init__(self):
+            super().__init__(targets=[])
+            self._fan_observation_moves = 0
+
+        def _wait_for_fruits(self, _cancel_requested):
+            self._fruit_calls += 1
+            return []
+
+        def _move_to_next_fan_observation(self):
+            self._fan_observation_moves += 1
+            self.calls.append('next_fan_observation')
+            return self._fan_observation_moves == 1
+
+    task = NoDiseaseHarness()
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.INSPECTED_NO_DISEASE
+    assert 'no diseased fruit detected' in message
+    assert task.calls.count('next_fan_observation') == 2
+    assert 'spray' not in task.calls
+    assert task.calls[-1] == 'return_home'
+
+
 def test_first_nonempty_detection_locks_the_tree_target_set():
     initial = _target('target-1', 200.0, 200.0)
     discovered_later = _target('target-late', 900.0, 220.0)
@@ -550,10 +612,31 @@ def test_real_alignment_timeout_sprays_from_current_pose_then_rechecks_before_ho
     assert any(item[0] == ExecuteSpray.Feedback.ALIGNING for item in feedbacks)
 
 
-def test_servo_singularity_sprays_from_current_pose_then_homes():
-    task = _ClosedLoopSequenceHarness(
-        alignment_ok=False, fallback_enabled=True,
-        alignment_code=AlignTarget.Result.SERVO_SINGULARITY)
+def test_servo_singularity_marks_only_that_target_unresolved_then_continues():
+    class SingularityHarness(_ClosedLoopSequenceHarness):
+        def _wait_for_fruits(self, _cancel_requested):
+            self._fruit_calls += 1
+            return self._observed_targets if self._fruit_calls <= 3 else []
+
+        def _recover_to_next_observation(
+                self, _cancel_requested, _feedback, _excluded_indices=None):
+            self.calls.append('next_observation')
+            return True, True
+
+        @staticmethod
+        def _rewind_for_untried_observation(_attempt):
+            pass
+
+        @staticmethod
+        def _alignment_retry_allowed(attempt_count):
+            return attempt_count < 2
+
+    first = _target('target-1', 620.0, 360.0)
+    second = _target('target-2', 900.0, 200.0)
+    task = SingularityHarness(
+        alignment_ok=True, fallback_enabled=True,
+        alignment_code=AlignTarget.Result.SERVO_SINGULARITY,
+        targets=[first, second], failed_target_ids={'target-1'})
     request = SimpleNamespace(
         mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
         tree_hint=object())
@@ -561,9 +644,10 @@ def test_servo_singularity_sprays_from_current_pose_then_homes():
     code, _message = task._run_sequence(
         request, lambda: False, lambda *_args: None)
 
-    assert code == ExecuteSpray.Result.OK
+    assert code == ExecuteSpray.Result.PARTIAL_SUCCESS
     assert task.calls.count('spray') == 1
-    assert task.calls.count('return_to_observation') == 1
+    assert task.calls.index('next_observation') < task.calls.index('lock:target-2')
+    assert task.calls[-1] == 'return_home'
 
 
 def test_endpoint_fallback_rechecks_and_sprays_the_remaining_target_before_home():
@@ -571,6 +655,26 @@ def test_endpoint_fallback_rechecks_and_sprays_the_remaining_target_before_home(
     second = _target('target-2', 900.0, 200.0)
     task = _ClosedLoopSequenceHarness(
         targets=[first, second], failed_target_ids={'target-1'})
+    request = SimpleNamespace(
+        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        tree_hint=object())
+
+    code, message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.OK
+    assert 'detected=2 sprayed=2 unresolved=0' in message
+    assert task.calls.count('spray') == 2
+    assert task.calls.index('return_to_observation') < task.calls.index('lock:target-2')
+    assert task.calls[-1] == 'return_home'
+
+
+def test_servo_actuation_stall_sprays_current_pose_then_continues_queue():
+    first = _target('target-1', 620.0, 360.0)
+    second = _target('target-2', 900.0, 200.0)
+    task = _ClosedLoopSequenceHarness(
+        targets=[first, second], failed_target_ids={'target-1'},
+        alignment_code=AlignTarget.Result.SERVO_ACTUATION_STALL)
     request = SimpleNamespace(
         mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
         tree_hint=object())
@@ -674,9 +778,6 @@ class _ObservationHarness:
     def _wait_for_joint_state(*_args):
         return (0.0,) * 6
 
-    def _publish_observation_debug(self, *_args, **_kwargs):
-        pass
-
     def _aborted(self, _cancel_requested):
         return False
 
@@ -699,109 +800,6 @@ def test_observation_recovery_skips_indices_already_used_by_target():
 
     assert task.moves == [1.20]
     assert task._observation_candidate_index == 1
-
-
-class _ObservationDebugPublisher:
-    def __init__(self):
-        self.payloads = []
-
-    def publish(self, message):
-        self.payloads.append(json.loads(message.data))
-
-
-class _ObservationDebugHarness:
-    _publish_observation_debug = SprayTask._publish_observation_debug
-
-    def __init__(self):
-        self._active_mission = 'mission-1'
-        self._active_tree = 'tree-1'
-        self._observation_config = {}
-        self._observation_debug_pub = _ObservationDebugPublisher()
-
-    @staticmethod
-    def get_logger():
-        return SimpleNamespace(debug=lambda *_args: None)
-
-
-def test_observation_debug_reports_candidate_geometry_and_compensated_aim_point():
-    task = _ObservationDebugHarness()
-    candidate = ObservationCandidate(
-        candidate_id='observe', distance_m=1.2, camera_height_m=1.5,
-        azimuth_deg=0.0, camera_position=(1.0, 0.0, 1.0),
-        camera_quat=(0.0, 0.0, 0.0, 1.0),
-        tool_position=(1.0, 0.0, 1.0),
-        tool_quat=(0.0, 0.0, 0.0, 1.0), visible=True,
-        visible_margin_px=20.0, visible_fraction=0.75,
-        projected_bbox=(300.0, 100.0, 900.0, 650.0),
-        target_u_px=640.0, target_v_px=360.0,
-        selection_phase='center_initial')
-
-    task._publish_observation_debug('candidate_ranked', candidate)
-
-    payload = task._observation_debug_pub.payloads[0]
-    assert payload['visible_fraction'] == 0.75
-    assert payload['required_visible_fraction'] is None
-    assert payload['camera_z_in_base_m'] == 1.0
-    assert payload['camera_height_in_base_m'] == 1.5
-    assert payload['observation_phase'] == 'center_initial'
-    assert payload['selection_policy'] == 'center_then_fan'
-    assert payload['projected_bbox_xyxy'] == [300.0, 100.0, 900.0, 650.0]
-    assert payload['target_u_px'] == 640.0
-    assert payload['target_v_px'] == 360.0
-
-
-class _TreeScanHarness:
-    _scan_for_tree = SprayTask._scan_for_tree
-    _active_observation_candidate = SprayTask._active_observation_candidate
-
-    def __init__(self):
-        self._observation_candidates = [
-            SimpleNamespace(selection_phase='center_initial'),
-            SimpleNamespace(selection_phase='fan_left'),
-            SimpleNamespace(selection_phase='fan_right'),
-        ]
-        self._observation_candidate_index = 0
-        self._tree_results = iter((False, False, True))
-        self.moves = []
-        self.events = []
-
-    @staticmethod
-    def _aborted(_cancel_requested):
-        return False
-
-    @staticmethod
-    def _reset_tree_tracking():
-        pass
-
-    @staticmethod
-    def _set_inference_mode(_mode):
-        pass
-
-    def _wait_for_tree(self, _cancel_requested):
-        return next(self._tree_results)
-
-    def _move_to_next_observation(self):
-        self._observation_candidate_index += 1
-        if self._observation_candidate_index >= len(self._observation_candidates):
-            return False
-        self.moves.append(
-            self._observation_candidates[self._observation_candidate_index].selection_phase)
-        return True
-
-    def _publish_observation_debug(self, event, candidate=None, **_kwargs):
-        self.events.append((event, candidate.selection_phase if candidate else None))
-
-
-def test_tree_scan_moves_to_fan_only_after_center_tree_miss():
-    task = _TreeScanHarness()
-
-    assert task._scan_for_tree(lambda: False)
-    assert task.moves == ['fan_left', 'fan_right']
-    assert task.events == [
-        ('tree_not_confirmed', 'center_initial'),
-        ('tree_not_confirmed', 'fan_left'),
-        ('tree_confirmed', 'fan_right'),
-    ]
 
 
 def test_tree_hint_validation_is_a_static_geometry_guard():
@@ -849,6 +847,11 @@ def test_alignment_retry_is_bounded_by_configured_attempts():
 def test_servo_safety_stop_is_not_recoverable_alignment_code():
     assert not _RetryHarness._is_recoverable_alignment_code(
         AlignTarget.Result.SERVO_SAFETY_STOP)
+
+
+def test_servo_actuation_stall_is_recoverable_alignment_code():
+    assert _RetryHarness._is_recoverable_alignment_code(
+        AlignTarget.Result.SERVO_ACTUATION_STALL)
 
 
 class _AlignmentFallbackHarness:
@@ -939,13 +942,17 @@ def test_alignment_fallback_never_sprays_when_locked_or_preflight_fails():
     assert not any(call.startswith('confirm:') for call in unsafe.calls)
 
 
-def test_only_timeout_and_target_stale_can_use_alignment_fallback():
+def test_direction_divergence_can_use_safe_pose_fallback_but_singularity_cannot():
     assert SprayTask._alignment_code_allows_fallback(AlignTarget.Result.TIMEOUT)
     assert SprayTask._alignment_code_allows_fallback(AlignTarget.Result.TARGET_STALE)
+    assert SprayTask._alignment_code_allows_fallback(
+        AlignTarget.Result.SERVO_DIRECTION_DIVERGENCE)
     assert not SprayTask._alignment_code_allows_fallback(
         AlignTarget.Result.SERVO_SINGULARITY)
     assert not SprayTask._alignment_code_allows_fallback(
         AlignTarget.Result.SERVO_SAFETY_STOP)
+    assert not SprayTask._alignment_code_allows_endpoint_spray(
+        AlignTarget.Result.SERVO_SINGULARITY)
 
 
 def test_target_recenter_uses_the_same_desired_spray_pixel_as_visual_servo():
@@ -1121,9 +1128,6 @@ class _RecenterSafetyHarness:
     def plan_pose(self, *_args, **_kwargs):
         self.planning_called = True
 
-    def _publish_observation_debug(self, *_args, **_kwargs):
-        pass
-
 
 def test_target_recenter_rejects_collision_ik_before_planning_or_servo():
     task = _RecenterSafetyHarness()
@@ -1204,10 +1208,6 @@ class _RecenterAttemptHarness:
     def _current_camera_pose():
         return (1.0, 0.0, 1.0), (0.0, 0.0, 0.0, 1.0)
 
-    @staticmethod
-    def _publish_observation_debug(*_args, **_kwargs):
-        pass
-
 
 def test_recenter_angle_rejection_is_recoverable_and_not_retried_at_same_view():
     task = _RecenterAttemptHarness()
@@ -1225,7 +1225,6 @@ class _PartialRecenterHarness(_RecenterAttemptHarness):
     def __init__(self):
         super().__init__()
         self.trials = []
-        self.debug_events = []
 
     def _move_to_recentered_pose(self, candidate, _joints):
         self.trials.append(candidate.candidate_id)
@@ -1253,9 +1252,6 @@ class _PartialRecenterHarness(_RecenterAttemptHarness):
     def _latest_target():
         return _target('fruit-1', 650.0, 390.0)
 
-    def _publish_observation_debug(self, event, *_args, **_kwargs):
-        self.debug_events.append(event)
-
     @staticmethod
     def get_logger():
         return SimpleNamespace(info=lambda *_args: None)
@@ -1274,7 +1270,6 @@ def test_recenter_uses_a_larger_residual_when_precise_rotation_lacks_margin():
         'observe_target_fruit-1_r12',
         'observe_target_fruit-1_r16',
     ]
-    assert task.debug_events == ['target_recenter_confirmed']
 
 
 def test_recenter_residual_inside_angular_limit_is_recentered():
@@ -1287,7 +1282,6 @@ def test_recenter_residual_inside_angular_limit_is_recentered():
 
     assert ok
     assert message == 'target reconfirmed after recenter'
-    assert task.debug_events == ['target_recenter_confirmed']
 
 
 def test_large_residual_runs_coarse_recenter_before_servo_handoff():
@@ -1309,7 +1303,6 @@ def test_large_residual_runs_coarse_recenter_before_servo_handoff():
         'observe_target_fruit-1_r12',
         'observe_target_fruit-1_r16',
     ]
-    assert task.debug_events == ['target_recenter_confirmed']
 
 
 def test_coarse_recenter_rejects_current_joint_limit_margin():
@@ -1335,7 +1328,6 @@ def test_coarse_recenter_rejects_current_joint_limit_margin():
         'observe_target_fruit-1_r12',
         'observe_target_fruit-1_r16',
     ]
-    assert task.debug_events == ['target_recenter_failed']
 
 
 class _NoRecenterDriftHarness:
@@ -1361,7 +1353,6 @@ class _NoRecenterDriftHarness:
             observation_mode='ik', joint_positions=(), rejection_reason='')]
         self._observation_optimizer = SimpleNamespace(
             evaluate_ik=lambda candidate, *_args: candidate)
-        self.debug_events = []
 
     @staticmethod
     def _wait_for_observation_inputs():
@@ -1378,9 +1369,6 @@ class _NoRecenterDriftHarness:
         # Desired point is (640, 388); the confirmed target drifted to 644.
         return _target('fruit-1', 644.0, 388.0)
 
-    def _publish_observation_debug(self, event, *_args, **_kwargs):
-        self.debug_events.append(event)
-
     @staticmethod
     def get_logger():
         return SimpleNamespace(info=lambda *_args: None)
@@ -1395,7 +1383,6 @@ def test_small_residual_inside_workspace_is_sent_to_visual_servo():
 
     assert ok
     assert message == 'target reconfirmed for visual servo'
-    assert task.debug_events == ['target_recenter_not_required']
 
 
 def test_large_residual_inside_workspace_is_sent_to_visual_servo():
@@ -1408,7 +1395,6 @@ def test_large_residual_inside_workspace_is_sent_to_visual_servo():
 
     assert ok
     assert message == 'target reconfirmed for visual servo'
-    assert task.debug_events == ['target_recenter_not_required']
 
 
 class _IterativeRecenterHarness(_PartialRecenterHarness):
@@ -1520,7 +1506,6 @@ class _PostRecenterHarness:
             'residual_candidates_px': (
                 12.0, 16.0, 24.0, 8.0, 32.0, 40.0, 3.0, 1.0, 0.0),
         }
-        self.debug_events = []
 
     @staticmethod
     def _wait_for_observation_inputs():
@@ -1551,9 +1536,6 @@ class _PostRecenterHarness:
     def _latest_target():
         return _target('fruit-1', 650.0, 390.0)
 
-    def _publish_observation_debug(self, event, *_args, **_kwargs):
-        self.debug_events.append(event)
-
     @staticmethod
     def get_logger():
         return SimpleNamespace(info=lambda *_args: None)
@@ -1568,7 +1550,6 @@ def test_post_recenter_jitter_gate_does_not_block_servo_handoff():
 
     assert ok
     assert message == 'target reconfirmed after recenter'
-    assert task.debug_events == ['target_recenter_confirmed']
 
 
 class _AlignHarness:

@@ -4,6 +4,11 @@ string tree_id
 float32 spray_duration
 # Tree-root hint expressed in tree_hint.header.frame_id.
 geometry_msgs/PointStamped tree_hint
+# Optional per-goal observation override. Empty keeps the node configuration.
+string observation_mode
+# Optional nozzle aim-plane range override in metres.
+# 0.0 keeps the normal tree/camera geometry calculation.
+float32 working_range_m
 ---
 # Result
 uint16 OK=0
@@ -25,8 +30,7 @@ string message
 # Feedback
 uint8 ACCEPTED=0
 uint8 MOVING_TO_OBSERVE=1
-uint8 SCANNING_TREE=2
-uint8 DETECTING_FRUITS=3
+uint8 DETECTING_TARGETS=3
 uint8 QUEUING=4
 uint8 ALIGNING=5
 uint8 SPRAYING=6

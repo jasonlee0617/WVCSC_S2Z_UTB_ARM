@@ -161,7 +161,15 @@ def _launch(context, *, launch_dir):
             parameters=[
                 os.path.join(real_config, 'arm_task_real.yaml'),
                 arm_motion_parameters,
-                {'observation_mode': LaunchConfiguration('observation_mode')},
+                {
+                    'observation_mode': LaunchConfiguration('observation_mode'),
+                    'ik_tree_range_min_m': ParameterValue(
+                        LaunchConfiguration('tree_distance_min_m'),
+                        value_type=float),
+                    'ik_tree_range_max_m': ParameterValue(
+                        LaunchConfiguration('tree_distance_max_m'),
+                        value_type=float),
+                },
                 robot_description,
             ],
             output='screen'),
@@ -178,6 +186,21 @@ def _launch(context, *, launch_dir):
             parameters=[{
                 'use_sim_time': False,
                 'base_frame': 'alicia_base_link',
+                'default_observation_mode': LaunchConfiguration(
+                    'observation_mode'),
+                'tree_distance_min_m': ParameterValue(
+                    LaunchConfiguration('tree_distance_min_m'), value_type=float),
+                'tree_distance_max_m': ParameterValue(
+                    LaunchConfiguration('tree_distance_max_m'), value_type=float),
+                'working_range_min_m': ParameterValue(
+                    LaunchConfiguration('working_range_min_m'), value_type=float),
+                'working_range_max_m': ParameterValue(
+                    LaunchConfiguration('working_range_max_m'), value_type=float),
+                'default_working_range_m': ParameterValue(
+                    LaunchConfiguration('default_working_range_m'), value_type=float),
+                'joint_preset_hint_distance_m': ParameterValue(
+                    LaunchConfiguration('joint_preset_hint_distance_m'),
+                    value_type=float),
             }],
             output='screen'),
     ]
@@ -209,6 +232,13 @@ def generate_launch_description():
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.20'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
         DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
+        DeclareLaunchArgument('tree_distance_min_m', default_value='0.80'),
+        DeclareLaunchArgument('tree_distance_max_m', default_value='1.50'),
+        DeclareLaunchArgument('working_range_min_m', default_value='0.20'),
+        DeclareLaunchArgument('working_range_max_m', default_value='2.00'),
+        DeclareLaunchArgument('default_working_range_m', default_value='1.00'),
+        DeclareLaunchArgument(
+            'joint_preset_hint_distance_m', default_value='1.00'),
         DeclareLaunchArgument(
             'yolo_python_executable',
             default_value=os.path.expanduser(

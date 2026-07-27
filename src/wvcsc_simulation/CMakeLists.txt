@@ -34,7 +34,6 @@ install(PROGRAMS
   wvcsc_simulation/sim_relay.py
   data_acquisition/scripts/capture_yolo_seed.py
   data_acquisition/scripts/capture_yolo_seed_direct.py
-  data_acquisition/scripts/replace_yolo_seed_datasets.py
   data_acquisition/scripts/validate_yolo_seed.py
   DESTINATION lib/${PROJECT_NAME}
 )

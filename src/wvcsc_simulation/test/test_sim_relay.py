@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+import rclpy
 
 from wvcsc_simulation import sim_relay
 
@@ -87,3 +88,16 @@ def test_installed_script_enters_its_ros_spin_loop_when_executed_directly():
 
     assert "if __name__ == '__main__':" in source
     assert '    main()' in source
+
+
+def test_real_node_destroy_does_not_override_rclpy_publishers():
+    started_context = not rclpy.ok()
+    if started_context:
+        rclpy.init()
+    relay = sim_relay.SimRelay()
+    try:
+        assert set(relay._channel_publishers) == {1, 2}
+        relay.destroy_node()
+    finally:
+        if started_context and rclpy.ok():
+            rclpy.shutdown()

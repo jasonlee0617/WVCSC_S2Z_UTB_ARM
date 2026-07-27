@@ -60,6 +60,8 @@ def generate_launch_description():
             'map_frame': 'map',
             'base_frame': 'base_footprint',
             'goal_pose_topic': '/manual_goal_pose',
+            'default_arm_spray_duration_sec': LaunchConfiguration(
+                'default_arm_spray_duration_sec'),
         }.items(),
     )
     fake_arm = Node(
@@ -82,6 +84,8 @@ def generate_launch_description():
                 controller_share, 'config', 'fault.ini')),
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('use_qt_gui', default_value='true'),
+        DeclareLaunchArgument(
+            'default_arm_spray_duration_sec', default_value='3.0'),
         navigation,
         relay_controller,
         mission_manager,

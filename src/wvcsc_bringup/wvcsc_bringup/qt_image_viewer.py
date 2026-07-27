@@ -12,7 +12,6 @@ from rclpy.qos import qos_profile_sensor_data
 IMAGE_TYPE = 'sensor_msgs/msg/Image'
 PREFERRED_IMAGE_TOPICS = (
     '/camera/color/image_raw',
-    '/vision/tree_debug_image',
     '/vision/diseased_target_debug_image',
 )
 
@@ -88,11 +87,12 @@ def image_topic_names(topic_types):
 class RosImagePanel(QWidget):
     """Discover and render ``sensor_msgs/Image`` topics from one ROS node."""
 
-    def __init__(self, node, parent=None):
+    def __init__(self, node, parent=None, active=True):
         super().__init__(parent)
         self._node = node
         self._subscription = None
         self._topic = ''
+        self._active = False
 
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -110,10 +110,26 @@ class RosImagePanel(QWidget):
         self.topic_combo.currentIndexChanged.connect(self._select_topic)
         self._discovery_timer = QTimer(self)
         self._discovery_timer.timeout.connect(self.refresh_topics)
-        self._discovery_timer.start(1000)
-        self.refresh_topics()
+        self.set_active(active)
 
-    def refresh_topics(self):
+    def set_active(self, active):
+        """Start or stop discovery and subscriptions with the panel visibility."""
+        active = bool(active)
+        if active == self._active:
+            return
+        self._active = active
+        if active:
+            self._discovery_timer.start(1000)
+            self.refresh_topics(force=True)
+            return
+        self._discovery_timer.stop()
+        self._destroy_subscription()
+        self.image_label.setText('图像面板已收起')
+        self.image_label.setPixmap(QPixmap())
+
+    def refresh_topics(self, force=False):
+        if not self._active:
+            return
         try:
             topics = image_topic_names(self._node.get_topic_names_and_types())
         except Exception:
@@ -121,7 +137,7 @@ class RosImagePanel(QWidget):
         current = self._topic
         existing = [self.topic_combo.itemData(index)
                     for index in range(self.topic_combo.count())]
-        if topics == existing[1:]:
+        if not force and topics == existing[1:]:
             return
         self.topic_combo.blockSignals(True)
         self.topic_combo.clear()
@@ -137,13 +153,11 @@ class RosImagePanel(QWidget):
 
     def _select_topic(self, _index):
         topic = self.topic_combo.currentData() or ''
-        if topic == self._topic:
+        if topic == self._topic and self._subscription is not None:
             return
-        if self._subscription is not None:
-            self._node.destroy_subscription(self._subscription)
-            self._subscription = None
+        self._destroy_subscription()
         self._topic = topic
-        if not topic:
+        if not topic or not self._active:
             self.image_label.setText('等待图像')
             self.image_label.setPixmap(QPixmap())
             return
@@ -151,6 +165,11 @@ class RosImagePanel(QWidget):
         self._subscription = self._node.create_subscription(
             Image, topic, self._on_image, qos_profile_sensor_data)
         self.image_label.setText(f'等待 {topic}')
+
+    def _destroy_subscription(self):
+        if self._subscription is not None:
+            self._node.destroy_subscription(self._subscription)
+            self._subscription = None
 
     def _on_image(self, message):
         try:
@@ -164,7 +183,5 @@ class RosImagePanel(QWidget):
 
     def closeEvent(self, event):
         self._discovery_timer.stop()
-        if self._subscription is not None:
-            self._node.destroy_subscription(self._subscription)
-            self._subscription = None
+        self._destroy_subscription()
         super().closeEvent(event)

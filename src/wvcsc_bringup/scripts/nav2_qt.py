@@ -18,7 +18,6 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -41,7 +40,6 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 from wvcsc_interfaces.msg import (
     ManualMissionTarget,
-    MissionPlan,
     MissionStatus,
 )
 from wvcsc_interfaces.srv import LoadManualMission
@@ -81,6 +79,9 @@ WORK_SIDE_UNSPECIFIED = 'UNSPECIFIED'
 WORK_SIDE_LEFT = 'LEFT'
 WORK_SIDE_RIGHT = 'RIGHT'
 ARM_ANCHOR_POSE_REFERENCE = 'alicia_base_link_xy_vehicle_yaw'
+DEFAULT_ARM_SPRAY_DURATION_SEC = 3.0
+MIN_ARM_SPRAY_DURATION_SEC = 0.2
+MAX_ARM_SPRAY_DURATION_SEC = 10.0
 
 
 def non_overwriting_json_path(path):
@@ -106,12 +107,17 @@ def timestamped_mission_path(directory=DEFAULT_SAVE_DIRECTORY, now=None):
 def route_timeline(points):
     """Return the user-facing relay contract for the submitted route."""
     entries = []
+    previous = '起点'
     for index, point in enumerate(points, start=1):
         wide = 'ON' if point.wide_spray_on_approach else 'OFF'
-        item = f'{index}:{point.point_type} 广域={wide}'
+        current = f'{index}:{point.point_type}'
+        item = f'{previous} --[广域={wide}]--> {current}'
         if point.point_type == POINT_INSPECT:
             item += f' 病株={point.arm_spray_duration_sec:.1f}s'
+        if point.dwell_time_sec > 0.0:
+            item += f' 停留={point.dwell_time_sec:.1f}s'
         entries.append(item)
+        previous = current
     return ' | '.join(entries)
 
 
@@ -328,7 +334,7 @@ class WorkPoint:
     point_type: str = POINT_TRANSIT
     work_side: str = WORK_SIDE_UNSPECIFIED
     wide_spray_on_approach: bool = False
-    arm_spray_duration_sec: float = 3.0
+    arm_spray_duration_sec: float = DEFAULT_ARM_SPRAY_DURATION_SEC
     dwell_time_sec: float = 0.0
     tree_pose: Pose | None = None
 
@@ -338,10 +344,17 @@ class MissionEditor:
 
     schema_version = 7
 
-    def __init__(self):
+    def __init__(self, spray_duration=DEFAULT_ARM_SPRAY_DURATION_SEC):
+        spray_duration = float(spray_duration)
+        if not (MIN_ARM_SPRAY_DURATION_SEC <= spray_duration <=
+                MAX_ARM_SPRAY_DURATION_SEC):
+            raise ValueError(
+                'default_arm_spray_duration_sec must be within '
+                f'{MIN_ARM_SPRAY_DURATION_SEC:.1f}–'
+                f'{MAX_ARM_SPRAY_DURATION_SEC:.1f}')
         self.start_pose = None
         self.points = []
-        self.spray_duration = 3.0
+        self.spray_duration = spray_duration
         self.return_home_after_finish = False
         self.load_warning = None
 
@@ -349,7 +362,7 @@ class MissionEditor:
                   point_type=POINT_TRANSIT,
                   work_side=WORK_SIDE_UNSPECIFIED,
                   wide_spray_on_approach=False,
-                  arm_spray_duration_sec=3.0,
+                  arm_spray_duration_sec=None,
                   dwell_time_sec=0.0,
                   tree_pose=None):
         if point_type not in POINT_TYPES:
@@ -358,6 +371,8 @@ class MissionEditor:
             work_side = work_side_from_tree_y(tree_y_m)
         if point_type == POINT_FINISH:
             wide_spray_on_approach = False
+        if arm_spray_duration_sec is None:
+            arm_spray_duration_sec = self.spray_duration
         self.points.append(WorkPoint(
             copy_pose(pose), float(tree_x_m), float(tree_y_m),
             float(tree_base_z_m), point_type, work_side,
@@ -481,6 +496,9 @@ class Nav2QtNode(Node):
         self.declare_parameter('require_global_relocalization_service', True)
         self.declare_parameter('show_sim_spray_status', False)
         self.declare_parameter('simulation_parking_clearance_check', False)
+        self.declare_parameter(
+            'default_arm_spray_duration_sec',
+            DEFAULT_ARM_SPRAY_DURATION_SEC)
         # IK mode has a stricter recording envelope than the arm's runtime
         # interlock.  Joint presets deliberately bypass this radial check.
         self.declare_parameter('observation_mode', 'joint_presets')
@@ -494,6 +512,8 @@ class Nav2QtNode(Node):
             self.get_parameter('show_sim_spray_status').value)
         self.simulation_parking_clearance_check = bool(
             self.get_parameter('simulation_parking_clearance_check').value)
+        self.default_arm_spray_duration_sec = float(
+            self.get_parameter('default_arm_spray_duration_sec').value)
         self.observation_mode = str(
             self.get_parameter('observation_mode').value).strip().lower()
         self.ik_recording_range_min_m = float(
@@ -505,6 +525,13 @@ class Nav2QtNode(Node):
         if not (0.0 < self.ik_recording_range_min_m <
                 self.ik_recording_range_max_m):
             raise ValueError('invalid IK recording range')
+        if not (MIN_ARM_SPRAY_DURATION_SEC <=
+                self.default_arm_spray_duration_sec <=
+                MAX_ARM_SPRAY_DURATION_SEC):
+            raise ValueError(
+                'default_arm_spray_duration_sec must be within '
+                f'{MIN_ARM_SPRAY_DURATION_SEC:.1f}–'
+                f'{MAX_ARM_SPRAY_DURATION_SEC:.1f}')
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.latest_initial_pose = None
@@ -512,7 +539,6 @@ class Nav2QtNode(Node):
         self.latest_goal_pose = None
         self.goal_sequence = 0
         self.status = None
-        self.plan = None
         self.sim_relay_active = {1: False, 2: False}
 
         latched = QoSProfile(
@@ -530,8 +556,6 @@ class Nav2QtNode(Node):
             self._on_goal_pose, 10)
         self.create_subscription(MissionStatus, '/mission/status',
                                  self._on_status, latched)
-        self.create_subscription(MissionPlan, '/mission/plan',
-                                 self._on_plan, latched)
         if self.show_sim_spray_status:
             self.create_subscription(
                 Bool, '/relay/sim/channel_1_active',
@@ -545,10 +569,6 @@ class Nav2QtNode(Node):
             'load': self.create_client(LoadManualMission,
                                        '/mission/load_manual'),
             'start': self.create_client(Trigger, '/mission/start'),
-            'pause': self.create_client(Trigger, '/mission/pause'),
-            'resume': self.create_client(Trigger, '/mission/resume'),
-            'skip': self.create_client(Trigger, '/mission/skip_current'),
-            'cancel': self.create_client(Trigger, '/mission/cancel'),
             'abort_and_home': self.create_client(
                 Trigger, '/mission/abort_and_home'),
             'reinitialize_global_localization': self.create_client(
@@ -580,9 +600,6 @@ class Nav2QtNode(Node):
     def _on_status(self, message):
         self.status = message
 
-    def _on_plan(self, message):
-        self.plan = message
-
     def _on_sim_relay(self, channel, message):
         self.sim_relay_active[channel] = bool(message.data)
 
@@ -604,7 +621,7 @@ class Nav2QtNode(Node):
     def _target_constant(name, fallback):
         return int(getattr(ManualMissionTarget, name, fallback))
 
-    def build_manual_request(self, start_pose, points, spray_duration,
+    def build_manual_request(self, start_pose, points,
                              return_home_after_finish, prefix):
         request = LoadManualMission.Request()
         request.header.stamp = self.get_clock().now().to_msg()
@@ -933,9 +950,10 @@ class Nav2Gui(QWidget):
     def __init__(self, node):
         super().__init__()
         self.node = node
-        self.editor = MissionEditor()
+        self.editor = MissionEditor(getattr(
+            node, 'default_arm_spray_duration_sec',
+            DEFAULT_ARM_SPRAY_DURATION_SEC))
         self.save_directory = DEFAULT_SAVE_DIRECTORY
-        self.save_path = timestamped_mission_path(self.save_directory)
         self.candidate = None
         self.candidate_sequence = 0
         self.consumed_goal_sequence = 0
@@ -953,7 +971,7 @@ class Nav2Gui(QWidget):
 
     def _build_ui(self):
         self.setWindowTitle('WVCSC 导航喷洒控制器')
-        self.setGeometry(180, 100, 1360, 900)
+        self.setGeometry(180, 100, 1200, 780)
         layout = QVBoxLayout()
 
         task_layout = QGridLayout()
@@ -963,40 +981,33 @@ class Nav2Gui(QWidget):
         self.point_type_combo.addItem('通行点', POINT_TRANSIT)
         self.point_type_combo.addItem('病株检查点', POINT_INSPECT)
         self.point_type_combo.addItem('终点', POINT_FINISH)
-        self.add_point_button = QPushButton('使用最新目标为机械臂基座停靠位')
-        self.capture_tree_button = QPushButton('使用下一目标为树中心')
+        self.record_point_button = QPushButton('记录当前点')
+        self.wide_spray_checkbox = QCheckBox('开启广域喷洒')
+        self.wide_spray_checkbox.setToolTip(
+            '驶向新点的来程区段开启；到达该点后自动关闭。')
         self.start_task_button = QPushButton('开始任务')
         task_layout.addWidget(self.record_start_button, 0, 0)
         task_layout.addWidget(QLabel('新点类型:'), 0, 1)
         task_layout.addWidget(self.point_type_combo, 0, 2)
-        task_layout.addWidget(self.add_point_button, 0, 3)
-        task_layout.addWidget(self.capture_tree_button, 0, 4)
+        task_layout.addWidget(self.record_point_button, 0, 3)
+        task_layout.addWidget(self.wide_spray_checkbox, 0, 4)
         task_layout.addWidget(self.start_task_button, 0, 5, 1, 2)
         task_layout.addWidget(self.relocalize_button, 0, 7)
-        task_layout.addWidget(QLabel('病株默认喷洒时长 (s):'), 1, 0)
-        self.duration_spin = QDoubleSpinBox()
-        self.duration_spin.setRange(0.2, 10.0)
-        self.duration_spin.setSingleStep(0.1)
-        self.duration_spin.setValue(self.editor.spray_duration)
-        task_layout.addWidget(self.duration_spin, 1, 1)
-        task_layout.addWidget(QLabel('默认停留 (s):'), 1, 2)
-        self.dwell_spin = QDoubleSpinBox()
-        self.dwell_spin.setRange(0.0, 60.0)
-        self.dwell_spin.setSingleStep(0.5)
-        task_layout.addWidget(self.dwell_spin, 1, 3)
-        self.wide_spray_checkbox = QCheckBox('驶向该点（进入区段）开启广域喷洒')
-        self.wide_spray_checkbox.setChecked(True)
-        task_layout.addWidget(self.wide_spray_checkbox, 1, 4, 1, 3)
         layout.addLayout(task_layout)
 
         self.candidate_label = QLabel('最新RViz机械臂基座点: 未收到 /manual_goal_pose')
         self.capture_label = QLabel('采集状态: 请选择点类型并点击 RViz 2D Goal')
         self.start_label = QLabel('起点: 未记录')
         self.return_home_checkbox = QCheckBox('完成后返回起点')
+        self.image_toggle = QCheckBox('显示相机/YOLO画面')
+        option_layout = QHBoxLayout()
+        option_layout.addWidget(self.return_home_checkbox)
+        option_layout.addWidget(self.image_toggle)
+        option_layout.addStretch(1)
         layout.addWidget(self.candidate_label)
         layout.addWidget(self.capture_label)
         layout.addWidget(self.start_label)
-        layout.addWidget(self.return_home_checkbox)
+        layout.addLayout(option_layout)
 
         self.wide_relay_label = None
         self.arm_relay_label = None
@@ -1008,13 +1019,12 @@ class Nav2Gui(QWidget):
             relay_layout.addWidget(self.arm_relay_label)
             layout.addLayout(relay_layout)
 
-        self.table = QTableWidget(0, 11)
+        self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(
-            ['序号', '类型', '机械臂基座 X (m)', '机械臂基座 Y (m)', '车头 yaw (rad)',
-             '树相对基座 X (m)', '树相对基座 Y (m)', '侧位',
-             '驶向本点广域喷洒（进入区段）', '病株喷洒(s)', '停留(s)'])
+            ['序号', '类型', '机械臂基座位姿 (x, y, yaw)'])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table)
 
@@ -1029,16 +1039,10 @@ class Nav2Gui(QWidget):
         layout.addLayout(edit_layout)
 
         control_layout = QHBoxLayout()
-        self.pause_button = QPushButton('暂停')
-        self.resume_button = QPushButton('继续')
-        self.skip_button = QPushButton('跳过当前')
-        self.cancel_button = QPushButton('取消任务')
-        self.abort_home_button = QPushButton('终止作业并回HOME')
+        self.abort_home_button = QPushButton('终止任务')
+        self.abort_home_button.setStyleSheet('font-weight: bold;')
         self.home_button = QPushButton('返回起点')
-        self.reset_button = QPushButton('重置任务')
-        for button in (self.pause_button, self.resume_button, self.skip_button,
-                       self.cancel_button, self.abort_home_button,
-                       self.home_button, self.reset_button):
+        for button in (self.abort_home_button, self.home_button):
             control_layout.addWidget(button)
         layout.addLayout(control_layout)
 
@@ -1059,29 +1063,29 @@ class Nav2Gui(QWidget):
         manager_layout.addWidget(self.log_area, 1)
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(manager_panel)
-        splitter.addWidget(RosImagePanel(self.node))
+        self.image_panel = RosImagePanel(self.node, active=False)
+        self.image_panel.setVisible(False)
+        splitter.addWidget(self.image_panel)
         splitter.setSizes([520, 780])
+        self.output_splitter = splitter
         layout.addWidget(splitter, 1)
         self.setLayout(layout)
 
         self.record_start_button.clicked.connect(self._record_start)
         self.relocalize_button.clicked.connect(self._relocalize_and_clear)
-        self.add_point_button.clicked.connect(self._add_point)
-        self.capture_tree_button.clicked.connect(self._capture_tree_center)
+        self.record_point_button.clicked.connect(self._record_point)
+        self.point_type_combo.currentIndexChanged.connect(
+            self._on_point_type_changed)
         self.start_task_button.clicked.connect(self._start_task)
         self.delete_button.clicked.connect(self._delete_point)
         self.up_button.clicked.connect(lambda: self._move_point(-1))
         self.down_button.clicked.connect(lambda: self._move_point(1))
         self.clear_button.clicked.connect(self._clear_points)
-        self.pause_button.clicked.connect(lambda: self._trigger('pause'))
-        self.resume_button.clicked.connect(lambda: self._trigger('resume'))
-        self.skip_button.clicked.connect(lambda: self._trigger('skip'))
-        self.cancel_button.clicked.connect(lambda: self._trigger('cancel'))
         self.abort_home_button.clicked.connect(self._abort_and_home)
         self.home_button.clicked.connect(lambda: self._trigger('return_home'))
-        self.reset_button.clicked.connect(lambda: self._trigger('reset'))
         self.save_button.clicked.connect(self._save_dialog)
         self.load_button.clicked.connect(self._load_dialog)
+        self.image_toggle.toggled.connect(self._set_image_panel_visible)
 
     def _spin_ros(self):
         try:
@@ -1089,6 +1093,25 @@ class Nav2Gui(QWidget):
         except RuntimeError:
             return
         self._refresh()
+
+    def _set_image_panel_visible(self, visible):
+        self.image_panel.setVisible(bool(visible))
+        self.image_panel.set_active(bool(visible))
+        if visible:
+            self.output_splitter.setSizes([520, 780])
+
+    def _update_record_point_button(self, *_args):
+        if self.pending_dock_pose is not None:
+            self.record_point_button.setText('记录树中心')
+        elif self.point_type_combo.currentData() == POINT_INSPECT:
+            self.record_point_button.setText('记录病株停靠位')
+        else:
+            self.record_point_button.setText('记录当前点')
+
+    def _on_point_type_changed(self, *_args):
+        if self.point_type_combo.currentData() == POINT_FINISH:
+            self.wide_spray_checkbox.setChecked(False)
+        self._update_record_point_button()
 
     def _refresh(self):
         if self.node.goal_sequence != self.candidate_sequence:
@@ -1122,32 +1145,28 @@ class Nav2Gui(QWidget):
         self.record_start_button.setEnabled(
             editable and not has_start and self.relocalization_ready and fresh_initial)
         self.relocalize_button.setEnabled(editable)
-        self.point_type_combo.setEnabled(editable)
-        self.add_point_button.setEnabled(
+        waiting_for_tree = self.pending_dock_pose is not None
+        self.point_type_combo.setEnabled(editable and not waiting_for_tree)
+        self.wide_spray_checkbox.setEnabled(
+            editable and not waiting_for_tree and
+            self.point_type_combo.currentData() != POINT_FINISH)
+        required_sequence = (
+            self.pending_dock_sequence if waiting_for_tree
+            else self.consumed_goal_sequence)
+        self.record_point_button.setEnabled(
             editable and self.candidate is not None
-            and self.node.goal_sequence > self.consumed_goal_sequence)
-        self.capture_tree_button.setEnabled(
-            editable and self.pending_dock_pose is not None
-            and self.candidate is not None
-            and self.node.goal_sequence > self.pending_dock_sequence)
+            and self.node.goal_sequence > required_sequence)
+        self._update_record_point_button()
         self.start_task_button.setEnabled(
             editable and has_start and point_count >= 1)
         for button in (self.delete_button, self.up_button,
                        self.down_button, self.clear_button, self.save_button,
                        self.load_button):
             button.setEnabled(editable)
-        self.pause_button.setEnabled(not self.pending and state == MissionStatus.NAVIGATING)
-        self.resume_button.setEnabled(not self.pending and state == MissionStatus.PAUSED)
-        self.skip_button.setEnabled(not self.pending and state in {
-            MissionStatus.READY, MissionStatus.PAUSED,
-            MissionStatus.VERIFYING_STOP, MissionStatus.ARM_SPRAYING,
-            getattr(MissionStatus, 'DWELLING', -1)})
-        self.cancel_button.setEnabled(not self.pending and state in self.ACTIVE)
         self.abort_home_button.setEnabled(not self.pending)
         self.home_button.setEnabled(not self.pending and state in {
             MissionStatus.READY, MissionStatus.PAUSED,
             MissionStatus.VERIFYING_STOP, MissionStatus.MISSION_COMPLETED})
-        self.reset_button.setEnabled(not self.pending and state in self.TERMINAL)
         if not has_start:
             if not self.relocalization_ready:
                 self.start_label.setText('起点: 等待 AMCL 全局重定位服务成功')
@@ -1228,6 +1247,12 @@ class Nav2Gui(QWidget):
 
         future.add_done_callback(finished)
 
+    def _record_point(self):
+        if self.pending_dock_pose is not None:
+            self._capture_tree_center()
+            return
+        self._add_point()
+
     def _add_point(self):
         if self.candidate is None:
             return
@@ -1237,7 +1262,7 @@ class Nav2Gui(QWidget):
             self.pending_dock_sequence = self.node.goal_sequence
             self.consumed_goal_sequence = self.node.goal_sequence
             self.capture_label.setText(
-                '采集状态: 已记录病株机械臂基座停靠位；请在 RViz 点击树中心，再点击“使用下一目标为树中心”')
+                '采集状态: 已记录病株机械臂基座停靠位；请在 RViz 点击树中心，再点击“记录树中心”')
             self._log('已记录病株机械臂基座停靠位，等待树中心点击')
             self._publish_markers()
             return
@@ -1246,8 +1271,7 @@ class Nav2Gui(QWidget):
             self.candidate,
             point_type=point_type,
             wide_spray_on_approach=self.wide_spray_checkbox.isChecked(),
-            arm_spray_duration_sec=self.duration_spin.value(),
-            dwell_time_sec=self.dwell_spin.value())
+            arm_spray_duration_sec=self.editor.spray_duration)
         self.consumed_goal_sequence = self.node.goal_sequence
         self._update_table()
         self._log(f'已添加{self._point_type_label(point_type)} {len(self.editor.points)}')
@@ -1272,6 +1296,7 @@ class Nav2Gui(QWidget):
             tree_base_z_m=self.candidate.position.z,
             point_type=POINT_INSPECT,
             work_side=work_side,
+            arm_spray_duration_sec=self.editor.spray_duration,
             tree_pose=copy_pose(self.candidate),
         )
         error = ik_recording_range_error(
@@ -1304,8 +1329,7 @@ class Nav2Gui(QWidget):
             point_type=POINT_INSPECT,
             work_side=work_side,
             wide_spray_on_approach=self.wide_spray_checkbox.isChecked(),
-            arm_spray_duration_sec=self.duration_spin.value(),
-            dwell_time_sec=self.dwell_spin.value(),
+            arm_spray_duration_sec=self.editor.spray_duration,
             tree_pose=self.candidate)
         self.consumed_goal_sequence = self.node.goal_sequence
         self.pending_dock_pose = None
@@ -1349,7 +1373,6 @@ class Nav2Gui(QWidget):
         if self.editor.start_pose is None or not points:
             self._log('请先记录起点和作业目标')
             return
-        self.editor.spray_duration = self.duration_spin.value()
         self.editor.return_home_after_finish = self.return_home_checkbox.isChecked()
         self._log(f'路线预览: {route_timeline(points)}')
         if self.node.status and self.node.status.state in self.TERMINAL:
@@ -1360,7 +1383,7 @@ class Nav2Gui(QWidget):
     def _load_manual(self, points, prefix):
         try:
             request = self.node.build_manual_request(
-                self.editor.start_pose, points, self.editor.spray_duration,
+                self.editor.start_pose, points,
                 self.editor.return_home_after_finish, prefix)
         except ValueError as error:
             self._log(f'任务数据无效: {error}')
@@ -1417,100 +1440,22 @@ class Nav2Gui(QWidget):
                 range_error = simulation_parking_clearance_error(
                     point,
                     getattr(self.node, 'simulation_parking_clearance_check', False))
+            point_type = self._point_type_label(point.point_type)
+            if point.wide_spray_on_approach:
+                point_type += '（广域）'
             static_cells = (
                 (0, QTableWidgetItem(str(row + 1))),
-                (2, QTableWidgetItem(f'{point.pose.position.x:.3f}')),
-                (3, QTableWidgetItem(f'{point.pose.position.y:.3f}')),
-                (4, QTableWidgetItem(f'{pose_yaw(point.pose):.3f}')),
+                (1, QTableWidgetItem(point_type)),
+                (2, QTableWidgetItem(
+                    f'({point.pose.position.x:.3f}, '
+                    f'{point.pose.position.y:.3f}, '
+                    f'{pose_yaw(point.pose):.3f})')),
             )
             for column, item in static_cells:
                 if range_error is not None:
                     item.setBackground(QColor(255, 226, 226))
                     item.setToolTip(range_error)
                 self.table.setItem(row, column, item)
-            self.table.setCellWidget(
-                row, 1, self._point_type_combo(point))
-            self.table.setCellWidget(
-                row, 5, self._offset_spin(point.tree_x_m, point, 'tree_x_m'))
-            self.table.setCellWidget(
-                row, 6, self._offset_spin(point.tree_y_m, point, 'tree_y_m'))
-            self.table.setCellWidget(row, 7, self._work_side_combo(point))
-            self.table.setCellWidget(row, 8, self._wide_spray_checkbox(point))
-            self.table.setCellWidget(
-                row, 9, self._duration_cell(point, 'arm_spray_duration_sec',
-                                             0.2, 10.0, 0.1))
-            self.table.setCellWidget(
-                row, 10, self._duration_cell(point, 'dwell_time_sec',
-                                              0.0, 60.0, 0.5))
-
-    def _point_type_combo(self, point):
-        combo = QComboBox()
-        for label, value in (
-                ('通行点', POINT_TRANSIT),
-                ('病株检查点', POINT_INSPECT),
-                ('终点', POINT_FINISH)):
-            combo.addItem(label, value)
-        combo.setCurrentIndex(combo.findData(point.point_type))
-
-        def changed(_index):
-            point.point_type = combo.currentData()
-            if point.point_type == POINT_INSPECT:
-                inferred = work_side_from_tree_y(point.tree_y_m)
-                if inferred != WORK_SIDE_UNSPECIFIED:
-                    point.work_side = inferred
-            elif point.point_type == POINT_FINISH:
-                point.wide_spray_on_approach = False
-                QTimer.singleShot(0, self._update_table)
-            self._publish_markers()
-
-        combo.currentIndexChanged.connect(changed)
-        return combo
-
-    def _work_side_combo(self, point):
-        combo = QComboBox()
-        for label, value in (
-                ('未指定', WORK_SIDE_UNSPECIFIED),
-                ('左侧 (+Y)', WORK_SIDE_LEFT),
-                ('右侧 (-Y)', WORK_SIDE_RIGHT)):
-            combo.addItem(label, value)
-        combo.setCurrentIndex(combo.findData(point.work_side))
-        combo.currentIndexChanged.connect(
-            lambda _index: setattr(point, 'work_side', combo.currentData()))
-        return combo
-
-    def _wide_spray_checkbox(self, point):
-        checkbox = QCheckBox()
-        checkbox.setChecked(
-            point.wide_spray_on_approach
-            if point.point_type != POINT_FINISH else False)
-        checkbox.setEnabled(point.point_type != POINT_FINISH)
-        checkbox.toggled.connect(
-            lambda checked: setattr(point, 'wide_spray_on_approach',
-                                    bool(checked)))
-        return checkbox
-
-    @staticmethod
-    def _duration_cell(point, attribute, minimum, maximum, step):
-        spin = QDoubleSpinBox()
-        spin.setRange(minimum, maximum)
-        spin.setDecimals(2)
-        spin.setSingleStep(step)
-        spin.setValue(float(getattr(point, attribute)))
-        spin.valueChanged.connect(
-            lambda current: setattr(point, attribute, float(current)))
-        return spin
-
-    def _offset_spin(self, value, target, attribute):
-        spin = QDoubleSpinBox()
-        spin.setRange(-10.0, 10.0)
-        spin.setDecimals(3)
-        spin.setSingleStep(0.05)
-        spin.setValue(value)
-        def changed(current):
-            setattr(target, attribute, float(current))
-            self._publish_markers()
-        spin.valueChanged.connect(changed)
-        return spin
 
     def _delete_point(self):
         row = self.table.currentRow()
@@ -1549,14 +1494,12 @@ class Nav2Gui(QWidget):
             return
         path = non_overwriting_json_path(path)
         try:
-            self.editor.spray_duration = self.duration_spin.value()
             self.editor.return_home_after_finish = self.return_home_checkbox.isChecked()
             self.editor.save(path)
         except (OSError, ValueError, KeyError) as error:
             QMessageBox.warning(self, '保存失败', str(error))
             return
         self.save_directory = os.path.dirname(path) or DEFAULT_SAVE_DIRECTORY
-        self.save_path = timestamped_mission_path(self.save_directory)
         self._log(f'已保存任务: {path}')
 
     def _load_dialog(self):
@@ -1570,8 +1513,6 @@ class Nav2Gui(QWidget):
             QMessageBox.warning(self, '加载失败', str(error))
             return
         self.save_directory = os.path.dirname(path) or DEFAULT_SAVE_DIRECTORY
-        self.save_path = timestamped_mission_path(self.save_directory)
-        self.duration_spin.setValue(self.editor.spray_duration)
         self.return_home_checkbox.setChecked(self.editor.return_home_after_finish)
         if self.editor.start_pose is not None:
             self.start_label.setText(

@@ -2,16 +2,16 @@ wvcsc_spray_task:
   ros__parameters:
     # Real model is leaf-only; ROS interface uses the shared diseased_target name.
     target_class_name: diseased_target
-    tree_confidence: 0.25
-    fruit_confidence: 0.25
+    disease_confidence: 0.25
     # One real-tree task may spray only the two highest-confidence leaves.
     max_targets_per_tree: 2
+    post_spray_home_delay_sec: 2.0
     target_post_recenter_min_confidence: 0.30
     # Real hardware follows the same coarse-MoveIt + Visual Servo path as
-    # simulation.  A completed Servo TIMEOUT, TARGET_STALE, or singularity
-    # result sprays once from the current servo pose, then rechecks pending targets;
-    # collision, limit, direction, and safety-stop gates still prohibit that
-    # endpoint spray and require a separately preflighted recovery path.
+    # simulation.  TIMEOUT, TARGET_STALE, or output stall may spray once from
+    # the current servo pose, then recheck pending targets.  Singularity only
+    # permits observation recovery/retry; collision, limit, direction, and
+    # safety-stop gates still prohibit endpoint spray.
     spray_on_alignment_failure: true
 
     # Field-validated scans for both sides of alicia_base_link.  These are

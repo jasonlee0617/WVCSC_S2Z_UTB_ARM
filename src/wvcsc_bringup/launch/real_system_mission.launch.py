@@ -301,6 +301,8 @@ def _resolve_calibrations(context, *, launch_dir):
             # Keep the recorder's admission policy in sync with the arm
             # execution mode.  The real default remains joint presets.
             'observation_mode': LaunchConfiguration('observation_mode'),
+            'default_arm_spray_duration_sec': LaunchConfiguration(
+                'default_arm_spray_duration_sec'),
         }.items())
     success_actions = [
         LogInfo(msg=(
@@ -409,6 +411,8 @@ def generate_launch_description():
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.20'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
         DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
+        DeclareLaunchArgument(
+            'default_arm_spray_duration_sec', default_value='3.0'),
         DeclareLaunchArgument(
             'yolo_python_executable',
             default_value=os.path.expanduser(

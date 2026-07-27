@@ -1,4 +1,3 @@
-import json
 import numpy as np
 import pytest
 from std_msgs.msg import Header
@@ -7,35 +6,48 @@ from wvcsc_interfaces.msg import MissionStatus
 
 from wvcsc_rgb_vision.model_utils import (
     DISEASED_TARGET_CLASS_NAMES,
-    TREE_CLASS_NAMES,
-    canonical_class_name,
     validate_yolo_model,
 )
-from wvcsc_rgb_vision.disease_segmenter import DiseaseSegmenter
+from wvcsc_rgb_vision.disease_segmenter import DiseaseSegmenter, safest_mask_point
 from wvcsc_rgb_vision.disease_detector import DiseaseDetector
+from wvcsc_rgb_vision import disease_backend_factory
 from wvcsc_rgb_vision.perception_pipeline import (
-    PERCEPTION_DEBUG_DEFAULTS,
     Instance,
     Track,
     PerceptionPipeline,
-    capture_target_template,
     deduplicate_instances,
-    expanded_roi,
     match_target_template,
-    perception_debug_due,
-    perception_debug_json,
     track_matches,
-    safest_mask_point,
 )
+from wvcsc_rgb_vision.target_tracking import capture_target_template
+from wvcsc_rgb_vision.perception_output import (
+    annotated_image, instance_label, instance_to_detection)
 from wvcsc_rgb_vision.perception_types import DiseaseTarget
-from wvcsc_rgb_vision.tree_detector import TreeDetector
 
 
-def test_two_models_keep_independent_class_contracts():
-    assert TREE_CLASS_NAMES == {0: 'tree'}
+def test_disease_backend_factory_selects_only_explicit_backends(monkeypatch):
+    created = []
+
+    def fake_backend(*args, **kwargs):
+        created.append((args, kwargs))
+        return 'backend'
+
+    monkeypatch.setattr(
+        disease_backend_factory, 'DiseaseSegmenter', fake_backend)
+    assert disease_backend_factory.create_disease_backend(
+        'segment', 'weights.pt', 2, 'diseased_target',
+        strict_model_classes=True) == 'backend'
+    assert created == [(
+        ('weights.pt', 2, 'diseased_target'),
+        {'strict_model_classes': True},
+    )]
+    with pytest.raises(ValueError, match='segment.*detect'):
+        disease_backend_factory.create_disease_backend(
+            'unknown', 'weights.pt', 2, 'diseased_target')
+
+
+def test_disease_model_uses_the_shared_target_contract():
     assert DISEASED_TARGET_CLASS_NAMES == {0: 'diseased_target'}
-    assert canonical_class_name(0, TREE_CLASS_NAMES) == 'tree'
-    assert canonical_class_name(0, DISEASED_TARGET_CLASS_NAMES) == 'diseased_target'
 
 
 def test_deployment_weight_must_match_task_and_classes():
@@ -81,16 +93,11 @@ def test_detect_experiment_accepts_a_configured_disease_class_in_a_multiclass_mo
         validate_yolo_model(model, 'detect', {1: 'diseased_target'})
 
 
-def test_native_real_and_sim_names_map_to_shared_target_name():
-    assert canonical_class_name(0, {0: 'diseased_fruit'}) == 'diseased_target'
-    assert canonical_class_name(0, {0: 'disease_leaf'}) == 'diseased_target'
-
-
 def test_detection_message_exposes_only_shared_target_class():
     instance = Instance(
         'target-1', 'disease_leaf', 0.8,
         10.0, 20.0, 30.0, 40.0, 20.0, 30.0)
-    detection = PerceptionPipeline._detection(Header(), instance)
+    detection = instance_to_detection(Header(), instance)
     assert detection.results[0].hypothesis.class_id == 'diseased_target'
 
 
@@ -512,29 +519,6 @@ def test_track_matching_is_one_to_one_when_detector_order_changes():
     assert matches == {0: 1, 1: 0}
 
 
-def test_perception_debug_payload_has_the_stable_schema_and_rate_limit():
-    payload = json.loads(perception_debug_json(
-        event='target_valid', target_valid=True, selected_target_id='fruit-1',
-        candidate_target_id='fruit-9', tree_roi_xyxy=[10, 20, 100, 120],
-        diseased_targets=[{
-            'id': 'fruit-9', 'bbox_xyxy': [20, 30, 40, 50],
-            'aim_uv': [30, 40]}]))
-
-    assert set(payload) == set(PERCEPTION_DEBUG_DEFAULTS)
-    assert payload['event'] == 'target_valid'
-    assert payload['target_valid'] is True
-    assert payload['candidate_target_id'] == 'fruit-9'
-    assert payload['tree_roi_xyxy'] == [10, 20, 100, 120]
-    assert payload['diseased_targets'][0]['aim_uv'] == [30, 40]
-    assert perception_debug_due(None, 1.0, 5.0)
-    assert not perception_debug_due(1.0, 1.19, 5.0)
-    assert perception_debug_due(1.0, 1.20, 5.0)
-
-
-def test_roi_expansion_clips_to_image_bounds():
-    assert expanded_roi(5, 5, 30, 30, 100, 80, 0.10) == (2, 2, 33, 33)
-
-
 def test_mask_safe_point_is_inside_the_instance_polygon():
     polygon = np.array([[10, 10], [50, 10], [50, 50], [10, 50]], dtype=float)
     u, v = safest_mask_point(polygon, 64, 64)
@@ -562,12 +546,12 @@ def test_deduplication_keeps_highest_confidence_same_class_instance():
         [overlapping, near_center, best]) == [best]
 
 
-def test_pipeline_owns_tree_roi_and_restores_segment_safe_point_coordinates():
+def test_pipeline_runs_the_segmenter_on_the_full_camera_image():
     calls = []
 
     class Segmenter:
-        def detect(self, roi, confidence):
-            calls.append((roi.shape, confidence))
+        def detect(self, image, confidence):
+            calls.append((image.shape, confidence))
             return [stronger]
 
     stronger = DiseaseTarget(
@@ -575,52 +559,28 @@ def test_pipeline_owns_tree_roi_and_restores_segment_safe_point_coordinates():
     node = object.__new__(PerceptionPipeline)
     node._disease_backend = Segmenter()
     node.get_parameter = lambda name: SimpleNamespace(value={
-        'roi_padding': 0.0,
-        'fruit_confidence': 0.10,
+        'disease_confidence': 0.10,
     }[name])
-    tree = Instance('', 'tree', 1.0, 10, 20, 50, 60, 30, 40)
     image = np.zeros((100, 100, 3), dtype=np.uint8)
 
-    result = node._fruit_instances(image, tree)
+    result = node._fruit_instances(image)
 
-    assert calls == [((40, 40, 3), 0.10)]
+    assert calls == [((100, 100, 3), 0.10)]
     assert len(result) == 1
     assert (result[0].left, result[0].top, result[0].right, result[0].bottom) == (
-        15.0, 25.0, 35.0, 45.0)
-    assert (result[0].aim_u, result[0].aim_v) == (27.0, 39.0)
+        5.0, 5.0, 25.0, 25.0)
+    assert (result[0].aim_u, result[0].aim_v) == (17.0, 19.0)
 
 
-def test_tree_detector_translates_only_the_configured_detect_class():
-    class Box:
-        def __init__(self, class_id, confidence, xyxy):
-            self.cls = np.array([class_id])
-            self.conf = np.array([confidence])
-            self.xyxy = np.array([xyxy])
-
-    class Model:
-        def __call__(self, _image, **kwargs):
-            assert kwargs == {'verbose': False, 'conf': 0.25}
-            return [SimpleNamespace(
-                names={0: 'tree', 1: 'other'},
-                boxes=[Box(0, 0.9, [10, 20, 30, 50]), Box(1, 0.8, [1, 2, 3, 4])])]
-
-    detector = object.__new__(TreeDetector)
-    detector._class_names = {0: 'tree'}
-    detector._model = Model()
-
-    assert detector.detect(np.zeros((64, 64, 3), dtype=np.uint8), 0.25) == [
-        Instance('', 'tree', 0.9, 10.0, 20.0, 30.0, 50.0, 20.0, 35.0)]
-
-
-def test_disease_segmenter_keeps_roi_local_safe_mask_point():
+def test_disease_segmenter_keeps_full_image_safe_mask_point():
     class Box:
         cls = np.array([0])
         conf = np.array([0.8])
         xyxy = np.array([[5.0, 5.0, 25.0, 25.0]])
 
     class Model:
-        def __call__(self, roi, **kwargs):
-            assert roi.shape == (40, 40, 3)
+        def __call__(self, image, **kwargs):
+            assert image.shape == (100, 100, 3)
             assert kwargs == {'verbose': False, 'conf': 0.10, 'iou': 0.45}
             return [SimpleNamespace(
                 names={0: 'disease_leaf'},
@@ -633,7 +593,7 @@ def test_disease_segmenter_keeps_roi_local_safe_mask_point():
     segmenter._target_class_id = 0
     segmenter._target_class_name = 'diseased_target'
 
-    result = segmenter.detect(np.zeros((40, 40, 3), dtype=np.uint8), 0.10)
+    result = segmenter.detect(np.zeros((100, 100, 3), dtype=np.uint8), 0.10)
 
     assert len(result) == 1
     assert result[0].class_name == 'diseased_target'
@@ -643,7 +603,7 @@ def test_disease_segmenter_keeps_roi_local_safe_mask_point():
     assert 5.0 <= result[0].control_v <= 25.0
 
 
-def test_disease_detector_returns_only_roi_local_configured_boxes():
+def test_disease_detector_returns_only_full_image_configured_boxes():
     class Box:
         def __init__(self, class_id, confidence, xyxy):
             self.cls = np.array([class_id])
@@ -651,8 +611,8 @@ def test_disease_detector_returns_only_roi_local_configured_boxes():
             self.xyxy = np.array([xyxy])
 
     class Model:
-        def __call__(self, roi, **kwargs):
-            assert roi.shape == (40, 40, 3)
+        def __call__(self, image, **kwargs):
+            assert image.shape == (100, 100, 3)
             assert kwargs == {'verbose': False, 'conf': 0.25}
             return [SimpleNamespace(boxes=[
                 Box(1, 0.9, [5.0, 7.0, 25.0, 27.0]),
@@ -664,7 +624,7 @@ def test_disease_detector_returns_only_roi_local_configured_boxes():
     detector._target_class_id = 1
     detector._target_class_name = 'diseased_target'
 
-    result = detector.detect(np.zeros((40, 40, 3), dtype=np.uint8), 0.25)
+    result = detector.detect(np.zeros((100, 100, 3), dtype=np.uint8), 0.25)
 
     assert result == [DiseaseTarget(
         'diseased_target', 0.9, 5.0, 7.0, 25.0, 27.0)]
@@ -672,10 +632,10 @@ def test_disease_detector_returns_only_roi_local_configured_boxes():
     assert result[0].control_v is None
 
 
-def test_detect_backend_uses_box_center_after_roi_coordinate_restoration():
+def test_detect_backend_uses_the_full_image_box_center():
     class Detector:
-        def detect(self, roi, confidence):
-            assert roi.shape == (40, 40, 3)
+        def detect(self, image, confidence):
+            assert image.shape == (100, 100, 3)
             assert confidence == 0.25
             return [DiseaseTarget(
                 'diseased_target', 0.9, 5.0, 7.0, 25.0, 27.0)]
@@ -683,17 +643,15 @@ def test_detect_backend_uses_box_center_after_roi_coordinate_restoration():
     node = object.__new__(PerceptionPipeline)
     node._disease_backend = Detector()
     node.get_parameter = lambda name: SimpleNamespace(value={
-        'roi_padding': 0.0,
-        'fruit_confidence': 0.25,
+        'disease_confidence': 0.25,
     }[name])
-    tree = Instance('', 'tree', 1.0, 10, 20, 50, 60, 30, 40)
 
-    result = node._fruit_instances(np.zeros((100, 100, 3), dtype=np.uint8), tree)
+    result = node._fruit_instances(np.zeros((100, 100, 3), dtype=np.uint8))
 
     assert len(result) == 1
     assert (result[0].left, result[0].top, result[0].right, result[0].bottom) == (
-        15.0, 27.0, 35.0, 47.0)
-    assert (result[0].aim_u, result[0].aim_v) == (25.0, 37.0)
+        5.0, 7.0, 25.0, 27.0)
+    assert (result[0].aim_u, result[0].aim_v) == (15.0, 17.0)
     assert (result[0].aim_u, result[0].aim_v) == (
         result[0].center_u, result[0].center_v)
 
@@ -729,22 +687,22 @@ def test_visualization_labels_include_id_class_and_confidence():
     instance = Instance(
         'target-7', 'diseased_target', 0.937,
         10.4, 20.6, 30.4, 40.6, 20.0, 30.0)
-    assert PerceptionPipeline._label(instance) == (
+    assert instance_label(instance) == (
         'target-7 diseased_target 0.94')
 
 
 def test_fruit_visualization_draws_diseased_box_label_and_aim_point(monkeypatch):
     calls = {'rectangles': [], 'labels': [], 'circles': []}
-    monkeypatch.setattr('wvcsc_rgb_vision.perception_pipeline.cv2.rectangle',
+    monkeypatch.setattr('wvcsc_rgb_vision.perception_output.cv2.rectangle',
                         lambda *_args: calls['rectangles'].append(_args[1:]))
-    monkeypatch.setattr('wvcsc_rgb_vision.perception_pipeline.cv2.putText',
+    monkeypatch.setattr('wvcsc_rgb_vision.perception_output.cv2.putText',
                         lambda *_args: calls['labels'].append(_args[1:]))
-    monkeypatch.setattr('wvcsc_rgb_vision.perception_pipeline.cv2.circle',
+    monkeypatch.setattr('wvcsc_rgb_vision.perception_output.cv2.circle',
                         lambda *_args: calls['circles'].append(_args[1:]))
     diseased = Instance(
         'target-2', 'diseased_target', 0.8, 20, 21, 40, 41, 30, 31)
 
-    rendered = PerceptionPipeline._annotated_image(
+    rendered = annotated_image(
         np.zeros((64, 64, 3), dtype=np.uint8), [diseased],
         draw_diseased_aim_point=True)
 
@@ -761,18 +719,18 @@ def test_selected_target_has_a_separate_visual_highlight(monkeypatch):
     rectangles = []
     circles = []
     monkeypatch.setattr(
-        'wvcsc_rgb_vision.perception_pipeline.cv2.rectangle',
+        'wvcsc_rgb_vision.perception_output.cv2.rectangle',
         lambda *_args: rectangles.append(_args[1:]))
     monkeypatch.setattr(
-        'wvcsc_rgb_vision.perception_pipeline.cv2.putText',
+        'wvcsc_rgb_vision.perception_output.cv2.putText',
         lambda *_args: None)
     monkeypatch.setattr(
-        'wvcsc_rgb_vision.perception_pipeline.cv2.circle',
+        'wvcsc_rgb_vision.perception_output.cv2.circle',
         lambda *_args: circles.append(_args[1:]))
     selected = Instance(
         'target-2', 'diseased_target', 0.8, 20, 21, 40, 41, 30, 31)
 
-    PerceptionPipeline._annotated_image(
+    annotated_image(
         np.zeros((64, 64, 3), dtype=np.uint8), [selected],
         draw_diseased_aim_point=True, selected_target_id='target-2')
 
@@ -802,7 +760,7 @@ def test_visualization_images_keep_the_camera_header():
     assert publisher.messages[0].header is header
 
 
-def test_stage_visualizations_follow_the_inference_mode():
+def test_disease_visualization_follows_the_inference_mode():
     class Publisher:
         def __init__(self):
             self.messages = []
@@ -810,39 +768,28 @@ def test_stage_visualizations_follow_the_inference_mode():
         def publish(self, message):
             self.messages.append(message)
 
-    tree = Instance('', 'tree', 0.9, 1, 2, 31, 42, 16, 22)
     fruit = Instance('target-1', 'diseased_target', 0.8, 10, 12, 20, 24, 15, 18)
     node = object.__new__(PerceptionPipeline)
     node._tree_id = 'tree_01'
     node._bridge = SimpleNamespace(
         imgmsg_to_cv2=lambda *_args, **_kwargs: np.zeros(
             (64, 64, 3), dtype=np.uint8))
-    node._tree_pub = Publisher()
     node._fruit_pub = Publisher()
-    node._best_tree = lambda _image: tree
-    node._fruit_instances = lambda _image, _tree: [fruit]
+    node._fruit_instances = lambda _image: [fruit]
     node._assign_track_ids = lambda instances: instances
-    node._array = lambda _message, instances: list(instances)
     node.get_parameter = lambda _name: SimpleNamespace(value=True)
     published = []
-    node._publish_tree_visualization = lambda *_args: published.append('tree')
     node._publish_fruit_visualization = lambda *_args: published.append('fruit')
-    node._publish_perception_debug = lambda *_args: None
 
-    node._inference_mode = 'tree'
-    node._on_image(SimpleNamespace())
-    assert published == ['tree']
+    node._inference_mode = 'idle'
+    node._on_image(SimpleNamespace(header=Header()))
+    assert published == []
     assert len(node._fruit_pub.messages) == 0
 
-    node._inference_mode = 'fruits'
-    node._on_image(SimpleNamespace())
-    assert published == ['tree', 'tree', 'fruit']
+    node._inference_mode = 'disease'
+    node._on_image(SimpleNamespace(header=Header()))
+    assert published == ['fruit']
     assert len(node._fruit_pub.messages) == 1
-
-    node._best_tree = lambda _image: None
-    node._on_image(SimpleNamespace())
-    assert published == ['tree', 'tree', 'fruit', 'tree', 'fruit']
-    assert len(node._fruit_pub.messages) == 2
 
 
 def test_real_disease_target_limit_publishes_the_two_highest_confidences():

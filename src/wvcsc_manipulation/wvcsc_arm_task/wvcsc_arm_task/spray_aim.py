@@ -12,12 +12,21 @@ from wvcsc_interfaces.srv import ComputeSprayAim
 from .ik_observation import rotate_vector
 
 
+WORKING_RANGE_MIN_M = 0.2
+WORKING_RANGE_MAX_M = 2.0
+
+
 class SprayAimMixin:
     def _request_spray_aim(self, cancel_requested):
         """读取标定喷嘴像素；缺失标定时拒绝进入重心或视觉伺服。"""
-        working_range, range_error = self._dynamic_nozzle_range()
-        if working_range is None:
-            return False, range_error
+        working_range = float(getattr(self, '_working_range_override', 0.0))
+        if working_range > 0.0:
+            range_source = 'goal_override'
+        else:
+            working_range, range_error = self._dynamic_nozzle_range()
+            if working_range is None:
+                return False, range_error
+            range_source = 'tree_geometry'
         deadline = time.monotonic() + float(
             self.get_parameter('aim_service_timeout_sec').value)
         while not self._aim_client.service_is_ready():
@@ -55,7 +64,8 @@ class SprayAimMixin:
         self.get_logger().info(
             '[ARM][AIM] calibrated nozzle target='
             f'({values[0]:.1f},{values[1]:.1f})px '
-            f'aim_plane_range={values[4]:.2f}m image={values[2]}x{values[3]}')
+            f'aim_plane_range={values[4]:.2f}m source={range_source} '
+            f'image={values[2]}x{values[3]}')
         return True, ''
 
     def _dynamic_nozzle_range(self):
@@ -79,7 +89,9 @@ class SprayAimMixin:
                 denominator <= 0.2):
             return None, 'camera optical axis does not face the tree plane'
         working_range = numerator / denominator
-        if not math.isfinite(working_range) or not 0.2 <= working_range <= 2.0:
+        if (not math.isfinite(working_range) or
+                not WORKING_RANGE_MIN_M <= working_range <=
+                WORKING_RANGE_MAX_M):
             return None, (
                 f'dynamic nozzle range is outside geometric bounds: '
                 f'{working_range:.3f}m')

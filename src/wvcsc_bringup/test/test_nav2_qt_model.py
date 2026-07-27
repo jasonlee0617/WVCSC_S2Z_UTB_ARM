@@ -80,7 +80,30 @@ def test_new_editor_defaults_to_three_second_spray_and_timeline_is_explicit():
     assert editor.spray_duration == pytest.approx(3.0)
     assert editor.points[1].arm_spray_duration_sec == pytest.approx(3.0)
     assert nav2_qt.route_timeline(editor.points) == (
-        '1:TRANSIT 广域=ON | 2:INSPECT 广域=ON 病株=3.0s')
+        '起点 --[广域=ON]--> 1:TRANSIT | '
+        '1:TRANSIT --[广域=ON]--> 2:INSPECT 病株=3.0s')
+
+
+def test_editor_accepts_a_launch_selected_default_spray_duration():
+    editor = nav2_qt.MissionEditor(4.0)
+    editor.add_point(
+        _pose(2.0, 0.0), tree_y_m=-1.0,
+        point_type=nav2_qt.POINT_INSPECT,
+        work_side=nav2_qt.WORK_SIDE_RIGHT)
+
+    assert editor.spray_duration == pytest.approx(4.0)
+    assert editor.points[0].arm_spray_duration_sec == pytest.approx(4.0)
+    with pytest.raises(ValueError, match='default_arm_spray_duration_sec'):
+        nav2_qt.MissionEditor(10.1)
+
+
+def test_standard_navigation_points_uses_three_seconds_only_for_inspection():
+    path = (SCRIPT.parents[2] / 'wvcsc_mission_manager' / 'config' /
+            'navigation_points.json')
+    data = json.loads(path.read_text(encoding='utf-8'))
+
+    assert [point['arm_spray_duration_sec'] for point in data['route_points']] == [
+        0.0, 3.0, 3.0, 0.0, 0.0]
 
 
 def test_timestamped_mission_exports_never_reuse_an_existing_filename(tmp_path):
@@ -109,6 +132,20 @@ def test_qt_launch_exposes_the_ik_recording_admission_policy():
     assert "DeclareLaunchArgument('ik_recording_range_min_m', default_value='0.85')" in source
     assert "DeclareLaunchArgument('ik_recording_range_max_m', default_value='1.45')" in source
     assert "'simulation_parking_clearance_check', default_value='false'" in source
+    assert "'default_arm_spray_duration_sec', default_value='3.0'" in source
+
+
+def test_navigation_qt_keeps_spray_indicators_but_removes_extra_task_controls():
+    source = SCRIPT.read_text(encoding='utf-8')
+
+    assert "QTableWidget(0, 3)" in source
+    assert "QCheckBox('开启广域喷洒')" in source
+    assert "QPushButton('终止任务')" in source
+    assert "QCheckBox('显示相机/YOLO画面')" in source
+    assert "QLabel('广域喷洒: ● 关闭')" in source
+    assert "QLabel('喷嘴喷洒: ● 关闭')" in source
+    for obsolete in ('暂停', '继续', '跳过当前', '取消任务', '重置任务'):
+        assert f"QPushButton('{obsolete}')" not in source
 
 
 def test_simulation_parking_preflight_keeps_valid_work_distance_but_rejects_costmap_overlap():
@@ -193,7 +230,7 @@ def test_all_operator_point_types_submit_vehicle_base_goals():
     ]
 
     request = nav2_qt.Nav2QtNode.build_manual_request(
-        _RequestBuilder(), start, points, 3.0, False, 'semantic')
+        _RequestBuilder(), start, points, False, 'semantic')
 
     expected_home = nav2_qt.vehicle_pose_from_arm_anchor(start)
     assert request.home_pose.position.x == pytest.approx(expected_home.position.x)
@@ -306,7 +343,7 @@ def test_ik_request_rejects_an_out_of_range_inspection_point():
         work_side=nav2_qt.WORK_SIDE_RIGHT)
     with pytest.raises(ValueError, match='超出录入范围'):
         nav2_qt.Nav2QtNode.build_manual_request(
-            _RequestBuilder(), _pose(0.0, 0.0), [point], 3.0,
+            _RequestBuilder(), _pose(0.0, 0.0), [point],
             False, 'ik_range')
 
 
@@ -360,6 +397,9 @@ class _Widget:
     def setText(self, value):
         self.text = value
 
+    def currentData(self):
+        return nav2_qt.POINT_TRANSIT
+
 
 class _GuiProbe:
     ACTIVE = nav2_qt.Nav2Gui.ACTIVE
@@ -369,6 +409,7 @@ class _GuiProbe:
     _copy_work_point = staticmethod(nav2_qt.Nav2Gui._copy_work_point)
     _record_start = nav2_qt.Nav2Gui._record_start
     _relocalize_and_clear = nav2_qt.Nav2Gui._relocalize_and_clear
+    _update_record_point_button = nav2_qt.Nav2Gui._update_record_point_button
 
 
 def _gui(editor):
@@ -390,12 +431,11 @@ def _gui(editor):
     gui.required_initial_pose_sequence = 0
     gui.relocalization_ready = True
     for name in (
-            'record_start_button', 'add_point_button', 'start_task_button',
+            'record_start_button', 'record_point_button', 'start_task_button',
             'delete_button', 'up_button', 'down_button',
-            'clear_button', 'save_button', 'load_button', 'pause_button',
-            'resume_button', 'skip_button', 'cancel_button', 'home_button',
-            'reset_button', 'abort_home_button', 'point_type_combo',
-            'capture_tree_button', 'candidate_label', 'status_label',
+            'clear_button', 'save_button', 'load_button', 'home_button',
+            'abort_home_button', 'point_type_combo', 'wide_spray_checkbox',
+            'candidate_label', 'status_label',
             'start_label', 'capture_label', 'relocalize_button'):
         setattr(gui, name, _Widget())
     gui._publish_markers = lambda: None

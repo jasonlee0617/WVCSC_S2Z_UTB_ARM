@@ -2,33 +2,24 @@ wvcsc_perception_pipeline:
   ros__parameters:
     image_topic: /camera/color/image_raw
     selected_target_topic: /vision/selected_target_id
-    tree_detections_topic: /vision/tree_detections
     diseased_target_detections_topic: /vision/diseased_target_detections
     target_topic: /vision/target
-    tree_visualization_topic: /vision/tree_debug_image
     diseased_target_visualization_topic: /vision/diseased_target_debug_image
-    perception_debug_topic: /vision/perception_debug
-    perception_debug_rate_hz: 5.0
     inference_mode_topic: /vision/inference_mode
 
-    tree_model_path: yolov8s_real.pt
     # 默认保持分割：掩膜安全点作为 Target2D.center_u/v。
     # detect 实验模型需显式改为 detect，并配套 detect 权重。
     disease_model_backend: segment
-    fruit_model_path: yolov8s_seg_real.pt
-    tree_class_id: 0
-    tree_class_name: tree
+    disease_model_path: yolov8s_seg_real.pt
     target_class_id: 0
     target_class_name: diseased_target
     target_id_prefix: target
     # 实机权重原生为 segment:{0: disease_leaf}，ROS 输出统一为 diseased_target。
     strict_model_classes: true
 
-    tree_confidence: 0.25
-    fruit_confidence: 0.25
+    disease_confidence: 0.25
     # 实机仅发布置信度最高的两个病叶目标。
     max_diseased_targets: 2
-    roi_padding: 0.10
     track_iou_threshold: 0.20
     track_center_distance_px: 50.0
     track_max_missed_frames: 5
@@ -43,5 +34,4 @@ wvcsc_perception_pipeline:
     target_template_min_padding_px: 6.0
     target_template_search_radius_px: 80.0
     target_template_min_score: 0.55
-    tree_lock_iou_threshold: 0.20
     publish_visualization: true

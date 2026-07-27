@@ -232,6 +232,23 @@ def test_simulation_accepts_only_an_aborted_goal_that_passes_docking_gate():
     assert harness.relay_commands[0][:3] == (1, False, 0.0)
 
 
+def test_transit_arrival_disables_wide_spray_before_any_dwell_or_next_point():
+    harness = _Harness()
+    transit = Target(
+        'transit_1', 3.0, 2.0, 0.0, 0.0, (3.4, 0.2, 0.0),
+        point_type=PointType.TRANSIT, wide_spray_on_approach=True,
+        dwell_time_sec=1.0)
+    harness.core = MissionCore()
+    harness.core.load('transit_demo', [transit])
+    harness.core.state = MissionState.NAVIGATING
+
+    MissionManager._navigation_arrived(harness)
+
+    assert harness.core.state == MissionState.VERIFYING_STOP
+    assert harness.relay_commands == [
+        (1, False, 0.0, 'transit_1: disable wide spray at stop')]
+
+
 def test_initial_nav_rejection_retries_while_lifecycle_activates():
     retrying = _Harness()
     retrying._initial_nav_started = 0.0

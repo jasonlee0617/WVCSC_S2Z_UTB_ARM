@@ -23,10 +23,7 @@ from sensor_msgs.msg import Image
 from tf2_ros import TransformBroadcaster
 from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.msg import MissionStatus
-from wvcsc_simulation.data_acquisition.yolo_seed_dataset import (
-    copy_tree_detect_sample,
-    write_fruit_seg_sample,
-)
+from wvcsc_simulation.data_acquisition.yolo_seed_dataset import write_fruit_seg_sample
 
 
 TARGETS = (
@@ -126,8 +123,6 @@ class DirectCapture(Node):
                 self.args.fruit_output, image,
                 f'seed_{self.args.orchard_seed}_{tree_id}',
                 self.args.split, metadata)
-            copy_tree_detect_sample(
-                self.args.tree_output, self.args.fruit_output, record)
             self.captured = True
             self.pending = False
             self.get_logger().info(f'captured {record["image"]}')
@@ -136,7 +131,7 @@ class DirectCapture(Node):
             self.done = True
 
     def _feedback(self, feedback_message):
-        if feedback_message.feedback.phase == ExecuteSpray.Feedback.SCANNING_TREE:
+        if feedback_message.feedback.phase == ExecuteSpray.Feedback.DETECTING_TARGETS:
             self.pending = True
 
     def _set_robot_pose(self):
@@ -163,6 +158,7 @@ class DirectCapture(Node):
         goal.tree_hint.header.frame_id = 'map'
         goal.tree_hint.point.x = tree_x
         goal.tree_hint.point.y = tree_y
+        goal.working_range_m = 0.0
         self.goal_future = self.spray.send_goal_async(
             goal, feedback_callback=self._feedback)
         self.goal_future.add_done_callback(self._goal_response)
@@ -240,7 +236,6 @@ class DirectCapture(Node):
 def _arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--fruit-output', required=True)
-    parser.add_argument('--tree-output', required=True)
     parser.add_argument('--orchard-seed', type=int, required=True)
     parser.add_argument('--split', choices=('train', 'val'), required=True)
     parser.add_argument('--diseased-fruit-ratio', type=float, default=0.50)

@@ -8,16 +8,7 @@
 import math
 
 from .observation_flow import _build_candidate
-
-
-DEFAULT_JOINT_PRESETS_DEG = {
-    'center': (95.3, -136.9, -71.0, 7.7, 57.3, -4.4),
-    'fan_left': (52.2, -131.7, -55.4, -58.9, 76.5, 18.2),
-    'fan_right': (118.5, -129.4, -55.8, 47.6, 66.2, -17.1),
-    'right_center': (-105.4, -127.8, -50.5, -15.4, 71.2, -4.9),
-    'right_fan_left': (-139.8, -128.6, -57.3, -70.1, 79.7, 13.0),
-    'right_fan_right': (-70.8, -126.8, -50.6, 32.2, 69.8, -12.1),
-}
+from .spray_config import DEFAULT_JOINT_PRESETS_DEG
 
 
 class JointPresetObservationMixin:
@@ -73,8 +64,6 @@ class JointPresetObservationMixin:
             '[ARM][OBSERVE] mode=joint_presets rejects tree too close '
             f'to the base Y axis: y={tree_in_base[1]:.3f} m, '
             f'epsilon={epsilon:.3f} m')
-        self._publish_observation_debug(
-            'search_failed', rejection_reason=self._observation_failure_reason)
         return False
 
     def _prepare_joint_preset_observation_candidates(self):
@@ -88,8 +77,6 @@ class JointPresetObservationMixin:
             self.get_logger().error(
                 '[ARM][OBSERVE] mode=joint_presets has no configured presets '
                 f'for side={self._joint_preset_side or "none"}')
-            self._publish_observation_debug(
-                'search_failed', rejection_reason=self._observation_failure_reason)
             return False
         for index, (name, joints) in enumerate(presets):
             candidate = _build_candidate(

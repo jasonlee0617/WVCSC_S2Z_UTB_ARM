@@ -1,23 +1,21 @@
 # model_utils.py
 """
-两阶段 YOLO 感知节点的模型路径解析与合规性检验工具。
+病态目标 YOLO 感知节点的模型路径解析与合规性检验工具。
 
 职责：
-1. 定义感知任务中使用的标准类别映射 (Tree / Diseased Target)。
+1. 定义感知任务中使用的标准病态目标类别映射。
 2. 在加载 YOLO 模型前进行“快速失败 (Fail-fast)”校验：确保模型的任务类型
     (detect/segment) 和类别名称完全符合预期。
 3. 统一处理模型权重文件的路径（支持绝对路径与 ROS 包共享目录的相对路径）。
 """
 
 from pathlib import Path
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 
 
-# 第一阶段 (Tree Detection) 的类别映射 (ID 0 对应 'tree')
-TREE_CLASS_NAMES = {0: 'tree'}
-
-# 第二阶段 (病态目标分割) 的统一外部类别名。
+# 病态目标的统一外部类别名。
 DISEASED_TARGET_CLASS_NAMES = {0: 'diseased_target'}
 
 # 权重文件保留各自训练时的原生类别名；ROS 输出统一为 diseased_target。
@@ -28,33 +26,6 @@ DISEASED_TARGET_CLASS_ALIASES = {
 }
 DISEASED_TARGET_NATIVE_CLASS_NAMES = frozenset(
     {'diseased_fruit', 'disease_leaf'})
-
-
-def canonical_class_name(class_id, model_names):
-    """
-    从 YOLO 模型输出中提取标准化的类别名称。
-
-    不同版本的 YOLO 或不同训练脚本导出的模型，其 `.names` 属性可能是
-    Python 字典、列表或元组。此函数统一了获取类别名称的接口。
-
-    Args:
-        class_id (int): YOLO 推理结果中的类别索引。
-        model_names (dict, list, tuple): 模型的 `.names` 属性。
-
-    Returns:
-        str: 对应索引的标准类别名称，如果找不到则返回 `cls{id}` 格式。
-    """
-    class_id = int(class_id)
-    if isinstance(model_names, dict):
-        # 处理字典形式的 names (YOLOv8 默认)
-        name = str(model_names.get(
-            class_id, model_names.get(str(class_id), f'cls{class_id}')))
-        return DISEASED_TARGET_CLASS_ALIASES.get(name, name)
-    if isinstance(model_names, (list, tuple)) and 0 <= class_id < len(model_names):
-        # 处理列表或元组形式的 names
-        name = str(model_names[class_id])
-        return DISEASED_TARGET_CLASS_ALIASES.get(name, name)
-    return f'cls{class_id}'
 
 
 def validate_yolo_model(
@@ -102,11 +73,29 @@ def validate_yolo_model(
             f'native_names={actual_names}, canonical_names={canonical_names}')
 
 
+def load_yolo_model(model_path, expected_task, expected_names, *, exact_names=False):
+    """Load and validate one disease-model checkpoint once for every backend."""
+    try:
+        from ultralytics import YOLO
+    except ImportError as error:
+        raise RuntimeError(
+            f'YOLO runtime import failed with {sys.executable}: {error}. '
+            'Set yolo_python_executable to the isolated WVCSC YOLO environment.'
+        ) from error
+    resolved_path = resolve_yolo_model_path(model_path)
+    if not Path(resolved_path).is_file():
+        raise FileNotFoundError(f'YOLO weight file is missing: {resolved_path}')
+    model = YOLO(resolved_path)
+    validate_yolo_model(
+        model, expected_task, expected_names, exact_names=exact_names)
+    return model
+
+
 def resolve_yolo_model_path(path_value):
     """
     解析 YOLO 权重文件的绝对路径。
 
-    允许在 `vision_sim.yaml` 中通过相对路径（如 `yolov8s_sim.pt`）
+    允许在 `vision_sim.yaml` 中通过相对路径（如 `yolov8s_seg_sim.pt`）
     引用位于该功能包 `share` 目录下的模型权重。
 
     Args:
@@ -120,6 +109,6 @@ def resolve_yolo_model_path(path_value):
     if path.is_absolute():
         return str(path)
     # 如果是相对路径，将其解析为 ROS 包共享目录下的 `models` 子目录
-    # 解析结果例如：/opt/ros/humble/share/wvcsc_rgb_vision/models/yolov8s_sim.pt
+    # 解析结果例如：/opt/ros/humble/share/wvcsc_rgb_vision/models/yolov8s_seg_sim.pt
     return str(
         Path(get_package_share_directory('wvcsc_rgb_vision')) / 'models' / path)

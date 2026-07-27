@@ -20,6 +20,8 @@ wvcsc_spray_task:
     # 喷洒时长边界，防止极端值导致硬件损坏或逻辑死锁。
     min_spray_duration: 0.2    # 最小喷洒时间（秒）
     max_spray_duration: 10.0   # 最大喷洒时间（秒）
+    # 整株目标处理和最终复检后，回 HOME 前的停留时间。
+    post_spray_home_delay_sec: 2.0
 
     # ----------------------------------------------------------------------
     # 2. 下游 Action (AlignTarget, Spray) 通讯超时
@@ -40,7 +42,6 @@ wvcsc_spray_task:
     # 3. 话题名称配置
     # ----------------------------------------------------------------------
     # 视觉感知节点发布的检测结果话题。
-    tree_detection_topic: "/vision/tree_detections"      # YOLO 树检测话题
     diseased_target_detection_topic: "/vision/diseased_target_detections"
     vision_target_topic: "/vision/target"                # 视觉伺服锁定的目标实体
 
@@ -69,8 +70,7 @@ wvcsc_spray_task:
     # 6. 视觉目标检测阈值与稳定门控
     # ----------------------------------------------------------------------
     # YOLO 置信度阈值。
-    tree_confidence: 0.10    # 树检测置信度阈值
-    fruit_confidence: 0.20   # 病果分割置信度阈值
+    disease_confidence: 0.20   # 病态目标检测置信度阈值
     target_class_name: diseased_target
     # 仿真保留一个或多个目标的完整队列。
     max_targets_per_tree: 0
@@ -79,7 +79,6 @@ wvcsc_spray_task:
     confirmation_frames: 3
 
     # 在不同视觉状态下等待检测结果的最长超时时间。
-    scan_pose_detection_timeout_sec: 5.0  # 扇形扫描等待树检测超时
     detection_timeout_sec: 4.0            # 果实检测阶段超时
     fruit_collection_settle_sec: 1.00     # 果实队列稳定等待时间
 
@@ -184,4 +183,3 @@ wvcsc_spray_task:
     observation_orientation_tolerance_rad: 0.01
 
     # 调试话题，用于发布候选位姿的评估结果。
-    observation_debug_topic: "/arm/observation_debug"

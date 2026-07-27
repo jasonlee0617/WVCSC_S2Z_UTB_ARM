@@ -17,7 +17,7 @@ def test_simulation_uses_the_shared_service_relay_contract():
     assert "'config', 'spray_actuator.yaml'" in LAUNCH_SOURCE
     assert "package='wvcsc_simulation', executable='sim_relay.py'" in LAUNCH_SOURCE
     assert 'guard_sim_relay' in LAUNCH_SOURCE
-    assert "'spray_on_alignment_failure': False" in LAUNCH_SOURCE
+    assert "'spray_on_alignment_failure': True" in LAUNCH_SOURCE
     assert "use_mission_manager, \"' == 'true' or '\"" in LAUNCH_SOURCE
 
 
@@ -145,7 +145,7 @@ def test_simulation_keeps_segmentation_as_the_default_disease_backend():
     ).read_text(encoding='utf-8'))['wvcsc_perception_pipeline']['ros__parameters']
 
     assert config['disease_model_backend'] == 'segment'
-    assert config['fruit_model_path'] == 'yolov8s_seg_sim.pt'
+    assert config['disease_model_path'] == 'yolov8s_seg_sim.pt'
     assert config['max_diseased_targets'] == 0
     assert config['target_reassociation_require_unique_candidate'] is False
 
@@ -233,6 +233,10 @@ def test_simulation_uses_qt_rviz_as_the_only_manual_task_source():
     assert "DeclareLaunchArgument('use_rviz', default_value='true')" \
         in LAUNCH_SOURCE
     assert "DeclareLaunchArgument('observation_mode', default_value='ik')" \
+        in LAUNCH_SOURCE
+    assert "'default_arm_spray_duration_sec', default_value='3.0'" \
+        in LAUNCH_SOURCE
+    assert "'default_arm_spray_duration_sec': default_arm_spray_duration_sec" \
         in LAUNCH_SOURCE
     assert "'simulation_parking_clearance_check': 'true'" in LAUNCH_SOURCE
     assert 'wvcsc_uav_gateway' not in LAUNCH_SOURCE

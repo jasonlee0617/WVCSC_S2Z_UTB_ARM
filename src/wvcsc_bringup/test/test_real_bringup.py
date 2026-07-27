@@ -124,7 +124,6 @@ def test_real_orchestration_uses_the_qt_mission_manager_only():
     assert "'arm_relay_channel': 2" in source
     assert "'arm_base_yaw_rad': 3.141592653589793" in source
     assert 'vision_real.yaml' in source
-    assert 'yolov8s_real.pt' in vision
     assert 'yolov8s_seg_real.pt' in vision
     assert vision_parameters['disease_model_backend'] == 'segment'
     assert 'target_class_name: diseased_target' in vision
@@ -218,6 +217,30 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     assert 'ActionClient(self, ExecuteSpray, \'/arm/execute_spray\')' in script
 
 
+def test_real_arm_spray_server_wrapper_starts_only_the_existing_backend():
+    wrapper = PACKAGE.parent / 'run_real_arm_spray_server.sh'
+    source = wrapper.read_text(encoding='utf-8')
+
+    assert wrapper.stat().st_mode & 0o111
+    assert 'real_arm_spray_test.launch.py' in source
+    assert 'use_qt_gui:=false "$@"' in source
+    assert 'ros2 action send_goal' not in source
+    assert '/relay/set' not in source
+    assert '/motion_control/command' not in source
+
+
+def test_arm_test_exposes_separate_ik_and_manual_working_ranges():
+    source = _source('real_arm_spray_test.launch.py')
+
+    for argument, default in (
+            ('working_range_min_m', '0.20'),
+            ('working_range_max_m', '2.00'),
+            ('default_working_range_m', '1.00'),
+            ('joint_preset_hint_distance_m', '1.00')):
+        assert f"'{argument}', default_value='{default}'" in source
+        assert f"LaunchConfiguration('{argument}')" in source
+
+
 def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
     real_config = yaml.safe_load((PACKAGE / 'config' / 'real' /
                                   'arm_task_real.yaml').read_text(
@@ -244,6 +267,10 @@ def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
         source = _source(launch_name)
         assert "'observation_mode', default_value='joint_presets'" in source
         assert "LaunchConfiguration('observation_mode')" in source
+
+    mission_source = _source('real_system_mission.launch.py')
+    assert "'default_arm_spray_duration_sec', default_value='3.0'" in mission_source
+    assert "'default_arm_spray_duration_sec': LaunchConfiguration(" in mission_source
     for launch_name in ('real_arm_spray_test.launch.py',
                         'real_orchestration.launch.py'):
         source = _source(launch_name)
@@ -254,9 +281,11 @@ def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
     assert 'joint_preset_center_deg' not in simulation_config
     assert 'spray_on_alignment_failure' not in simulation_config
     assert 'max_targets_per_tree: 0' in simulation_config
+    config_source = (PACKAGE.parent / 'wvcsc_manipulation' / 'wvcsc_arm_task' / 'wvcsc_arm_task' /
+                     'spray_config.py').read_text(encoding='utf-8')
+    assert "'spray_on_alignment_failure': False" in config_source
     task_source = (PACKAGE.parent / 'wvcsc_manipulation' / 'wvcsc_arm_task' / 'wvcsc_arm_task' /
                    'spray_task.py').read_text(encoding='utf-8')
-    assert "'spray_on_alignment_failure': False" in task_source
     assert 'SINGLE_SHOT_OPEN_LOOP_ALIGN' not in task_source
 
 

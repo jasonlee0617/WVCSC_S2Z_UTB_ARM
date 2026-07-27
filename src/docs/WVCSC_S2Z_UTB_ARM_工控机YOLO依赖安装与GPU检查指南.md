@@ -270,7 +270,6 @@ python3 -m venv --system-site-packages "$HOME/venvs/wvcsc_yolo_ros"
 将训练好的权重复制到：
 
 ```text
-~/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_rgb_vision/models/yolov8s_real.pt
 ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_rgb_vision/models/yolov8s_seg_real.pt
 ```
 
@@ -286,7 +285,6 @@ source install/setup.bash
 确认安装后的权重存在：
 
 ```bash
-ls -l "$(ros2 pkg prefix wvcsc_rgb_vision)/share/wvcsc_rgb_vision/models/yolov8s_real.pt"
 ls -l "$(ros2 pkg prefix wvcsc_rgb_vision)/share/wvcsc_rgb_vision/models/yolov8s_seg_real.pt"
 ```
 
@@ -306,10 +304,7 @@ from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 
 model_dir = Path(get_package_share_directory("wvcsc_rgb_vision")) / "models"
-contracts = [
-    ("yolov8s_real.pt", "detect", {0: "tree"}),
-    ("yolov8s_seg_real.pt", "segment", {0: "disease_leaf"}),
-]
+contracts = [("yolov8s_seg_real.pt", "segment", {0: "disease_leaf"})]
 
 for filename, expected_task, expected_names in contracts:
     model = YOLO(str(model_dir / filename))
@@ -376,9 +371,7 @@ ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
 检查：
 
 ```bash
-ros2 topic hz /vision/tree_debug_image
 ros2 topic hz /vision/diseased_target_debug_image
-ros2 topic echo /vision/perception_debug
 ros2 topic echo /vision/target
 ```
 

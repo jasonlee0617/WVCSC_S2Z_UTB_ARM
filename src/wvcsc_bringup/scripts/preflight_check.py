@@ -38,9 +38,8 @@ MISSION_PACKAGES = (
 MAPPING_PACKAGES = (
     'cartographer_ros', 'my_cartographer', 'joint_state_publisher', 'rviz2',
 )
-REAL_MODELS = ('yolov8s_real.pt', 'yolov8s_seg_real.pt')
+REAL_MODELS = ('yolov8s_seg_real.pt',)
 REAL_MODEL_CONTRACTS = (
-    ('yolov8s_real.pt', 'detect', {0: 'tree'}),
     ('yolov8s_seg_real.pt', 'segment', {0: 'disease_leaf'}),
 )
 
@@ -149,7 +148,7 @@ print('model contracts ok')
         failures.append(f'real YOLO model contract failed: {detail}')
         print(f'  [FAIL] real YOLO contracts: {detail}')
     else:
-        print('  [OK]   real YOLO contracts: tree + disease_leaf')
+        print('  [OK]   real YOLO contracts: disease_leaf')
 
 
 def _calibration_checks(args, failures):

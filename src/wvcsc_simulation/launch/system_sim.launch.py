@@ -179,6 +179,8 @@ def generate_launch_description():
     use_mission_manager = LaunchConfiguration('use_mission_manager')
     observation_mode = LaunchConfiguration('observation_mode')
     show_sim_spray_status = LaunchConfiguration('show_sim_spray_status')
+    default_arm_spray_duration_sec = LaunchConfiguration(
+        'default_arm_spray_duration_sec')
     arm_velocity_scaling = LaunchConfiguration('arm_velocity_scaling')
     arm_acceleration_scaling = LaunchConfiguration('arm_acceleration_scaling')
     planning_pipeline_id = LaunchConfiguration('planning_pipeline_id')
@@ -421,8 +423,8 @@ def generate_launch_description():
         'gripper_max_effort': 5.0,
         # 仿真默认走与实机相同的 IK 观察状态机；预设姿态仅作为显式回归入口。
         'observation_mode': observation_mode,
-        # 仿真不允许视觉对准失败后盲喷，必须把未完成目标记为 unresolved。
-        'spray_on_alignment_failure': False,
+        # 已确认目标的视觉对准失败时，在当前安全末端位置完成喷洒并继续队列。
+        'spray_on_alignment_failure': True,
         'use_sim_time': True,
     }
     motion_control = Node(
@@ -655,6 +657,7 @@ def generate_launch_description():
             # would be inside its static inflation cost before Nav2 starts.
             'simulation_parking_clearance_check': 'true',
             'observation_mode': observation_mode,
+            'default_arm_spray_duration_sec': default_arm_spray_duration_sec,
         }.items(),
         condition=IfCondition(use_nav2_qt),
     )
@@ -722,6 +725,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
         DeclareLaunchArgument('observation_mode', default_value='ik'),
         DeclareLaunchArgument('show_sim_spray_status', default_value='true'),
+        DeclareLaunchArgument(
+            'default_arm_spray_duration_sec', default_value='3.0'),
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.40'),
         DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.50'),
         DeclareLaunchArgument('planning_pipeline_id', default_value='ompl'),

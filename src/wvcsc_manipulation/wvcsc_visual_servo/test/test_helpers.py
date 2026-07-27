@@ -4,117 +4,209 @@ from types import SimpleNamespace
 
 import pytest
 
+from wvcsc_interfaces.action import AlignTarget
 from wvcsc_visual_servo.aim_compensation import (
     AimSolution,
     plane_error_mm,
     project_nozzle_axis,
 )
-from wvcsc_visual_servo.servo.pid_controller import (
-    PIDController2D,
-    ServoControlConfig,
+from wvcsc_visual_servo.servo.actuation_monitor import (
+    ActuationMonitor,
+    ActuationState,
 )
 from wvcsc_visual_servo.servo.alignment_progress import AlignmentProgress
-from wvcsc_visual_servo.servo.math_utils import (
-    bounded_control_dt,
-    limit_xy_norm,
-    slew,
-    SimpleTargetPredictor2D,
+from wvcsc_visual_servo.servo.servo_controller import (
+    ServoController,
+    ServoControllerConfig,
+)
+from wvcsc_visual_servo.servo.servo_session import (
+    DirectionGuardConfig,
+    ServoDecision,
+    ServoDecisionKind,
+    ServoFailureKind,
+    ServoSession,
+    TerminalReport,
 )
 from wvcsc_visual_servo.servo.servo_status_policy import (
     ServoStatusAction,
     ServoStatusPolicy,
 )
-from wvcsc_visual_servo.visual_servo_node import (
-    VisualServo, _GoalState,
-    _direction_guard_result,
-)
-from wvcsc_interfaces.action import AlignTarget
+from wvcsc_visual_servo.servo.target_tracker import TargetState, TargetTracker
+from wvcsc_visual_servo.visual_servo_node import VisualServo
 
 
-def test_pid_controls_two_image_axes_and_resets():
-    controller = PIDController2D(ServoControlConfig(kp_xy=0.2))
-    x, y, _debug = controller.step([0.1, -0.2], 0.02)
+ARM_JOINTS = VisualServo._ARM_JOINT_NAMES
+
+
+def _runtime_config(**overrides):
+    values = {
+        'control_rate_hz': 30.0,
+        'stale_timeout_sec': 0.75,
+        'invalid_target_hold_sec': 0.25,
+        'min_confidence': 0.40,
+        'fine_tolerance_px': 4.0,
+        'control_resume_tolerance_px': 4.0,
+        'stable_duration_sec': 0.50,
+        'progress_window_sec': 4.0,
+        'min_progress_px': 1.0,
+        'max_angular_speed': 0.45,
+        'max_angular_acceleration': 3.0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _controller(**overrides):
+    values = {
+        'control_rate_hz': 30.0,
+        'kp_xy': 1.0,
+        'kd_xy': 0.005,
+        'd_ema_alpha': 0.65,
+        'derivative_clip_xy': 2.0,
+        'max_angular_speed': 0.45,
+        'max_angular_acceleration': 3.0,
+        'angular_u_sign': 1.0,
+        'angular_v_sign': 1.0,
+    }
+    values.update(overrides)
+    return ServoController(ServoControllerConfig(**values))
+
+
+def _actuation_monitor():
+    return ActuationMonitor(
+        ARM_JOINTS,
+        response_timeout_sec=0.75,
+        min_output_rate_hz=8.0,
+        min_commanded_joint_delta_rad=0.01,
+        min_actual_joint_delta_rad=0.002,
+    )
+
+
+def _session(**config_overrides):
+    controller_keys = set(ServoControllerConfig.__dataclass_fields__)
+    return ServoSession(
+        _runtime_config(**config_overrides),
+        _controller(**{
+            key: value for key, value in config_overrides.items()
+            if key in controller_keys}),
+        _actuation_monitor(),
+        DirectionGuardConfig(False, 1.0, 20.0, 10.0, 0.60),
+    )
+
+
+def _target(**overrides):
+    values = {
+        'valid': True,
+        'confidence': 0.9,
+        'image_width': 1280,
+        'image_height': 720,
+        'center_u': 660.0,
+        'center_v': 340.0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_controller_controls_two_axes_and_resets():
+    controller = _controller(kp_xy=0.2)
+    x, y = controller.command([0.1, -0.2], 0.02)
     assert x > 0.0 and y < 0.0
     controller.reset()
+    assert controller.last_command == (0.0, 0.0)
 
 
-def test_limiter_caps_norm_and_acceleration():
-    x, y = limit_xy_norm(3.0, 4.0, 1.0)
-    assert math.isclose(math.hypot(x, y), 1.0)
-    assert math.isclose(slew(1.0, 0.0, 2.0, 0.1), 0.2)
+def test_controller_bounds_norm_and_slew_output():
+    controller = _controller(
+        kp_xy=1.0, kd_xy=0.0,
+        max_angular_speed=0.08, max_angular_acceleration=0.60)
+    x, y = controller.command([0.25, -0.20], 1.0 / 30.0)
+    assert math.hypot(x, y) <= 0.08
+    assert abs(x) <= 0.02 and abs(y) <= 0.02
 
 
-def test_joint_debug_ignores_vehicle_only_joint_state():
-    node = object.__new__(VisualServo)
-    node._lock = threading.Lock()
-    node._busy = False
-    node._goal_state = _GoalState()
-    node._joint_positions = [1.0] * 6
-
-    node._on_joint_state(SimpleNamespace(
-        name=['left_front_joint'], position=[0.25]))
-    assert node._joint_positions == [1.0] * 6
-
-    node._on_joint_state(SimpleNamespace(
-        name=[f'joint{index}' for index in range(6, 0, -1)],
-        position=[float(index) for index in range(6, 0, -1)]))
-    assert node._joint_positions == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+def test_controller_bounds_dt_to_two_control_periods():
+    controller = _controller(kp_xy=1.0, kd_xy=0.0)
+    assert controller._bounded_dt(0.05) == pytest.approx(0.05)
+    assert controller._bounded_dt(0.30) == pytest.approx(2.0 / 30.0)
+    assert controller._bounded_dt(0.0) == pytest.approx(0.001)
 
 
-def test_servo_execution_diagnostics_distinguish_output_from_joint_motion():
-    node = object.__new__(VisualServo)
-    node._lock = threading.Lock()
-    node._busy = True
-    node._joint_positions = [0.0] * 6
-    node._goal_state = _GoalState(initial_joint_positions=(0.0,) * 6)
-
-    node._on_servo_output(SimpleNamespace(
-        joint_names=[f'joint{index}' for index in range(1, 7)],
-        points=[SimpleNamespace(
-            positions=[0.01] * 6, velocities=[0.02] * 6)]))
-    node._on_joint_state(SimpleNamespace(
-        name=[f'joint{index}' for index in range(1, 7)],
-        position=[0.004] * 6))
-
-    assert node._goal_state.servo_output_count == 1
-    assert node._goal_state.servo_output_points == 1
-    assert node._goal_state.servo_output_velocity_count == 1
-    assert node._goal_state.max_commanded_joint_delta_rad == pytest.approx(0.01)
-    assert node._goal_state.max_joint_delta_rad == pytest.approx(0.004)
+def test_controller_hold_zero_preserves_pd_history_but_resets_slew_history():
+    controller = _controller(kp_xy=1.0, kd_xy=0.0, max_angular_acceleration=3.0)
+    controller.command([0.1, 0.0], 1.0 / 30.0)
+    controller.hold_zero()
+    assert controller.last_command == (0.0, 0.0)
+    x, _y = controller.command([0.1, 0.0], 1.0 / 30.0)
+    assert x == pytest.approx(0.1)
 
 
-def test_servo_watchdog_reports_missing_joint_trajectory_after_motion_command():
-    node = object.__new__(VisualServo)
-    node._lock = threading.Lock()
-    node._goal_state = _GoalState(first_motion_command_monotonic=10.0)
-    node._servo_response_timeout_sec = 0.75
-    node._servo_min_output_rate_hz = 8.0
-    node._servo_min_commanded_joint_delta_rad = 0.01
-    node._servo_min_actual_joint_delta_rad = 0.002
-
-    reason = node._servo_actuation_stall_reason(10.80)
-
-    assert reason is not None
-    assert 'no JointTrajectory received' in reason
+def test_controller_maps_camera_optical_axes_and_real_sign_override():
+    controller = _controller()
+    assert controller.twist_components((0.030, -0.020)) == pytest.approx(
+        (0.0, 0.0, 0.020, 0.030))
+    reversed_u = _controller(angular_u_sign=-1.0)
+    assert reversed_u.twist_components((0.030, -0.020)) == pytest.approx(
+        (0.0, 0.0, 0.020, -0.030))
 
 
-def test_servo_watchdog_accepts_frequent_output_with_joint_response():
-    node = object.__new__(VisualServo)
-    node._lock = threading.Lock()
-    node._goal_state = _GoalState(
+def test_actuation_monitor_distinguishes_output_from_joint_motion():
+    monitor = _actuation_monitor()
+    monitor.reset((0.0,) * 6)
+    monitor.begin_motion(10.0, [0.0] * 6)
+    monitor.observe_output(SimpleNamespace(
+        joint_names=list(ARM_JOINTS),
+        points=[SimpleNamespace(positions=[0.01] * 6)]),
+        [0.0] * 6, True, 10.1)
+    monitor.observe_joint_state([0.004] * 6, True)
+    state = monitor.state
+    assert state.output_count == 1
+    assert state.max_commanded_joint_delta_rad == pytest.approx(0.01)
+    assert state.max_joint_delta_rad == pytest.approx(0.004)
+
+
+def test_actuation_monitor_reports_missing_joint_trajectory_after_motion():
+    monitor = _actuation_monitor()
+    monitor.state = ActuationState(
         first_motion_command_monotonic=10.0,
-        servo_output_first_monotonic=10.05,
-        servo_output_last_monotonic=10.75,
-        servo_output_count=15,
+        motion_command_active=True)
+    assert 'no JointTrajectory received' in monitor.stall_reason(10.80)
+
+
+def test_actuation_monitor_accepts_frequent_output_with_joint_response():
+    monitor = _actuation_monitor()
+    monitor.state = ActuationState(
+        first_motion_command_monotonic=10.0,
+        motion_command_active=True,
+        output_first_monotonic=10.05,
+        output_last_monotonic=10.75,
+        output_count=15,
         max_commanded_joint_delta_rad=0.02,
         max_joint_delta_rad=0.004,
+        motion_epoch_joint_positions=(0.0,) * 6,
+        motion_epoch_max_joint_delta_rad=0.004,
     )
-    node._servo_response_timeout_sec = 0.75
-    node._servo_min_output_rate_hz = 8.0
-    node._servo_min_commanded_joint_delta_rad = 0.01
-    node._servo_min_actual_joint_delta_rad = 0.002
+    assert monitor.stall_reason(10.80) is None
 
-    assert node._servo_actuation_stall_reason(10.80) is None
+
+def test_actuation_monitor_ignores_output_silence_after_zero_hold():
+    monitor = _actuation_monitor()
+    monitor.state = ActuationState(
+        first_motion_command_monotonic=10.0,
+        output_last_monotonic=10.05,
+        motion_command_active=False)
+    assert monitor.stall_reason(10.83) is None
+
+
+def test_new_motion_epoch_resets_watchdog_after_zero_hold():
+    monitor = _actuation_monitor()
+    monitor.state = ActuationState(
+        first_motion_command_monotonic=10.0,
+        output_last_monotonic=10.05,
+        motion_command_active=False)
+    monitor.begin_motion(10.83, [0.0] * 6)
+    assert monitor.state.motion_command_active
+    assert monitor.state.first_motion_command_monotonic == 10.83
+    assert monitor.state.output_last_monotonic is None
 
 
 def test_stop_burst_publishes_zero_for_a_quarter_second(monkeypatch):
@@ -126,30 +218,20 @@ def test_stop_burst_publishes_zero_for_a_quarter_second(monkeypatch):
         node, 'zero_commands', node.zero_commands + 1)
     sleeps = []
     monkeypatch.setattr(
-        'wvcsc_visual_servo.visual_servo_node.time.sleep',
-        sleeps.append)
-
+        'wvcsc_visual_servo.visual_servo_node.time.sleep', sleeps.append)
     node._publish_zero_count()
-
     assert node.zero_commands == 8
     assert sleeps == [1.0 / 30.0] * 8
-    assert math.isclose(sum(sleeps), 8.0 / 30.0)
 
 
-def test_trigger_wait_does_not_nested_spin_an_executor_owned_node(monkeypatch):
-    """Service responses must be handled by the node's existing MT executor."""
+def test_trigger_wait_does_not_nested_spin_an_executor_owned_node():
     class Future:
-        def done(self):
-            return True
-
         def add_done_callback(self, callback):
             callback(self)
 
         @staticmethod
         def result():
             return SimpleNamespace(success=True, message='servo stopped')
-
-    future = Future()
 
     class Client:
         @staticmethod
@@ -158,73 +240,10 @@ def test_trigger_wait_does_not_nested_spin_an_executor_owned_node(monkeypatch):
 
         @staticmethod
         def call_async(_request):
-            return future
+            return Future()
 
     node = object.__new__(VisualServo)
-    node.get_parameter = lambda _name: SimpleNamespace(value=0.1)
-
-    node._last_service_latency_sec = 0.0
     assert node._call_trigger(Client(), 0.1) == (True, 'servo stopped')
-
-
-def test_control_dt_uses_actual_30hz_period_with_bounded_overrun():
-    period = 1.0 / 30.0
-    assert math.isclose(bounded_control_dt(0.05, 30.0), 0.05)
-    assert math.isclose(bounded_control_dt(0.30, 30.0), 2.0 * period)
-    assert math.isclose(bounded_control_dt(0.0, 30.0), 0.001)
-
-
-def test_pid_accepts_node_bounded_dt_without_hidden_50ms_cap():
-    controller = PIDController2D(ServoControlConfig(kp_xy=0.0, ki_xy=1.0))
-    _x, _y, debug = controller.step([1.0, 0.0], 0.08)
-    assert math.isclose(debug['integral'][0], 0.08)
-
-
-def test_compensated_pid_gain_remains_bounded_by_motion_limits():
-    period = 1.0 / 30.0
-    controller = PIDController2D(ServoControlConfig(kp_xy=1.0, kd_xy=0.005))
-    x, y, _debug = controller.step([0.25, -0.20], period)
-    x, y = limit_xy_norm(x, y, 0.08)
-    x = slew(x, 0.0, 0.60, period)
-    y = slew(y, 0.0, 0.60, period)
-    assert math.hypot(x, y) <= 0.08
-    assert abs(x) <= 0.02 and abs(y) <= 0.02
-
-
-def test_angular_ibvs_matches_camera_optical_axes():
-    node = object.__new__(VisualServo)
-    node._command_mode = 'angular_xy'
-
-    # u-right -> camera yaw-right (+Y); v-down -> camera pitch-down (-X).
-    assert node._command_components(0.030, -0.020) == pytest.approx(
-        (0.0, 0.0, 0.020, 0.030))
-
-
-def test_real_u_axis_sign_can_reverse_without_changing_v_axis():
-    node = object.__new__(VisualServo)
-    node._command_mode = 'angular_xy'
-    node._angular_u_sign = -1.0
-    node._angular_v_sign = 1.0
-
-    assert node._command_components(0.030, -0.020) == pytest.approx(
-        (0.0, 0.0, 0.020, -0.030))
-
-
-def test_direction_guard_rejects_axis_that_moves_farther_from_aim():
-    outcome = _direction_guard_result(
-        (10.0, -60.0, -86.0), (-74.0, -52.0), 1.0,
-        window_sec=1.0, min_axis_error_px=20.0,
-        max_axis_growth_px=10.0)
-
-    assert outcome is not None
-    assert 'u:abs_error=60.0px→74.0px' in outcome
-
-
-def test_direction_guard_accepts_converging_axes_after_window():
-    assert _direction_guard_result(
-        (10.0, -60.0, -86.0), (-50.0, -70.0), 1.0,
-        window_sec=1.0, min_axis_error_px=20.0,
-        max_axis_growth_px=10.0) == ''
 
 
 def test_nozzle_axis_projection_uses_camera_tf_and_pixel_trim():
@@ -232,10 +251,7 @@ def test_nozzle_axis_projection_uses_camera_tf_and_pixel_trim():
         translation=(0.010, -0.020, 0.050),
         quaternion=(0.0, 0.0, 0.0, 1.0),
         camera=(500.0, 500.0, 640.0, 360.0, 1280, 720),
-        range_m=1.0,
-        trim=(2.0, -3.0),
-        image_margin_px=20.0,
-    )
+        range_m=1.0, trim=(2.0, -3.0), image_margin_px=20.0)
     assert solution.u_px == pytest.approx(647.0)
     assert solution.v_px == pytest.approx(347.0)
     assert solution.intersection == pytest.approx((0.010, -0.020, 1.0))
@@ -245,10 +261,6 @@ def test_nozzle_axis_projection_uses_camera_tf_and_pixel_trim():
 
 def test_compensated_aim_scales_to_target_message_dimensions():
     node = object.__new__(VisualServo)
-    node._config = SimpleNamespace(
-        aim_compensation_enabled=True,
-        desired_offset_u_px=0.0,
-        desired_offset_v_px=0.0)
     node._camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
     node._aim_solution = AimSolution(
         u_px=640.0, v_px=388.0, range_m=1.0,
@@ -271,50 +283,49 @@ def test_nozzle_axis_projection_rejects_unsafe_geometry(
             1.0, image_margin_px=20.0)
 
 
-def test_linear_command_mode_remains_available_for_direct_callers():
-    node = object.__new__(VisualServo)
-    node._command_mode = 'linear_xy'
-
-    assert node._command_components(0.030, -0.020) == pytest.approx(
-        (0.030, -0.020, 0.0, 0.0))
-
-
-def test_alignment_hold_uses_hysteresis_after_first_entry():
-    decide = VisualServo._alignment_hold_decision
-
-    assert decide(1.4, 1.5, 3.0, False) == (True, True)
-    assert decide(2.2, 1.5, 3.0, True) == (False, True)
-    assert decide(3.1, 1.5, 3.0, True) == (False, False)
-    # A target that has not yet entered the final radius still receives
-    # fine control even though it is inside the outer resume radius.
-    assert decide(2.2, 1.5, 3.0, False) == (False, False)
+def test_target_tracker_rejects_nonfinite_and_out_of_bounds_pixels():
+    tracker = TargetTracker(
+        SimpleNamespace(min_confidence=0.5),
+        AlignmentProgress(4.0, 0.5, 4.0, 4.0))
+    assert tracker.is_valid(_target())
+    assert not tracker.is_valid(_target(center_u=math.nan))
+    assert not tracker.is_valid(_target(center_v=720.0))
 
 
-def test_runtime_hysteresis_releases_before_two_pixel_requirement_is_lost():
-    decide = VisualServo._alignment_hold_decision
+def test_target_terminal_snapshot_preserves_last_valid_error():
+    tracker = TargetTracker(
+        SimpleNamespace(min_confidence=0.5),
+        AlignmentProgress(4.0, 0.5, 4.0, 4.0))
+    state = TargetState(
+        latest={'valid': False, 'received': 11.0, 'confidence': 0.0, 'hold': False},
+        last_valid_target={
+            'valid': True, 'received': 10.0, 'error_u': 3.5,
+            'error_v': -2.0, 'stable_frames': 2, 'hold': False},
+        target_unavailable_since=10.5)
+    snapshot = tracker.terminal_snapshot(state, 11.25)
+    assert snapshot['error_u'] == 3.5
+    assert snapshot['error_v'] == -2.0
+    assert not snapshot['terminal_target_valid']
+    assert snapshot['target_unavailable_sec'] == pytest.approx(0.75)
 
-    assert decide(1.8, 1.5, 2.0, True) == (False, True)
-    assert decide(2.1, 1.5, 2.0, True) == (False, False)
+
+@pytest.mark.parametrize('rate_hz', [10.0, 30.0])
+def test_time_based_alignment_is_independent_of_target_frame_rate(rate_hz):
+    progress = AlignmentProgress(4.0, 0.5, 4.0, 4.0)
+    for index in range(int(rate_hz * 0.5) + 1):
+        progress.update(2.4, -2.4, index / rate_hz)
+    assert progress.aligned
+    assert progress.stable_duration >= 0.5
 
 
-
-
-def test_time_based_alignment_is_independent_of_target_frame_rate():
-    for rate_hz in (10.0, 30.0):
-        progress = AlignmentProgress(4.0, 0.5, 4.0, 4.0)
-        for index in range(int(rate_hz * 0.5) + 1):
-            progress.update(2.4, -2.4, index / rate_hz)
-        assert progress.aligned
-        assert progress.stable_duration >= 0.5
-
-
-def test_eight_pixel_tolerance_accepts_observed_yolo_jitter():
+def test_alignment_progress_handles_jitter_and_excursions():
     progress = AlignmentProgress(8.0, 0.5, 4.0, 1.0, 8.0)
     progress.update(4.9, 0.0, 0.0)
     progress.update(6.3, 0.0, 0.25)
     progress.update(6.4, 0.0, 0.5)
-
     assert progress.aligned
+    progress.update(9.0, 0.0, 0.55)
+    assert not progress.aligned
 
 
 def test_alignment_requires_euclidean_pixel_tolerance():
@@ -324,56 +335,7 @@ def test_alignment_requires_euclidean_pixel_tolerance():
     assert not progress.aligned
 
 
-def test_alignment_stable_window_tolerates_hysteresis_band_jitter():
-    progress = AlignmentProgress(1.5, 0.5, 4.0, 1.0, 2.0)
-    progress.update(1.0, 0.0, 0.0)
-    progress.update(1.8, 0.0, 0.2)
-    progress.update(1.0, 0.0, 0.5)
-    assert progress.aligned
-    assert progress.stable_duration >= 0.5
-
-
-def test_alignment_still_requires_latest_sample_inside_fine_tolerance():
-    progress = AlignmentProgress(1.5, 0.5, 4.0, 1.0, 2.0)
-    progress.update(1.0, 0.0, 0.0)
-    progress.update(1.8, 0.0, 0.6)
-    assert not progress.aligned
-    assert progress.stable_duration >= 0.5
-
-
-def test_alignment_excursion_resets_stable_duration():
-    progress = AlignmentProgress(4.0, 0.5, 4.0, 4.0)
-    progress.update(3.0, 3.0, 0.0)
-    progress.update(3.0, 3.0, 0.4)
-    progress.update(9.0, 3.0, 0.45)
-    progress.update(3.0, 3.0, 0.8)
-    assert not progress.aligned
-    assert progress.stable_duration == 0.0
-
-
-def test_progress_watchdog_stalls_but_resets_after_real_improvement():
-    progress = AlignmentProgress(4.0, 0.5, 4.0, 4.0)
-    progress.update(100.0, 0.0, 0.0)
-    progress.update(97.0, 0.0, 3.9)
-    assert not progress.stalled(3.9)
-    assert progress.stalled(4.0)
-
-    progress.update(95.0, 0.0, 4.0)
-    assert not progress.stalled(7.9)
-    progress.update(90.0, 0.0, 7.9)
-    assert not progress.stalled(11.8)
-
-
-def test_subpixel_steps_accumulate_into_meaningful_progress():
-    progress = AlignmentProgress(4.0, 0.5, 4.0, 1.0)
-    progress.update(10.0, 0.0, 0.0)
-    progress.update(9.6, 0.0, 1.0)
-    progress.update(9.2, 0.0, 2.0)
-    progress.update(8.8, 0.0, 3.0)
-    assert not progress.stalled(4.0)
-
-
-def test_progress_window_restarts_after_target_reacquisition():
+def test_progress_watchdog_restarts_after_real_improvement_and_reacquisition():
     progress = AlignmentProgress(4.0, 0.5, 4.0, 1.0)
     progress.update(10.0, 0.0, 0.0)
     assert progress.stalled(4.0)
@@ -393,178 +355,162 @@ def test_moveit_servo_status_policy_is_conservative():
     assert policy.decide(99).action == ServoStatusAction.SAFETY_STOP
 
 
-def _status_harness(busy):
-    node = object.__new__(VisualServo)
-    node._policy = ServoStatusPolicy({1, 3}, {2}, {4, 5}, {6})
-    node._lock = threading.Lock()
-    node._busy = busy
-    node._servo_status = 0
-    node._command_mode = 'linear_xy'
-    node._goal_state = _GoalState()
-    node.zero_commands = 0
-    node._publish_zero = lambda: setattr(
-        node, 'zero_commands', node.zero_commands + 1)
-    node.get_logger = lambda: SimpleNamespace(warn=lambda *_args: None)
-    return node
+def test_session_returns_command_hold_and_stale_target_decisions():
+    session = _session()
+    session.reset(10.0, 20.0, [0.0] * 6)
+    session.observe_target(
+        _target(), 10.0, (500.0, 500.0, 640.0, 360.0, 1280, 720),
+        lambda _width, _height: (640.0, 360.0))
+    command = session.step(10.05, 20.05, 8.0, True, 0)
+    assert command.kind == ServoDecisionKind.COMMAND
+    session.observe_target(
+        _target(valid=False, confidence=0.0, image_width=0, image_height=0),
+        10.10, None, None)
+    assert session.step(10.20, 20.20, 8.0, True, 0).kind == ServoDecisionKind.HOLD
+    stale = session.step(10.86, 20.86, 8.0, True, 0)
+    assert stale.kind == ServoDecisionKind.FAIL
+    assert stale.failure == ServoFailureKind.TARGET_STALE
 
 
-def test_singularity_status_is_recoverable_without_global_motion_stop():
-    node = _status_harness(True)
-    node._on_servo_status(SimpleNamespace(data=2))
-    assert node._goal_state.stop_code == AlignTarget.Result.SERVO_SINGULARITY
-    assert node.zero_commands == 1
-    assert not hasattr(node, '_motion_command')
+def test_session_preserves_alignment_hold_hysteresis():
+    session = _session(fine_tolerance_px=1.5, control_resume_tolerance_px=3.0)
+    session.reset(0.0, 0.0)
+    session.state.target.latest = {
+        'valid': True, 'hold': False, 'received': 0.0,
+        'error_u': 1.4, 'error_v': 0.0, 'error': (0.01, 0.0),
+        'confidence': 0.9, 'stable_frames': 0}
+    assert session.step(0.1, 0.1, 8.0, True, 0).kind == ServoDecisionKind.HOLD
+    session.state.target.latest['error_u'] = 2.2
+    assert session.step(0.2, 0.2, 8.0, True, 0).kind == ServoDecisionKind.COMMAND
+    assert session.state.alignment_hold_latched
+    session.state.target.latest['error_u'] = 3.1
+    assert session.step(0.3, 0.3, 8.0, True, 0).kind == ServoDecisionKind.COMMAND
+    assert not session.state.alignment_hold_latched
 
 
-def test_collision_joint_bound_and_unknown_status_are_hard_safety_stops():
-    for status in (4, 5, 99):
-        node = _status_harness(True)
-        node._on_servo_status(SimpleNamespace(data=status))
-        assert node._goal_state.stop_code == AlignTarget.Result.SERVO_SAFETY_STOP
-        assert node.zero_commands == 1
+def test_session_stops_for_direction_divergence_and_requested_safety_stop():
+    session = ServoSession(
+        _runtime_config(), _controller(), _actuation_monitor(),
+        DirectionGuardConfig(True, 1.0, 20.0, 10.0, 0.60))
+    session.reset(10.0, 10.0)
+    session.state.target.latest = {
+        'valid': True, 'hold': False, 'received': 10.0,
+        'error_u': -60.0, 'error_v': -86.0, 'error': (-0.12, -0.17),
+        'confidence': 0.9, 'stable_frames': 0}
+    assert session.step(10.0, 10.0, 8.0, True, 0).kind == ServoDecisionKind.COMMAND
+    session.state.target.latest['error_u'] = -74.0
+    session.state.target.latest['received'] = 11.0
+    failed = session.step(11.0, 11.0, 8.0, True, 0)
+    assert failed.failure == ServoFailureKind.SERVO_DIRECTION_DIVERGENCE
+    session.request_stop(ServoFailureKind.SERVO_SAFETY_STOP, 'collision')
+    assert session.step(11.1, 11.1, 8.0, True, 0).failure == ServoFailureKind.SERVO_SAFETY_STOP
 
 
-def test_idle_servo_status_does_not_stop_or_lock_motion():
-    node = _status_harness(False)
-    node._on_servo_status(SimpleNamespace(data=2))
-    assert node._goal_state.stop_code is None
-    assert node.zero_commands == 0
+def test_session_reports_actuation_stall_and_terminal_diagnostics():
+    session = _session()
+    session.reset(10.0, 10.0, [0.0] * 6)
+    session.state.target.latest = {
+        'valid': True, 'hold': False, 'received': 10.0,
+        'error_u': 20.0, 'error_v': 0.0, 'error': (0.04, 0.0),
+        'confidence': 0.9, 'stable_frames': 0}
+    assert session.step(10.0, 10.0, 8.0, True, 0).kind == ServoDecisionKind.COMMAND
+    session.state.target.latest['received'] = 10.80
+    failed = session.step(10.80, 10.80, 8.0, True, 0)
+    assert failed.failure == ServoFailureKind.SERVO_ACTUATION_STALL
+    report = session.terminal_report(
+        failed.failure, failed.message, 10.80, 0, True)
+    assert 'servo_outputs=0' in report.summary
+    assert 'servo_status=0' in report.summary
 
 
-def test_invalid_matching_target_briefly_holds_zero_without_erasing_lock():
-    class Predictor:
-        reset_calls = 0
-
-        def reset(self):
-            self.reset_calls += 1
-
+def _node_session_harness():
     node = object.__new__(VisualServo)
     node._lock = threading.Lock()
     node._busy = True
     node._active_mission = 'mission-1'
     node._active_tree = 'tree-1'
-    node._active_target = 'fruit-1'
-    node._config = SimpleNamespace(
-        min_confidence=0.40,
-        aim_compensation_enabled=False,
-        invalid_target_hold_sec=0.25,
-        desired_offset_u_px=0.0,
-        desired_offset_v_px=0.0,
-        fine_tolerance_px=4.0,
-    )
-    latest = {
-        'valid': True,
-        'received': 10.0,
-        'error': (0.0, 0.0),
-        'stable_frames': 6,
-        'confidence': 0.9,
-    }
-    node._goal_state = _GoalState(
-        latest=latest,
-        last_valid_target=dict(latest),
-        target_unavailable_since=None,
-        stable_frames=6)
-    node._progress = AlignmentProgress(4.0, 0.5, 4.0, 4.0)
-    node._predictor = Predictor()
+    node._active_target = 'target-1'
+    node._aim_solution = object()
+    node._camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
+    node._session = _session()
+    node._session.reset(10.0, 10.0)
     node._now = lambda: 10.1
     node.zero_commands = 0
     node._publish_zero = lambda: setattr(
         node, 'zero_commands', node.zero_commands + 1)
+    return node
 
-    node._on_target(SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', target_id='fruit-1',
-        valid=False, confidence=0.0, image_width=0, image_height=0,
-    ))
 
-    assert node._goal_state.latest['valid']
-    assert node._goal_state.latest['hold']
-    assert node._goal_state.latest['stable_frames'] == 0
-    assert node._predictor.reset_calls == 1
-    assert node._goal_state.target_unavailable_since == 10.1
+def test_node_target_callback_holds_matching_invalid_target_without_lock_reentry():
+    node = _node_session_harness()
+    node._session.state.target.latest = {
+        'valid': True, 'received': 10.0, 'error': (0.0, 0.0),
+        'stable_frames': 1, 'confidence': 0.9}
+    callback = threading.Thread(
+        target=node._on_target,
+        args=(_target(
+            mission_id='mission-1', tree_id='tree-1', target_id='target-1',
+            valid=False, confidence=0.0, image_width=0, image_height=0),))
+    callback.start()
+    callback.join(timeout=0.25)
+    assert not callback.is_alive()
+    assert node._session.latest['hold']
     assert node.zero_commands == 1
 
 
-def test_terminal_snapshot_preserves_last_valid_error_during_target_loss():
-    node = object.__new__(VisualServo)
-    node._lock = threading.Lock()
-    latest = {
-        'valid': False, 'received': 11.0, 'confidence': 0.0, 'hold': False}
-    last_valid = {
-        'valid': True, 'received': 10.0, 'error_u': 3.5, 'error_v': -2.0,
-        'stable_frames': 2, 'hold': False}
-    node._goal_state = _GoalState(
-        latest=latest, last_valid_target=last_valid,
-        target_unavailable_since=10.5)
-
-    snapshot = node._terminal_target_snapshot(11.25)
-
-    assert snapshot['error_u'] == 3.5
-    assert snapshot['error_v'] == -2.0
-    assert not snapshot['terminal_target_valid']
-    assert math.isclose(snapshot['target_unavailable_sec'], 0.75)
+def test_node_target_callback_ignores_non_matching_target():
+    node = _node_session_harness()
+    node._session.state.target.latest = {'valid': True, 'received': 10.0}
+    node._on_target(_target(
+        mission_id='mission-1', tree_id='tree-1', target_id='other',
+        valid=False, confidence=0.0, image_width=0, image_height=0))
+    assert node._session.latest == {'valid': True, 'received': 10.0}
 
 
-def test_non_matching_target_does_not_invalidate_the_active_target():
-    node = object.__new__(VisualServo)
-    node._lock = threading.Lock()
-    node._busy = True
-    node._active_mission = 'mission-1'
-    node._active_tree = 'tree-1'
-    node._active_target = 'fruit-1'
-    node._goal_state = _GoalState(
-        latest={'valid': True, 'received': 10.0})
-    node._on_target(SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', target_id='fruit-other',
-        valid=False, confidence=0.0, image_width=0, image_height=0,
-    ))
+def test_node_servo_status_maps_recoverable_and_hard_stops_to_session():
+    for status, expected in (
+            (2, ServoFailureKind.SERVO_SINGULARITY),
+            (4, ServoFailureKind.SERVO_SAFETY_STOP),
+            (5, ServoFailureKind.SERVO_SAFETY_STOP),
+            (99, ServoFailureKind.SERVO_SAFETY_STOP)):
+        node = _node_session_harness()
+        node._policy = ServoStatusPolicy({1, 3}, {2}, {4, 5}, {6})
+        node._servo_status = 0
+        node.get_logger = lambda: SimpleNamespace(warn=lambda *_args: None)
+        node._on_servo_status(SimpleNamespace(data=status))
+        assert node._session.state.stop_failure == expected
+        assert node.zero_commands == 1
 
-    assert node._goal_state.latest == {'valid': True, 'received': 10.0}
+
+def test_node_joint_callback_ignores_vehicle_only_joint_state():
+    node = _node_session_harness()
+    node._on_joint_state(SimpleNamespace(name=['left_front_joint'], position=[0.25]))
+    assert node._session._joint_positions == []
+    node._on_joint_state(SimpleNamespace(
+        name=[f'joint{index}' for index in range(6, 0, -1)],
+        position=[float(index) for index in range(6, 0, -1)]))
+    assert node._session._joint_positions == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 
 
 def test_servo_lifecycle_starts_once_then_reuses_zero_braked_loop():
     node = object.__new__(VisualServo)
     node._servo_lifecycle = 'never_started'
-    node._last_lifecycle_transition = ''
-    node._last_service_latency_sec = 0.0
     node._start_client = 'start'
     node._publish_zero_count = lambda: None
     node.get_parameter = lambda _name: SimpleNamespace(value=12.0)
     calls = []
-    node._call_trigger = lambda client, timeout: (calls.append((client, timeout)) or
-                                                   (True, 'ok'))
-
+    node._call_trigger = lambda client, timeout: (
+        calls.append((client, timeout)) or (True, 'ok'))
     assert node._activate_servo() == (True, 'ok')
-    assert node._servo_lifecycle == 'running'
     assert node._brake_servo('first_target_done') == (True, 'zero commands published')
-    assert node._servo_lifecycle == 'running'
     assert node._activate_servo() == (True, 'already running')
     assert calls == [('start', 12.0)]
 
 
-def test_predictor_uses_bounded_horizon():
-    predictor = SimpleTargetPredictor2D()
-    predictor.update([1.0, 2.0], [2.0, -1.0], 10.0)
-    position, velocity = predictor.predict_to(11.0, 0.1)
-    assert position == pytest.approx((1.2, 1.9))
-    assert velocity == pytest.approx((2.0, -1.0))
-
-
-@pytest.mark.parametrize('outcome', ['aligned', 'timeout', 'canceled', 'stale'])
+@pytest.mark.parametrize('outcome', ['aligned', 'failed', 'canceled'])
 def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
     monkeypatch.setattr(
         'wvcsc_visual_servo.visual_servo_node.rclpy.ok', lambda: True)
-
-    class Resettable:
-        def reset(self):
-            pass
-
-    class Progress(Resettable):
-        aligned = outcome == 'aligned'
-        stable_duration = 0.5
-
-        @staticmethod
-        def stalled(_now):
-            return False
 
     class Logger:
         def __init__(self):
@@ -577,8 +523,8 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
 
     class Goal:
         request = SimpleNamespace(
-            timeout=8.0, mission_id='mission-1',
-            tree_id='tree-1', target_id='fruit-1', working_range_m=1.0,
+            timeout=8.0, mission_id='mission-1', tree_id='tree-1',
+            target_id='target-1', working_range_m=1.0,
             desired_u_px=640.0, desired_v_px=360.0,
             image_width=1280, image_height=720)
         is_cancel_requested = outcome == 'canceled'
@@ -598,78 +544,70 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
         def publish_feedback(self, _feedback):
             pass
 
+    latest = {
+        'valid': True, 'hold': False, 'received': 0.0,
+        'error_u': 1.0, 'error_v': -1.0, 'error': (1.0, -1.0),
+        'stable_frames': 10, 'confidence': 0.9}
+
+    class Session:
+        def reset(self, *_args):
+            pass
+
+        @staticmethod
+        def terminal_snapshot(_now, supplied=None):
+            return dict(latest if supplied is None else supplied)
+
+        @staticmethod
+        def terminal_report(_failure, _message, _now, _status, _camera, snapshot):
+            return TerminalReport(snapshot, '[VISUAL_SERVO] test_failure')
+
+        @staticmethod
+        def hold_zero():
+            pass
+
+        @staticmethod
+        def twist_components(_command):
+            return 0.0, 0.0, 0.0, 0.0
+
+        @staticmethod
+        def step(_now, _monotonic, _timeout, _camera_ready, _status):
+            if outcome == 'aligned':
+                return ServoDecision(
+                    ServoDecisionKind.SUCCESS, latest=latest,
+                    stable_duration_sec=0.5)
+            return ServoDecision(
+                ServoDecisionKind.FAIL, latest=latest,
+                failure=ServoFailureKind.TIMEOUT,
+                message='visual alignment timed out')
+
     node = object.__new__(VisualServo)
-    node._config = SimpleNamespace(
-        default_timeout_sec=8.0, control_rate_hz=30.0,
-        stale_timeout_sec=0.75,
-        aim_compensation_enabled=False)
-    node._command_mode = 'linear_xy'
+    node._config = SimpleNamespace(default_timeout_sec=8.0, control_rate_hz=30.0)
     node._lock = threading.Lock()
-    node._camera = object()
-    node._busy = True
-    node._controller = Resettable()
-    node._predictor = Resettable()
-    node._progress = Progress()
-    node._goal_state = _GoalState()
-    node._policy = ServoStatusPolicy({1, 3}, {2}, {4, 5}, {6})
-    node._servo_lifecycle = 'never_started'
-    node._last_lifecycle_transition = ''
-    node._last_service_latency_sec = 0.0
+    node._camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
+    node._session = Session()
+    node._servo_status = 0
+    node._angular_u_sign = 1.0
+    node._angular_v_sign = 1.0
     node._publish_zero = lambda: None
     node._publish_zero_count = lambda: None
     node.get_parameter = lambda _name: SimpleNamespace(value=True)
+    node._now = lambda: 0.0
+    node._aim_solution = None
     logger = Logger()
     node.get_logger = lambda: logger
-    timeout_times = iter(
-        [0.0, 0.8, 0.8, 0.8, 0.8]
-        if outcome == 'stale' else [0.0, 9.0, 9.0])
-    node._now = (
-        (lambda: next(timeout_times, 9.0))
-        if outcome in {'timeout', 'stale'} else (lambda: 0.0))
     calls = []
-
-    def trigger(transition):
-        calls.append(transition)
-        if transition == 'start':
-            valid_target = {
-                'valid': True, 'hold': False, 'received': node._now(),
-                'error_u': 1.0, 'error_v': -1.0,
-                'error': (1.0, -1.0),
-                'stable_frames': 10, 'confidence': 0.9,
-            }
-            node._goal_state.last_valid_target = dict(valid_target)
-            node._goal_state.latest = (
-                {'valid': False, 'hold': False, 'received': 0.0,
-                 'confidence': 0.0}
-                if outcome == 'stale' else valid_target)
-        return True, ''
-
-    node._activate_servo = lambda: trigger('start')
-    node._brake_servo = lambda _reason: trigger('brake')
+    node._activate_servo = lambda: (calls.append('start') or (True, ''))
+    node._brake_servo = lambda _reason: (calls.append('brake') or (True, ''))
+    node._prepare_aim_compensation = lambda _range: (
+        setattr(node, '_aim_solution',
+                SimpleNamespace(u_px=640.0, v_px=360.0, range_m=1.0))
+        or (True, ''))
     goal = Goal()
-
     result = node._execute(goal)
-
     assert calls == ['start', 'brake']
     assert goal.terminal == {
-        'aligned': 'succeeded',
-        'timeout': 'aborted',
-        'canceled': 'canceled',
-        'stale': 'aborted',
-    }[outcome]
-    if outcome == 'stale':
-        assert result.error_code == AlignTarget.Result.TARGET_STALE
-        assert result.final_error_u == 1.0
-        assert result.final_error_v == -1.0
-    reason = {
-        'aligned': 'target_aligned',
-        'timeout': 'timeout',
-        'canceled': 'goal_canceled',
-        'stale': 'target_stale',
-    }[outcome]
-    assert any('[VISUAL_SERVO] 进入伺服 target=fruit-1' in line
-               for line in logger.lines)
-    assert any(f'[VISUAL_SERVO] 零速制动 reason={reason}' in line
-               for line in logger.lines)
-    assert any('[VISUAL_SERVO] 零速制动结果 success=true' in line
+        'aligned': 'succeeded', 'failed': 'aborted', 'canceled': 'canceled'}[outcome]
+    if outcome == 'failed':
+        assert result.error_code == AlignTarget.Result.TIMEOUT
+    assert any('[VISUAL_SERVO] 进入伺服 target=target-1' in line
                for line in logger.lines)

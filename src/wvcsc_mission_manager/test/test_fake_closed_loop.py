@@ -33,6 +33,7 @@ class _FakeServers(Node):
         self.nav_yaws = []
         self.spray_goals = []
         self.tree_hints = []
+        self.working_ranges = []
         self.nav_server = ActionServer(
             self,
             NavigateToPose,
@@ -66,6 +67,7 @@ class _FakeServers(Node):
             request.tree_hint.point.y,
             request.tree_hint.point.z,
         ))
+        self.working_ranges.append(float(request.working_range_m))
         result = ExecuteSpray.Result()
         result.success = True
         result.error_code = ExecuteSpray.Result.OK
@@ -223,6 +225,7 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
         for actual, expected in zip(servers.tree_hints, expected_hints):
             assert actual[0] == expected[0]
             assert actual[1:] == pytest.approx(expected[1:])
+        assert servers.working_ranges == [0.0] * len(servers.spray_goals)
         assert harness.plan.mission_id == 'fake_closed_loop_2'
         assert [item.target_id for item in harness.plan.targets] == [
             'tree_01', 'tree_02']
@@ -290,6 +293,7 @@ def test_optional_return_home_adds_final_nav_goal():
         assert servers.nav_goals == [
             (3.4, 0.2), (5.4, -0.2), (0.25, -0.1)]
         assert servers.spray_goals == ['tree_01', 'tree_02']
+        assert servers.working_ranges == [0.0, 0.0]
     finally:
         for _ in range(5):
             executor.spin_once(timeout_sec=0.02)
@@ -346,6 +350,7 @@ def test_manual_mission_preserves_rviz_pose_and_yaw():
         assert servers.nav_goals == [(3.2, 0.7)]
         assert math.isclose(servers.nav_yaws[0], 0.4, abs_tol=1e-6)
         assert servers.spray_goals == ['single_01']
+        assert servers.working_ranges == [0.0]
         assert servers.tree_hints[0][0] == 'map'
         assert servers.tree_hints[0][1:] == pytest.approx(
             (2.247448, 1.925824, 0.0))

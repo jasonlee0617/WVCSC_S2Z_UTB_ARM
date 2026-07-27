@@ -1035,13 +1035,10 @@ class MissionManager(Node):
             return
         if not recovered:
             self.get_logger().info(f'[NAV] succeeded point={target.tree_id}')
-        if target.requires_arm or int(target.point_type) == int(PointType.FINISH):
-            self._command_relay_best_effort(
-                self._wide_relay_channel, False, 0.0,
-                self._begin_stop_verification,
-                f'{target.tree_id}: disable wide spray at stop')
-        else:
-            self._begin_stop_verification()
+        self._command_relay_best_effort(
+            self._wide_relay_channel, False, 0.0,
+            self._begin_stop_verification,
+            f'{target.tree_id}: disable wide spray at stop')
 
     def _on_odom(self, message):
         linear = math.hypot(message.twist.twist.linear.x, message.twist.twist.linear.y)
@@ -1252,6 +1249,9 @@ class MissionManager(Node):
         goal.tree_hint.point.x = tree_x
         goal.tree_hint.point.y = tree_y
         goal.tree_hint.point.z = tree_z
+        # Full missions keep the calibrated dynamic tree-plane calculation.
+        # A positive override is reserved for the standalone arm-test UI.
+        goal.working_range_m = 0.0
         self._spray_pending = True
         self._phase_started = self._now()
         self._spray_last_progress = self._phase_started

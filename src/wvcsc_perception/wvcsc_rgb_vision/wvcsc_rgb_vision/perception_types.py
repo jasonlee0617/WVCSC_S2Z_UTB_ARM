@@ -3,15 +3,12 @@
 from dataclasses import dataclass
 import math
 
-import cv2
-import numpy as np
-
 from .model_utils import DISEASED_TARGET_CLASS_ALIASES
 
 
 @dataclass(frozen=True)
 class Instance:
-    """A detected tree or diseased target, expressed in image pixels."""
+    """A detected diseased target, expressed in image pixels."""
 
     target_id: str
     class_name: str
@@ -61,7 +58,7 @@ class Instance:
 
 @dataclass(frozen=True)
 class DiseaseTarget:
-    """One disease-model result in the tree-ROI coordinate system.
+    """One disease-model result in the full-image coordinate system.
 
     ``control_u/v`` are optional.  Segment backends provide a mask-safe
     control point; detect backends intentionally leave them unset so that the
@@ -142,30 +139,3 @@ def deduplicate_instances(
         kept,
         key=lambda item: (-item.confidence, item.class_name, item.left, item.top),
     )
-
-
-def expanded_roi(left, top, right, bottom, image_width, image_height, padding):
-    """Expand a box by ``padding`` and clip it to image bounds."""
-    width, height = right - left, bottom - top
-    pad_x, pad_y = width * padding, height * padding
-    return (
-        max(0, int(math.floor(left - pad_x))),
-        max(0, int(math.floor(top - pad_y))),
-        min(int(image_width), int(math.ceil(right + pad_x))),
-        min(int(image_height), int(math.ceil(bottom + pad_y))),
-    )
-
-
-def safest_mask_point(points, width, height):
-    """Return a stable point furthest from the segmentation-mask boundary."""
-    mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.fillPoly(mask, [np.asarray(points, dtype=np.int32)], 255)
-    distance = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-    maximum = float(distance.max())
-    if maximum <= 0.0:
-        raise ValueError('fruit mask has no interior pixel')
-    core = np.argwhere(distance >= 0.80 * maximum)
-    centroid = core.mean(axis=0)
-    index = int(np.argmin(np.sum((core - centroid) ** 2, axis=1)))
-    row, column = core[index]
-    return float(column), float(row)

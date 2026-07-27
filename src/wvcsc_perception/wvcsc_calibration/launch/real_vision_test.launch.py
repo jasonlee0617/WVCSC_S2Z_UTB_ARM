@@ -19,7 +19,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'yolo_python_executable', default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
-        DeclareLaunchArgument('inference_mode', default_value='fruits'),
+        DeclareLaunchArgument('inference_mode', default_value='disease'),
         DeclareLaunchArgument('publish_visualization', default_value='true'),
         DeclareLaunchArgument('standalone_mode', default_value='true'),
         IncludeLaunchDescription(

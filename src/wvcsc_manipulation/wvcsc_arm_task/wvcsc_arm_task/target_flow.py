@@ -325,30 +325,14 @@ class TargetFlowMixin:
     """
 
     # ---------- 视觉订阅回调 ----------
-    def _on_tree_detections(self, message):
-        """YOLO 树检测结果的回调，递增连续帧计数器。"""
-        trees = detection_candidates(
-            message, 'tree', self.get_parameter('tree_confidence').value)
-        with self._vision_mutex:
-            # 如果当前帧有有效检测，则累加帧数；否则重置计数器，要求重新累积置信度
-            self._tree_frames = self._tree_frames + 1 if trees else 0
-
     def _on_fruit_detections(self, message):
         """YOLO 病果分割结果的回调，保留短窗口几何快照。"""
         fruits = deduplicate_candidates(detection_candidates(
-            message, str(self.get_parameter('target_class_name').value),
-            self.get_parameter('fruit_confidence').value))
+            message, self.config.target_class_name,
+            self.config.disease_confidence))
         with self._vision_mutex:
             self._fruit_frames += 1
-            current = {fruit.target_id: fruit for fruit in fruits}
-            # 使用计数器字典，记录每个目标连续出现的帧数
-            self._fruit_counts = {
-                target_id: self._fruit_counts.get(target_id, 0) + 1
-                if target_id in current else 0
-                for target_id in set(self._fruit_counts) | set(current)
-            }
-            self._fruit_latest = current
-            self._fruit_history.append((time.monotonic(), list(current.values())))
+            self._fruit_history.append((time.monotonic(), list(fruits)))
 
     def _on_selected_target(self, message):
         """
@@ -645,17 +629,10 @@ class TargetFlowMixin:
         self._tree_in_base = None
         self._camera_mount = None
         self._reset_fruit_tracking()
-        self._reset_tree_tracking()
-
-    def _reset_tree_tracking(self):
-        with self._vision_mutex:
-            self._tree_frames = 0
 
     def _reset_fruit_tracking(self):
         with self._vision_mutex:
             self._fruit_frames = 0
-            self._fruit_counts = {}
-            self._fruit_latest = {}
             self._fruit_history = []
             self._target_confirmation_id = ''
             self._target_valid_frames = 0

@@ -1,14 +1,11 @@
 """YOLO detection backend for disease targets."""
 
-from pathlib import Path
-import sys
-
-from .model_utils import resolve_yolo_model_path, validate_yolo_model
+from .model_utils import load_yolo_model
 from .perception_types import DiseaseTarget
 
 
 class DiseaseDetector:
-    """Run a fixed ``detect`` model and return ROI-local bounding boxes only."""
+    """Run a fixed ``detect`` model and return full-image bounding boxes only."""
 
     def __init__(
             self, model_path, target_class_id, target_class_name,
@@ -18,26 +15,14 @@ class DiseaseDetector:
         self._model = self._load_model(model_path, strict_model_classes)
 
     def _load_model(self, model_path, strict_model_classes):
-        try:
-            from ultralytics import YOLO
-        except ImportError as error:
-            raise RuntimeError(
-                f'YOLO runtime import failed with {sys.executable}: {error}. '
-                'Set yolo_python_executable to the isolated WVCSC YOLO environment.'
-            ) from error
-        resolved_path = resolve_yolo_model_path(model_path)
-        if not Path(resolved_path).is_file():
-            raise FileNotFoundError(f'YOLO weight file is missing: {resolved_path}')
-        model = YOLO(resolved_path)
-        validate_yolo_model(
-            model, 'detect',
+        return load_yolo_model(
+            model_path, 'detect',
             {self._target_class_id: self._target_class_name},
             exact_names=strict_model_classes)
-        return model
 
-    def detect(self, roi_image, confidence):
+    def detect(self, image, confidence):
         """Return configured disease boxes without a model-provided aim point."""
-        result = self._model(roi_image, verbose=False, conf=float(confidence))[0]
+        result = self._model(image, verbose=False, conf=float(confidence))[0]
         if result.boxes is None:
             return []
         instances = []

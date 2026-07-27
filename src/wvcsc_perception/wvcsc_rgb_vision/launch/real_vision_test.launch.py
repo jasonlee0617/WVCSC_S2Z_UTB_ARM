@@ -1,4 +1,4 @@
-"""Standalone real-camera YOLO test: C10 camera plus both YOLO stages."""
+"""Standalone real-camera disease-target YOLO test."""
 
 import os
 
@@ -29,8 +29,8 @@ def generate_launch_description():
                 '~/venvs/wvcsc_yolo_ros/bin/python'),
             description='Python interpreter containing the YOLO runtime.'),
         DeclareLaunchArgument(
-            'inference_mode', default_value='fruits',
-            description='YOLO mode: tree, fruits, or target.'),
+            'inference_mode', default_value='disease',
+            description='YOLO mode: idle, disease, or target.'),
         DeclareLaunchArgument(
             'publish_visualization', default_value='true'),
         DeclareLaunchArgument(

@@ -63,7 +63,7 @@ class SeedCapture(Node):
             for target in message.targets})
 
     def _feedback(self, message):
-        if (message.feedback.phase == ExecuteSpray.Feedback.SCANNING_TREE and
+        if (message.feedback.phase == ExecuteSpray.Feedback.DETECTING_TARGETS and
                 self.current_tree and self.current_tree not in self.captured):
             self.pending = self.current_tree
 

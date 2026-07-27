@@ -69,8 +69,6 @@ wvcsc_visual_servo:
     # ----------------------------------------------------------------------
     # 4. 像素对准精度与收敛容差（核心闭环指标）
     # ----------------------------------------------------------------------
-    # 粗调阈值：当像素误差小于 20px 时，伺服进入减速区（配合近目标速度缩放）。
-    coarse_tolerance_px: 20.0
     # 单树实测分割点在静止时会抖动到 6.4px。统一使用 8px 圆形误差，
     # 取消“零速保持但又不判成功”的死区，与 ±8px 喷洒验收线一致。
     fine_tolerance_px: 8.0
@@ -92,7 +90,6 @@ wvcsc_visual_servo:
 
     # 喷嘴轴线投影补偿使用每个观察位的真实几何工距；任何CameraInfo/TF/几何
     # 异常均拒绝伺服，禁止退化到图像中心后误喷。
-    aim_compensation_enabled: true
     aim_range_source: goal
     aim_range_min_m: 0.20
     aim_range_max_m: 2.00
@@ -101,24 +98,11 @@ wvcsc_visual_servo:
     aim_image_margin_px: 20.0
 
     # ----------------------------------------------------------------------
-    # 5. 相机内参容错
-    # ----------------------------------------------------------------------
-    # 仅在显式关闭 require_camera_info 的非喷洒诊断场景使用以下备用焦距；
-    # 喷嘴补偿启用时始终要求真实 CameraInfo，禁止用默认内参执行喷洒。
-    fallback_fx: 507.872735
-    fallback_fy: 507.872735
-    # 是否强制等待 CameraInfo。
-    require_camera_info: true
-
-    # ----------------------------------------------------------------------
     # 6. PID 控制器参数（图像平面 XY 轴独立控制）
     # ----------------------------------------------------------------------
     # 像素误差先除以焦距变为弧度。执行链恢复后以中等增益作为基线，避免
     # 曾经的 12.0 增益在控制器真正跟随轨迹后造成饱和、过冲或奇异点逼近。
     pid_kp_xy: 4.00
-    # 积分增益 (KI=0.0) 关闭。喷嘴几何补偿与 MoveIt 重心已消除稳态大误差，
-    # 仅由比例和微分项完成 4px 内的稳定对准。
-    pid_ki_xy: 0.0
     # 微分增益 (KD=0.005) 很小，用于补偿视觉运动产生的微小阻尼。
     pid_kd_xy: 0.005
 
@@ -126,42 +110,6 @@ wvcsc_visual_servo:
     pid_d_ema_alpha: 0.65
     # 微分项限幅 (2.0)，防止单帧像素跳变过大导致速度指令突变。
     derivative_clip_xy: 2.0
-    # 积分限幅 (0.10)，防止积分项在长时间无视觉反馈时无限累加。
-    integral_limit_xy: 0.10
-
-    # ----------------------------------------------------------------------
-    # 7. 速度与加速度限制 (平移运动)
-    # ----------------------------------------------------------------------
-    # 视觉伺服 (眼睛在手 Eye-in-Hand) 模式下，相机光轴方向受姿态微调影响。
-    max_linear_speed: 0.08      # 最大线速度 0.08 m/s
-    max_linear_acceleration: 0.60 # 最大线加速度 0.60 m/s²
-
-    # 接近目标时的降速策略。
-    # 当处于近目标区 (`coarse_tolerance_px = 20px` 以内) 时，速度乘以 `1.0` (不降速)。
-    near_target_speed_scale: 1.0
-    # 当误差小于 6.0px 时（非常接近最终目标），应用 `near_target_control_scale=0.35` 进行强力降速。
-    # 这个 0.35 的系数是为了防止 PID 在极小像素偏差下发生过冲和振荡。
-    near_target_control_threshold_px: 6.0
-    near_target_control_scale: 0.35
-
-    # 当 MoveIt Servo 返回减速状态（如接近奇异点）时，是否对视觉命令应用缩放。
-    warning_speed_scale: 1.0
-
-    # 目标位置预测参数 (Precision Control)。
-    # 目标经过视觉感知层（YOLO/Kalman）已经进行了平滑。这里不再进行预测 (lead=0.0)，
-    # 避免在接近 1.5px 的微调阶段产生过冲。
-    predict_lead_sec: 0.0
-    max_predict_horizon_sec: 0.05
-
-    # ----------------------------------------------------------------------
-    # 8. 指令模式转换 (Angular vs Linear)
-    # ----------------------------------------------------------------------
-    # 命令模式：`angular_xy` 或 `linear_xy`。
-    # 本项目使用 `angular_xy` (图像平面上可调节 X/Y 轴的角速度)。
-    # 因为相机安装在机械臂末端 (Eye-in-Hand)，固定喷洒距离已由 MoveIt 规划保证，
-    # 本节点不控制深度，仅通过微小的俯仰/偏航旋转，将病果“拉”回图像中心。
-    command_mode: angular_xy
-
     # Image-axis direction defaults.  The simulation/nominal camera mounting
     # uses the optical-frame convention directly; real hardware may override
     # either sign after an observed low-speed response check.

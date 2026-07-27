@@ -1,17 +1,30 @@
 """YOLO segmentation backend for disease targets."""
 
 import math
-from pathlib import Path
-import sys
 
+import cv2
 import numpy as np
 
-from .model_utils import resolve_yolo_model_path, validate_yolo_model
-from .perception_types import DiseaseTarget, safest_mask_point
+from .model_utils import load_yolo_model
+from .perception_types import DiseaseTarget
+
+
+def safest_mask_point(points, width, height):
+    """Return a stable point furthest from this segment mask boundary."""
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillPoly(mask, [np.asarray(points, dtype=np.int32)], 255)
+    distance = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    maximum = float(distance.max())
+    if maximum <= 0.0:
+        raise ValueError('disease mask has no interior pixel')
+    core = np.argwhere(distance >= 0.80 * maximum)
+    centroid = core.mean(axis=0)
+    row, column = core[int(np.argmin(np.sum((core - centroid) ** 2, axis=1)))]
+    return float(column), float(row)
 
 
 class DiseaseSegmenter:
-    """Run a fixed ``segment`` model and return ROI-local safe control points."""
+    """Run a fixed ``segment`` model and return full-image safe control points."""
 
     def __init__(
             self, model_path, target_class_id, target_class_name,
@@ -21,27 +34,15 @@ class DiseaseSegmenter:
         self._model = self._load_model(model_path, strict_model_classes)
 
     def _load_model(self, model_path, strict_model_classes):
-        try:
-            from ultralytics import YOLO
-        except ImportError as error:
-            raise RuntimeError(
-                f'YOLO runtime import failed with {sys.executable}: {error}. '
-                'Set yolo_python_executable to the isolated WVCSC YOLO environment.'
-            ) from error
-        resolved_path = resolve_yolo_model_path(model_path)
-        if not Path(resolved_path).is_file():
-            raise FileNotFoundError(f'YOLO weight file is missing: {resolved_path}')
-        model = YOLO(resolved_path)
-        validate_yolo_model(
-            model, 'segment',
+        return load_yolo_model(
+            model_path, 'segment',
             {self._target_class_id: self._target_class_name},
             exact_names=strict_model_classes)
-        return model
 
-    def detect(self, roi_image, confidence):
-        """Return target boxes and mask-safe points in ROI-local coordinates."""
+    def detect(self, image, confidence):
+        """Return target boxes and mask-safe points in image coordinates."""
         result = self._model(
-            roi_image, verbose=False, conf=float(confidence), iou=0.45)[0]
+            image, verbose=False, conf=float(confidence), iou=0.45)[0]
         return self._instances(result)
 
     def _instances(self, result):

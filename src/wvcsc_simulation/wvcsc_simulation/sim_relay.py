@@ -36,7 +36,7 @@ class SimRelay(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self._publishers = {
+        self._channel_publishers = {
             1: self.create_publisher(Bool, '/relay/sim/channel_1_active', latched),
             2: self.create_publisher(Bool, '/relay/sim/channel_2_active', latched),
         }
@@ -84,7 +84,7 @@ class SimRelay(Node):
     def _publish(self, channel):
         message = Bool()
         message.data = self._states[channel]
-        self._publishers[channel].publish(message)
+        self._channel_publishers[channel].publish(message)
 
     def _expire_pulses(self):
         now = time.monotonic()

@@ -18,6 +18,8 @@ def generate_launch_description():
     observation_mode = LaunchConfiguration('observation_mode')
     ik_recording_range_min_m = LaunchConfiguration('ik_recording_range_min_m')
     ik_recording_range_max_m = LaunchConfiguration('ik_recording_range_max_m')
+    default_arm_spray_duration_sec = LaunchConfiguration(
+        'default_arm_spray_duration_sec')
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('map_frame', default_value='map'),
@@ -31,6 +33,8 @@ def generate_launch_description():
         DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
         DeclareLaunchArgument('ik_recording_range_min_m', default_value='0.85'),
         DeclareLaunchArgument('ik_recording_range_max_m', default_value='1.45'),
+        DeclareLaunchArgument(
+            'default_arm_spray_duration_sec', default_value='3.0'),
         Node(
             package='wvcsc_bringup',
             executable='nav2_qt.py',
@@ -50,6 +54,8 @@ def generate_launch_description():
                     ik_recording_range_min_m, value_type=float),
                 'ik_recording_range_max_m': ParameterValue(
                     ik_recording_range_max_m, value_type=float),
+                'default_arm_spray_duration_sec': ParameterValue(
+                    default_arm_spray_duration_sec, value_type=float),
             }],
             output='screen',
         ),

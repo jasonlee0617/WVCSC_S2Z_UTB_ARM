@@ -4,14 +4,15 @@
 from __future__ import annotations
 
 import datetime
+import math
 import sys
 import uuid
 
 from geometry_msgs.msg import PointStamped
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QApplication, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
+    QLabel, QPushButton, QSplitter, QTextEdit, QVBoxLayout, QWidget,
 )
 import rclpy
 from rclpy.action import ActionClient
@@ -24,7 +25,39 @@ from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.msg import MissionStatus
 
 
-def build_spray_goal(mission_id, tree_id, frame_id, x_m, y_m, z_m, duration):
+ARM_TEST_TREE_ID = 'arm_test_tree'
+OBSERVATION_MODES = {'ik', 'joint_presets'}
+
+
+def normalize_observation_mode(value):
+    mode = str(value).strip().lower()
+    if mode not in OBSERVATION_MODES:
+        raise ValueError('observation_mode must be ik or joint_presets')
+    return mode
+
+
+def side_distance_coordinates(side, distance_m):
+    """Encode a directly-left/right plant hint in the arm-base frame."""
+    distance_m = float(distance_m)
+    if (side not in {'left', 'right'} or not math.isfinite(distance_m)
+            or distance_m <= 0.0):
+        raise ValueError('plant side or distance is invalid')
+    return 0.0, distance_m if side == 'left' else -distance_m, 0.0
+
+
+def arm_test_coordinates(
+        observation_mode, side, base_distance_m, joint_preset_hint_distance_m):
+    """Build the minimal tree hint required by the selected observation mode."""
+    mode = normalize_observation_mode(observation_mode)
+    distance_m = (
+        float(base_distance_m) if mode == 'ik'
+        else float(joint_preset_hint_distance_m))
+    return side_distance_coordinates(side, distance_m)
+
+
+def build_spray_goal(
+        mission_id, tree_id, frame_id, x_m, y_m, z_m, duration,
+        observation_mode='', working_range_m=0.0):
     """Build the one and only target accepted by the arm-only test UI."""
     goal = ExecuteSpray.Goal()
     goal.mission_id = str(mission_id)
@@ -35,6 +68,8 @@ def build_spray_goal(mission_id, tree_id, frame_id, x_m, y_m, z_m, duration):
     goal.tree_hint.point.x = float(x_m)
     goal.tree_hint.point.y = float(y_m)
     goal.tree_hint.point.z = float(z_m)
+    goal.observation_mode = str(observation_mode)
+    goal.working_range_m = float(working_range_m)
     return goal
 
 
@@ -42,7 +77,43 @@ class ArmSprayTestNode(Node):
     def __init__(self):
         super().__init__('wvcsc_arm_spray_test_qt')
         self.declare_parameter('base_frame', 'alicia_base_link')
+        self.declare_parameter('default_observation_mode', 'joint_presets')
+        self.declare_parameter('tree_distance_min_m', 0.80)
+        self.declare_parameter('tree_distance_max_m', 1.50)
+        self.declare_parameter('working_range_min_m', 0.20)
+        self.declare_parameter('working_range_max_m', 2.00)
+        self.declare_parameter('default_working_range_m', 1.00)
+        self.declare_parameter('joint_preset_hint_distance_m', 1.00)
         self.base_frame = str(self.get_parameter('base_frame').value)
+        self.default_observation_mode = normalize_observation_mode(
+            self.get_parameter('default_observation_mode').value)
+        self.tree_distance_min = float(
+            self.get_parameter('tree_distance_min_m').value)
+        self.tree_distance_max = float(
+            self.get_parameter('tree_distance_max_m').value)
+        self.working_range_min = float(
+            self.get_parameter('working_range_min_m').value)
+        self.working_range_max = float(
+            self.get_parameter('working_range_max_m').value)
+        self.default_working_range = float(
+            self.get_parameter('default_working_range_m').value)
+        self.joint_preset_hint_distance = float(
+            self.get_parameter('joint_preset_hint_distance_m').value)
+        if (not math.isfinite(self.tree_distance_min) or
+                not math.isfinite(self.tree_distance_max) or
+                self.tree_distance_min <= 0.0 or
+                self.tree_distance_min > self.tree_distance_max):
+            raise ValueError('tree distance range is invalid')
+        if (not math.isfinite(self.working_range_min) or
+                not math.isfinite(self.working_range_max) or
+                self.working_range_min <= 0.0 or
+                self.working_range_min > self.working_range_max or
+                not self.working_range_min <= self.default_working_range <=
+                self.working_range_max):
+            raise ValueError('working range is invalid')
+        if (not math.isfinite(self.joint_preset_hint_distance) or
+                self.joint_preset_hint_distance <= 0.0):
+            raise ValueError('joint preset hint distance is invalid')
         self.client = ActionClient(self, ExecuteSpray, '/arm/execute_spray')
         latched = QoSProfile(
             depth=1,
@@ -71,16 +142,38 @@ class ArmSprayTestNode(Node):
     def _on_motion_state(self, message):
         self.motion_state = str(message.data)
 
-    def start(self, tree_id, x_m, y_m, z_m, duration):
+    def start(
+            self, side, base_distance_m, working_range_m, duration,
+            observation_mode):
         if self._active:
             raise RuntimeError('spray Action is already active')
         if not self.client.wait_for_server(timeout_sec=1.0):
             raise RuntimeError('/arm/execute_spray is unavailable')
+        observation_mode = normalize_observation_mode(observation_mode)
+        base_distance_m = (
+            float(base_distance_m) if observation_mode == 'ik'
+            else self.joint_preset_hint_distance)
+        if (observation_mode == 'ik' and not
+                self.tree_distance_min <= base_distance_m <=
+                self.tree_distance_max):
+            raise ValueError(
+                f'IK plant distance must be within '
+                f'{self.tree_distance_min:.2f}-{self.tree_distance_max:.2f} m')
+        working_range_m = float(working_range_m)
+        if (not math.isfinite(working_range_m) or not
+                self.working_range_min <= working_range_m <=
+                self.working_range_max):
+            raise ValueError(
+                f'working_range_m must be within '
+                f'{self.working_range_min:.2f}-{self.working_range_max:.2f} m')
+        x_m, y_m, z_m = arm_test_coordinates(
+            observation_mode, side, base_distance_m,
+            self.joint_preset_hint_distance)
         self.mission_id = f'arm_qt_{uuid.uuid4().hex[:8]}'
-        self.target_id = str(tree_id).strip() or 'single_target'
+        self.target_id = ARM_TEST_TREE_ID
         goal = build_spray_goal(
             self.mission_id, self.target_id, self.base_frame,
-            x_m, y_m, z_m, duration)
+            x_m, y_m, z_m, duration, observation_mode, working_range_m)
         goal.tree_hint.header.stamp = self.get_clock().now().to_msg()
         self._active = True
         self._publish_active_status()
@@ -190,30 +283,42 @@ class ArmSprayTestGui(QWidget):
     def _build_ui(self):
         self.setWindowTitle('WVCSC 单臂喷洒测试')
         self.setGeometry(260, 170, 1180, 680)
-        outer = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
         controls = QWidget()
         layout = QVBoxLayout(controls)
         form = QFormLayout()
-        self.tree_id = QLineEdit('corn_01')
-        form.addRow('树/病株 ID:', self.tree_id)
-        self.x_spin = self._spin(-5.0, 5.0, 0.0)
-        self.y_spin = self._spin(-5.0, 5.0, 1.50)
-        self.z_spin = self._spin(-2.0, 3.0, 0.0)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem('IK', 'ik')
+        self.mode_combo.addItem('joint_preset', 'joint_presets')
+        self.mode_combo.setCurrentIndex(
+            max(0, self.mode_combo.findData(self.node.default_observation_mode)))
+        form.addRow('观察模式:', self.mode_combo)
         self.duration_spin = self._spin(0.2, 10.0, 5.0)
-        form.addRow('树 X (m):', self.x_spin)
-        form.addRow('树 Y (m):', self.y_spin)
-        form.addRow('树 Z (m):', self.z_spin)
         form.addRow('喷洒时长 (s):', self.duration_spin)
+        self.side_combo = QComboBox()
+        self.side_combo.addItem('左侧 (+Y)', 'left')
+        self.side_combo.addItem('右侧 (-Y)', 'right')
+        form.addRow('病株侧位:', self.side_combo)
+        self.base_distance_label = QLabel('基座到病株距离 (m):')
+        self.base_distance_spin = self._spin(
+            self.node.tree_distance_min, self.node.tree_distance_max, 1.50)
+        form.addRow(self.base_distance_label, self.base_distance_spin)
+        self.working_range_spin = self._spin(
+            self.node.working_range_min, self.node.working_range_max,
+            self.node.default_working_range)
+        self.working_range_spin.setToolTip(
+            '喷嘴轴线投影到目标平面所使用的标定距离；'
+            '不替代碰撞、限位或奇异性检查。')
+        form.addRow('工作距离 (m):', self.working_range_spin)
         layout.addLayout(form)
-        buttons = QGridLayout()
-        self.execute_button = QPushButton('执行单目标喷洒')
-        self.cancel_button = QPushButton('取消 Action')
-        self.stop_home_button = QPushButton('停止并回 HOME')
+
+        buttons = QVBoxLayout()
+        self.start_button = QPushButton('启动')
+        self.stop_home_button = QPushButton('复位')
         self.unlock_button = QPushButton('HOME 完成后解锁')
-        buttons.addWidget(self.execute_button, 0, 0, 1, 2)
-        buttons.addWidget(self.cancel_button, 1, 0)
-        buttons.addWidget(self.stop_home_button, 1, 1)
-        buttons.addWidget(self.unlock_button, 2, 0, 1, 2)
+        buttons.addWidget(self.start_button)
+        buttons.addWidget(self.stop_home_button)
+        buttons.addWidget(self.unlock_button)
         layout.addLayout(buttons)
         self.action_label = QLabel('Action: 空闲')
         self.progress_label = QLabel('进度: 0%')
@@ -225,13 +330,24 @@ class ArmSprayTestGui(QWidget):
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         layout.addWidget(self.log_area, 1)
-        outer.addWidget(controls, 2)
-        outer.addWidget(RosImagePanel(self.node), 3)
+        self.image_toggle = QCheckBox('显示相机/YOLO画面')
+        self.image_toggle.setChecked(True)
+        layout.insertWidget(2, self.image_toggle)
 
-        self.execute_button.clicked.connect(self._execute)
-        self.cancel_button.clicked.connect(self._cancel)
+        self.image_panel = RosImagePanel(self.node, active=True)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(controls)
+        splitter.addWidget(self.image_panel)
+        splitter.setSizes([430, 750])
+        self.output_splitter = splitter
+        outer.addWidget(splitter)
+
+        self.start_button.clicked.connect(self._execute)
         self.stop_home_button.clicked.connect(self._stop_and_home)
         self.unlock_button.clicked.connect(self._unlock)
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        self.image_toggle.toggled.connect(self._set_image_panel_visible)
+        self._on_mode_changed()
 
     @staticmethod
     def _spin(minimum, maximum, value):
@@ -244,21 +360,26 @@ class ArmSprayTestGui(QWidget):
 
     def _execute(self):
         try:
+            observation_mode = str(self.mode_combo.currentData())
             goal = self.node.start(
-                self.tree_id.text(), self.x_spin.value(), self.y_spin.value(),
-                self.z_spin.value(), self.duration_spin.value())
-        except RuntimeError as error:
+                str(self.side_combo.currentData()),
+                self.base_distance_spin.value(),
+                self.working_range_spin.value(),
+                self.duration_spin.value(),
+                observation_mode)
+        except (RuntimeError, ValueError) as error:
             self._log(str(error))
             return
         self.action_label.setText('Action: 请求已发送')
         self.result_label.setText('结果: 等待')
+        side_text = '左侧' if goal.tree_hint.point.y > 0.0 else '右侧'
+        distance_text = (
+            f', 基座距离={abs(goal.tree_hint.point.y):.2f}m'
+            if goal.observation_mode == 'ik' else '')
         self._log(
-            f'已发送 {goal.tree_id}: '
-            f'({goal.tree_hint.point.x:.2f}, {goal.tree_hint.point.y:.2f}, '
-            f'{goal.tree_hint.point.z:.2f}) m, {goal.spray_duration:.1f}s')
-
-    def _cancel(self):
-        self._log('已请求取消当前喷洒 Action' if self.node.cancel() else '没有可取消的 Action')
+            f'已启动 {goal.observation_mode}: {side_text}{distance_text}, '
+            f'工作距离={goal.working_range_m:.2f}m, '
+            f'喷洒={goal.spray_duration:.1f}s')
 
     def _stop_and_home(self):
         self.home_pending = True
@@ -276,6 +397,18 @@ class ArmSprayTestGui(QWidget):
             self._log('已发送解除 HOME 锁定请求')
         else:
             self._log('机械臂尚未到达 HOME_LOCKED，不能解锁')
+
+    def _on_mode_changed(self, *_args):
+        mode = str(self.mode_combo.currentData())
+        visible = mode == 'ik'
+        self.base_distance_label.setVisible(visible)
+        self.base_distance_spin.setVisible(visible)
+
+    def _set_image_panel_visible(self, visible):
+        self.image_panel.setVisible(bool(visible))
+        self.image_panel.set_active(bool(visible))
+        if visible:
+            self.output_splitter.setSizes([430, 750])
 
     def _feedback(self, phase, progress, text):
         self.action_label.setText(f'Action 阶段: {phase} {text}')
@@ -295,8 +428,7 @@ class ArmSprayTestGui(QWidget):
 
     def _refresh(self):
         self.motion_label.setText(f'机械臂: {self.node.motion_state}')
-        self.execute_button.setEnabled(not self.node.active)
-        self.cancel_button.setEnabled(self.node.active)
+        self.start_button.setEnabled(not self.node.active)
         self.unlock_button.setEnabled(self.node.motion_state == 'HOME_LOCKED')
 
     def _log(self, text):

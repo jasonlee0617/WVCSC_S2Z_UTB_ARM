@@ -4,10 +4,10 @@
 # ============================================================================
 #
 # 节点职责：
-# 1. 订阅 C10 相机图像，根据 `inference_mode` (idle/tree/fruits/target)
-#    执行轻量级推理。
-# 2. 输出 `/vision/tree_detections` 和 `/vision/diseased_target_detections`。
-# 3. 在目标锁定模式下，对特定病果的掩膜进行深度处理，获取安全喷洒点
+# 1. 订阅 C10 相机图像，根据 `inference_mode` (idle/disease/target)
+#    对整幅画面执行病态目标推理。
+# 2. 输出 `/vision/diseased_target_detections`。
+# 3. 在目标锁定模式下，对特定病态目标的掩膜进行深度处理，获取安全喷洒点
 #    (`aim_u/v`)，并发布给视觉伺服节点。
 #
 
@@ -23,21 +23,15 @@ wvcsc_perception_pipeline:
     # 输入话题：从 `spray_task` 发来的“当前要锁定的目标 ID”
     selected_target_topic: /vision/selected_target_id
 
-    # 输出话题：第一阶段的树检测结果 (检测框)
-    tree_detections_topic: /vision/tree_detections
-    # 输出话题：第二阶段的果实实例分割结果 (分割掩膜)
+    # 输出话题：病态目标实例分割或检测结果
     diseased_target_detections_topic: /vision/diseased_target_detections
     # 输出话题：最终发送给视觉伺服的 Target2D 目标 (包含用于喷洒的安全像素点)
     target_topic: /vision/target
 
     # 调试可视化话题 (发布带标注的 OpenCV 图像)
-    tree_visualization_topic: /vision/tree_debug_image
     diseased_target_visualization_topic: /vision/diseased_target_debug_image
-    # 调试 JSON 话题：包含 `aim_u/v` 和每个目标的 ID，用于 PlotJuggler 性能分析
-    perception_debug_topic: /vision/perception_debug
-    perception_debug_rate_hz: 5.0
 
-    # 输入话题：控制感知阶段的推理模式 (idle/tree/fruits/target)
+    # 输入话题：控制感知阶段的推理模式 (idle/disease/target)
     inference_mode_topic: /vision/inference_mode
 
     # ----------------------------------------------------------------------
@@ -45,13 +39,10 @@ wvcsc_perception_pipeline:
     # ----------------------------------------------------------------------
     # 注：相对路径会解析到 `wvcsc_rgb_vision/models/` 目录下。
     # `s` 代表 YOLOv8 Small 版本，在 NVIDIA 嵌入式平台(如 Jeston)上有较好平衡。
-    tree_model_path: yolov8s_sim.pt
     # 默认保持分割：掩膜安全点作为 Target2D.center_u/v。
     # detect 实验模型需显式改为 detect，并配套 detect 权重。
     disease_model_backend: segment
-    fruit_model_path: yolov8s_seg_sim.pt
-    tree_class_id: 0
-    tree_class_name: tree
+    disease_model_path: yolov8s_seg_sim.pt
     target_class_id: 0
     target_class_name: diseased_target
     target_id_prefix: target
@@ -61,16 +52,11 @@ wvcsc_perception_pipeline:
     # ----------------------------------------------------------------------
     # 3. 推理与置信度阈值
     # ----------------------------------------------------------------------
-    # 树检测的最低置信度 (0.10 允许部分遮挡的树通过)
-    tree_confidence: 0.10
     # 病果分割的最低置信度 (YOLO 的分割掩膜即使置信度低，仍具有较好的边界特征)
-    fruit_confidence: 0.10
+    disease_confidence: 0.10
     # 仿真输出所有病果目标。
     max_diseased_targets: 0
 
-    # 当在树区域内进行果实分割时，ROI 放大比例。
-    # 0.10 表示在树框外扩大 10% 的范围，确保边缘的病果不会被切掉。
-    roi_padding: 0.10
 
     # ----------------------------------------------------------------------
     # 4. 短期目标跟踪 (Tracking) 配置
@@ -137,11 +123,7 @@ wvcsc_perception_pipeline:
     target_template_min_score: 0.55
 
     # ----------------------------------------------------------------------
-    # 8. 树锁定与调试可视化
+    # 8. 调试可视化
     # ----------------------------------------------------------------------
-    # 当需要在多棵树之间切换时，如果新检测的树与上一棵锁定的树
-    # IoU 重叠 > 0.20，则认为还在同一棵树上。
-    tree_lock_iou_threshold: 0.20
-
-    # 是否发布带有标注的调试图像 (黄色高亮为病果，绿色为树，红色健康果，蓝色为安全点)。
+    # 是否发布带有标注的调试图像（黄色高亮为选中目标，蓝色为安全点）。
     publish_visualization: true

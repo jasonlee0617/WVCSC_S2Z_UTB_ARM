@@ -10,6 +10,8 @@ from wvcsc_arm_task.joint_preset_observation import (
     JointPresetObservationMixin,
 )
 from wvcsc_arm_task.observation_flow import ObservationFlowMixin
+from wvcsc_arm_task.spray_config import joint_preset_parameters
+from wvcsc_arm_task.spray_task import SprayTask
 
 
 class _PresetParameterHarness:
@@ -66,6 +68,64 @@ def test_joint_presets_convert_configured_degrees_to_radians_exactly():
     assert presets['right'][2][1] == pytest.approx(tuple(
         math.radians(value)
         for value in DEFAULT_JOINT_PRESETS_DEG['right_fan_right']))
+
+
+def test_spray_config_loads_joint_presets_when_default_mode_is_ik():
+    mode, presets = joint_preset_parameters(_PresetParameterHarness(
+        _parameter_values(observation_mode='ik')))
+
+    assert mode == 'ik'
+    assert set(presets) == {'left', 'right'}
+
+
+def test_action_observation_mode_overrides_only_that_goal():
+    task = SimpleNamespace(config=SimpleNamespace(observation_mode='ik'))
+
+    assert SprayTask._goal_observation_mode(
+        task, SimpleNamespace(observation_mode='joint_presets')) == 'joint_presets'
+    assert SprayTask._goal_observation_mode(
+        task, SimpleNamespace(observation_mode='')) == 'ik'
+
+
+def test_action_working_range_defaults_to_dynamic_and_accepts_an_override():
+    assert SprayTask._goal_working_range(
+        SimpleNamespace(working_range_m=0.9)) == pytest.approx(0.9)
+    assert SprayTask._goal_working_range(SimpleNamespace()) == 0.0
+
+
+class _GoalValidationHarness:
+    _validate_goal = SprayTask._validate_goal
+    _goal_working_range = staticmethod(SprayTask._goal_working_range)
+    _hint_available = staticmethod(ObservationFlowMixin._hint_available)
+    _min_duration = 0.2
+    _max_duration = 10.0
+
+
+def _spray_request(working_range_m):
+    return SimpleNamespace(
+        mission_id='mission',
+        tree_id='tree',
+        spray_duration=3.0,
+        observation_mode='joint_presets',
+        working_range_m=working_range_m,
+        tree_hint=SimpleNamespace(
+            header=SimpleNamespace(frame_id='alicia_base_link'),
+            point=SimpleNamespace(x=0.0, y=1.0, z=0.0),
+        ),
+    )
+
+
+@pytest.mark.parametrize('working_range_m', [0.0, 0.2, 0.9, 2.0])
+def test_goal_validation_accepts_dynamic_or_bounded_manual_working_range(
+        working_range_m):
+    assert _GoalValidationHarness()._validate_goal(
+        _spray_request(working_range_m)) == ''
+
+
+@pytest.mark.parametrize('working_range_m', [-0.1, math.nan, 2.01])
+def test_goal_validation_rejects_invalid_manual_working_range(working_range_m):
+    assert 'working_range_m' in _GoalValidationHarness()._validate_goal(
+        _spray_request(working_range_m))
 
 
 @pytest.mark.parametrize('parameter, value', [
@@ -127,9 +187,6 @@ class _SideGateHarness:
     def get_logger(self):
         return self.logger
 
-    def _publish_observation_debug(self, *_args, **_kwargs):
-        pass
-
     def _prepare_joint_preset_observation_candidates(self):
         self.motion_attempted = True
         return True
@@ -186,10 +243,6 @@ class _CandidatePreparationHarness:
 
     def get_logger(self):
         return self.logger
-
-    @staticmethod
-    def _publish_observation_debug(*_args, **_kwargs):
-        pass
 
 
 @pytest.mark.parametrize(('side', 'expected_joint'), [
@@ -257,10 +310,6 @@ class _PresetMotionHarness:
     @staticmethod
     def _dynamic_nozzle_range():
         return 1.0, ''
-
-    @staticmethod
-    def _publish_observation_debug(*_args, **_kwargs):
-        pass
 
     def get_logger(self):
         return self.logger
