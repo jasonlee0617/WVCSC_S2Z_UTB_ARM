@@ -1,0 +1,20 @@
+parameters:
+  name: wvcsc_c10
+  calibration_type: eye_in_hand
+  robot_base_frame: alicia_base_link
+  robot_effector_frame: tool0
+  tracking_base_frame: camera_color_optical_frame
+  tracking_marker_frame: calibration_aruco
+  freehand_robot_movement: true
+  move_group_namespace: /
+  move_group: arm
+transform:
+  translation:
+    x: -0.062040838091957796
+    y: -0.0034786998280252925
+    z: -0.07932731232299912
+  rotation:
+    x: 0.005807585708250175
+    y: -0.0025771064529635994
+    z: -0.6992127229428198
+    w: 0.7148854443513724

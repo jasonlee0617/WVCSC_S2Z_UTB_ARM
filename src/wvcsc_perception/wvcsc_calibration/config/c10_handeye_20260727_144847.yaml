@@ -1,0 +1,17 @@
+calibration:
+  type: eye_in_hand
+  parent_frame: tool0
+  child_frame: camera_color_optical_frame
+  translation:
+    x: -0.062040838091957796
+    y: -0.0034786998280252925
+    z: -0.07932731232299912
+  rotation:
+    x: 0.005807585708250175
+    y: -0.0025771064529635994
+    z: -0.6992127229428198
+    w: 0.7148854443513724
+  marker:
+    dictionary: DICT_5X5_250
+    id: 1
+    size_m: 0.07
