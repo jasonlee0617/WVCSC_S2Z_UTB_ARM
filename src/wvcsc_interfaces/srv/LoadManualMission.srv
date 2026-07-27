@@ -1,14 +1,13 @@
-# 校准喷嘴瞄准点计算服务。在选定病果目标后，SprayTask 调用此服务，然后再执行 AlignTarget。
-# 服务端返回一个固定正工作平面距离下的目标像素点；它不执行任何机械臂动作、
-# 视觉伺服指令或继电器操作，因此调用方保留执行控制权。
-# Request: 距离配置标定的工作平面距离（米）。
-float32 working_range_m                # 必须为有限值且严格为正；此处 0 为无效值。
+# Qt 向 MissionManager 加载手动路线的服务。Qt 在完成 RViz 录点和任务编辑后
+# 调用本服务；MissionManager 校验坐标系、路线点几何、点类型和数量，并发布 READY
+# 状态。本服务只加载任务，不会隐式启动 Nav2 或喷洒；后续由 /mission/start 触发。
+# Request: header.frame_id 下的完整可编辑任务输入，当前完整任务使用 map。
+std_msgs/Header header                 # 公共坐标系和请求时间戳。
+string mission_id                      # Qt 生成的本次任务标识符。
+geometry_msgs/Pose home_pose           # header.frame_id 下的车辆 HOME 位姿。
+bool return_home_after_finish          # 路线完成后是否导航回 HOME。
+wvcsc_interfaces/ManualMissionTarget[] targets  # 按执行顺序排列的路线点。
 ---
-# Response: 期望的全图像素喷嘴轴线像素点以及用于验证该点的图像尺寸。
-# success=false 时，调用方应据此判断不进入正常视觉伺服流程。
-bool success                           # 当标定/距离解析成功时为 True。
-float32 desired_u_px                   # 在返回的图像帧中的水平目标像素点。
-float32 desired_v_px                   # 在返回的图像帧中的垂直目标像素点。
-uint32 image_width                     # 用于约束 desired_u_px 的图像宽度。
-uint32 image_height                    # 用于约束 desired_v_px 的图像高度。
-string message                         # 人类可读的标定/校验细节。
+# Response: 仅表示任务是否已成功加载；实际启动仍是独立的 /mission/start 调用。
+bool success                           # 校验并更新 MissionManager 状态后为 True。
+string message                         # Qt 显示的校验失败原因或加载摘要。

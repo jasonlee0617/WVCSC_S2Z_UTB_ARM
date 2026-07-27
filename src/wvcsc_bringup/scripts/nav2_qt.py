@@ -82,6 +82,26 @@ ARM_ANCHOR_POSE_REFERENCE = 'alicia_base_link_xy_vehicle_yaw'
 DEFAULT_ARM_SPRAY_DURATION_SEC = 3.0
 MIN_ARM_SPRAY_DURATION_SEC = 0.2
 MAX_ARM_SPRAY_DURATION_SEC = 10.0
+MANUAL_MISSION_REQUEST_FIELDS = (
+    'header', 'mission_id', 'home_pose', 'return_home_after_finish',
+    'targets')
+
+
+class ManualMissionInterfaceMismatchError(RuntimeError):
+    """Raised when generated ROS interfaces do not match this Qt client."""
+
+
+def manual_mission_request_contract_error(request):
+    """Return a deployment error instead of letting a stale interface crash Qt."""
+    missing = [
+        field for field in MANUAL_MISSION_REQUEST_FIELDS
+        if not hasattr(request, field)]
+    if not missing:
+        return None
+    return (
+        'LoadManualMission 接口版本不一致，当前 Request 缺少字段: '
+        f'{", ".join(missing)}。请在同一工作区重建 wvcsc_interfaces、'
+        'wvcsc_mission_manager 和 wvcsc_bringup，并重新 source install/setup.bash。')
 
 
 def non_overwriting_json_path(path):
@@ -620,6 +640,9 @@ class Nav2QtNode(Node):
     def build_manual_request(self, start_pose, points,
                              return_home_after_finish, prefix):
         request = LoadManualMission.Request()
+        contract_error = manual_mission_request_contract_error(request)
+        if contract_error is not None:
+            raise ManualMissionInterfaceMismatchError(contract_error)
         request.header.stamp = self.get_clock().now().to_msg()
         request.header.frame_id = self.map_frame
         request.mission_id = f'manual_{prefix}_{uuid.uuid4().hex[:8]}'
@@ -1383,9 +1406,13 @@ class Nav2Gui(QWidget):
             request = self.node.build_manual_request(
                 self.editor.start_pose, points,
                 self.editor.return_home_after_finish, prefix)
-        except ValueError as error:
-            self._log(f'任务数据无效: {error}')
-            QMessageBox.warning(self, '任务数据无效', str(error))
+        except (ValueError, ManualMissionInterfaceMismatchError) as error:
+            title = (
+                'ROS 接口版本不一致'
+                if isinstance(error, ManualMissionInterfaceMismatchError)
+                else '任务数据无效')
+            self._log(f'{title}: {error}')
+            QMessageBox.warning(self, title, str(error))
             return
         self._request(
             'load', request,

@@ -11,6 +11,9 @@ from builtin_interfaces.msg import Time
 
 SCRIPT = Path(__file__).parents[1] / 'scripts' / 'nav2_qt.py'
 LAUNCH = Path(__file__).parents[1] / 'launch' / 'nav2_qt.launch.py'
+LOAD_MANUAL_MISSION = (
+    SCRIPT.parents[2] / 'wvcsc_interfaces' / 'srv' /
+    'LoadManualMission.srv')
 SPEC = importlib.util.spec_from_file_location('nav2_qt', SCRIPT)
 nav2_qt = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(nav2_qt)
@@ -134,6 +137,30 @@ def test_qt_launch_exposes_the_ik_recording_admission_policy():
     assert "'simulation_parking_clearance_check', default_value='false'" in source
     assert "'default_arm_spray_duration_sec', default_value='3.0'" in source
     assert 'show_sim_spray_status' not in source
+
+
+def test_manual_mission_service_keeps_the_qt_route_request_contract():
+    source = LOAD_MANUAL_MISSION.read_text(encoding='utf-8')
+
+    for field in (
+            'std_msgs/Header header', 'string mission_id',
+            'geometry_msgs/Pose home_pose', 'bool return_home_after_finish',
+            'wvcsc_interfaces/ManualMissionTarget[] targets'):
+        assert field in source
+    assert 'float32 working_range_m' not in source
+
+
+def test_manual_mission_request_schema_mismatch_is_reported_before_submit():
+    valid = SimpleNamespace(
+        header=object(), mission_id='', home_pose=object(),
+        return_home_after_finish=False, targets=[])
+    assert nav2_qt.manual_mission_request_contract_error(valid) is None
+
+    message = nav2_qt.manual_mission_request_contract_error(
+        SimpleNamespace(working_range_m=1.0))
+    assert 'LoadManualMission 接口版本不一致' in message
+    assert 'header' in message
+    assert 'wvcsc_interfaces' in message
 
 
 def test_navigation_qt_keeps_spray_indicators_but_removes_extra_task_controls():
