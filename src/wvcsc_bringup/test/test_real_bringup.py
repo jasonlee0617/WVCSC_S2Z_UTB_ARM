@@ -49,9 +49,12 @@ def test_navigation_matches_the_validated_single_command_stack():
     assert "'tf_buffer_size': '300'" in source
     assert "'start_vehicle_stack', default_value='true'" in source
     assert "'use_rviz', default_value='true'" in source
+    assert "'rviz_goal_topic'" in source
+    assert "default_value='/goal_pose'" in source
     assert "'open_rviz': 'false'" in source
     assert source.count("package='rviz2'") == 1
     assert 'real_navigation.rviz' in source
+    assert "remappings=[('/manual_goal_pose', rviz_goal_topic)]" in source
     assert 'latest_map_yaml' in source
     assert 'orchard.yaml' not in source
     assert 'SetRemap' not in source
@@ -78,6 +81,7 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "_include(launch_dir, 'real_sensors.launch.py'" in source
     assert "_include(launch_dir, 'real_navigation.launch.py'" in source
     assert "'start_vehicle_stack': 'false'" in source
+    assert "'rviz_goal_topic': '/manual_goal_pose'" in source
     assert "'real_arm.launch.py', {" in source
     assert "'use_rviz': LaunchConfiguration('use_moveit_rviz')" in source
     assert "_include(launch_dir, 'real_orchestration.launch.py'" in source
@@ -217,16 +221,56 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     assert 'ActionClient(self, ExecuteSpray, \'/arm/execute_spray\')' in script
 
 
-def test_real_arm_spray_server_wrapper_starts_only_the_existing_backend():
+def test_real_arm_spray_server_wrapper_has_explicit_action_mode():
     wrapper = PACKAGE.parent / 'run_real_arm_spray_server.sh'
     source = wrapper.read_text(encoding='utf-8')
 
     assert wrapper.stat().st_mode & 0o111
     assert 'real_arm_spray_test.launch.py' in source
-    assert 'use_qt_gui:=false "$@"' in source
-    assert 'ros2 action send_goal' not in source
-    assert '/relay/set' not in source
-    assert '/motion_control/command' not in source
+    assert 'auto_execute=false' in source
+    assert 'auto_execute:=true' in source
+    assert 'ros2 action send_goal /arm/execute_spray' in source
+    assert 'wvcsc_interfaces/action/ExecuteSpray' in source
+    assert '"$goal" -f' in source
+    assert "use_qt_gui:=false \"${launch_args[@]}\"" in source
+    assert 'observation_mode_launch_arg' in source
+    assert 'launch_args+=("$observation_mode_launch_arg")' in source
+    for argument in (
+            'observation_mode', 'auto_side', 'auto_tree_distance_m',
+            'auto_working_range_m', 'auto_spray_duration_sec',
+            'auto_mission_id', 'auto_tree_id'):
+        assert f'{argument}:=' in source
+
+    # The wrapper may document downstream topics, but it must not implement
+    # their behavior itself; SprayTask remains the single execution owner.
+    assert "'/servo_node/delta_twist_cmds'" not in source
+    assert "'/relay/set'" not in source
+    assert "'/motion_control/command'" not in source
+
+
+def test_real_arm_spray_server_goal_validation_and_side_mapping_are_explicit():
+    source = (PACKAGE.parent / 'run_real_arm_spray_server.sh').read_text(
+        encoding='utf-8')
+    assert 'auto_side must be left or right' in source
+    assert 'auto_tree_distance_m must be within 0.80-1.50 m' in source
+    assert 'auto_working_range_m must be 0 or within 0.20-2.00 m' in source
+    assert 'auto_spray_duration_sec must be within 0.20-10.00 s' in source
+    assert 'frame_id: alicia_base_link' in source
+    assert 'y: ${tree_y}' in source
+    assert 'Action Server' in source
+
+
+def test_spray_workflow_doc_is_first_person_and_separates_spray_triggers():
+    document = (PACKAGE.parent / 'docs' / '喷洒任务全流程.md').read_text(
+        encoding='utf-8')
+    assert '## 4. 我如何区分两种喷洒触发' in document
+    assert 'wide_spray_on_approach' in document
+    assert 'wide_spray_motion_linear_threshold' in document
+    assert '0.03 m/s' in document
+    assert '通道 1' in document
+    assert '`point_type=INSPECT`' in document
+    assert '`/arm/execute_spray` Action' in document
+    assert '我不会因为病态目标检测结果而触发广域喷洒' in document
 
 
 def test_arm_test_exposes_separate_ik_and_manual_working_ranges():

@@ -961,8 +961,10 @@ class Nav2Gui(QWidget):
         self.pending_dock_sequence = 0
         self.pending = False
         self.required_initial_pose_sequence = 0
-        self.relocalization_ready = not bool(getattr(
-            node, 'require_global_relocalization_service', True))
+        # A fresh RViz 2D Estimate Pose is sufficient at first startup.  The
+        # explicit re-localization flow below closes this gate again until AMCL
+        # confirms its global reset.
+        self.relocalization_ready = True
         self._build_ui()
         self.ros_timer = QTimer(self)
         self.ros_timer.timeout.connect(self._spin_ros)

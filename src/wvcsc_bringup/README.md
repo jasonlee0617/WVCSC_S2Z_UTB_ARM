@@ -49,6 +49,27 @@ cd ~/WVCSC_S2Z_UTB_ARM/src
 ./run_real_arm_spray_server.sh
 ```
 
+上面的命令默认只启动后端，不会自动移动机械臂或打开继电器。需要脚本自动执行一次完整
+`ExecuteSpray` Action 时，我必须显式填写全部 Goal 参数；脚本会等待
+`/arm/execute_spray` Action 服务端，并把后续观测、检测、伺服、喷洒、复检和 HOME 交给
+`wvcsc_spray_task`：
+
+```bash
+./run_real_arm_spray_server.sh \
+  auto_execute:=true \
+  observation_mode:=joint_presets \
+  auto_side:=left \
+  auto_tree_distance_m:=1.00 \
+  auto_working_range_m:=1.00 \
+  auto_spray_duration_sec:=3.00 \
+  auto_mission_id:=arm_test_001 \
+  auto_tree_id:=arm_tree_001
+```
+
+`auto_side` 只接受 `left/right`，左右侧分别生成正/负 Y；`auto_tree_distance_m` 必须位于
+`0.80–1.50 m`，喷洒时长位于 `0.20–10.00 s`，工作距离为 `0` 或 `0.20–2.00 m`。
+脚本不直接发布伺服、继电器或运动控制消息。
+
 在另一个已加载工作区环境的终端启动 Qt：
 
 ```bash

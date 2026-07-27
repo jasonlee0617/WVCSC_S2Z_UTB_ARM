@@ -23,6 +23,7 @@ def generate_launch_description():
     map_file = LaunchConfiguration('map')
     params_file = LaunchConfiguration('params_file')
     use_rviz = LaunchConfiguration('use_rviz')
+    rviz_goal_topic = LaunchConfiguration('rviz_goal_topic')
 
     # This is the field-validated vehicle, LiDAR, IMU, and EKF chain. It does
     # not start C10. The full mission provides its own unified sensor stack.
@@ -53,6 +54,11 @@ def generate_launch_description():
         arguments=['-d', os.path.join(
             bringup_share, 'rviz', 'real_navigation.rviz')],
         parameters=[{'use_sim_time': use_sim_time}],
+        # The shared RViz config publishes its 2D Goal on
+        # /manual_goal_pose.  Standalone navigation remaps it to Nav2's
+        # /goal_pose; the full Qt mission overrides this back to the manual
+        # recorder topic.
+        remappings=[('/manual_goal_pose', rviz_goal_topic)],
         condition=IfCondition(use_rviz),
         output='screen',
     )
@@ -61,6 +67,12 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('start_vehicle_stack', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='true'),
+        DeclareLaunchArgument(
+            'rviz_goal_topic',
+            default_value='/goal_pose',
+            description=(
+                'Destination for RViz 2D Goal Pose. Standalone navigation '
+                'defaults to Nav2; the full Qt mission keeps manual capture.')),
         DeclareLaunchArgument(
             'map',
             default_value=latest_map_yaml(),

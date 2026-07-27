@@ -513,6 +513,13 @@ def test_relocalize_clears_editor_and_requires_a_new_tf_backed_start():
     assert nav2_qt.pose_yaw(editor.start_pose) == pytest.approx(0.3)
 
 
+def test_fresh_start_accepts_rviz_initial_pose_before_explicit_relocalization():
+    source = Path(nav2_qt.__file__).read_text(encoding='utf-8')
+
+    assert 'self.relocalization_ready = True' in source
+    assert 'explicit re-localization flow below closes this gate again' in source
+
+
 def test_task_uses_all_queued_targets_and_keeps_the_editor_list():
     editor = nav2_qt.MissionEditor()
     editor.start_pose = _pose(0.0, 0.0)

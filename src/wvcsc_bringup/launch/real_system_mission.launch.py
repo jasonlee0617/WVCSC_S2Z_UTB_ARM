@@ -316,6 +316,9 @@ def _resolve_calibrations(context, *, launch_dir):
             'map': LaunchConfiguration('map'),
             'start_vehicle_stack': 'false',
             'use_rviz': LaunchConfiguration('use_nav_rviz'),
+            # In the full mission, RViz 2D Goal remains a Qt task-recording
+            # input and must not submit an immediate Nav2 goal.
+            'rviz_goal_topic': '/manual_goal_pose',
         }),
         # Keep the two RViz applications independently controlled.  In a
         # full mission the navigation display is useful for setting AMCL's
