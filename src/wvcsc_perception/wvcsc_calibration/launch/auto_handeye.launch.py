@@ -16,7 +16,7 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     calibration_share = get_package_share_directory('wvcsc_calibration')
     return LaunchDescription([
-        DeclareLaunchArgument('video_device', default_value='/dev/video0'),
+        DeclareLaunchArgument('video_device', default_value='/dev/video2'),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument(
             'camera_info_url',

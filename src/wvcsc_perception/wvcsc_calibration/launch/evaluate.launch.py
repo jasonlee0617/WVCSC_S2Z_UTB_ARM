@@ -80,7 +80,7 @@ def generate_launch_description():
         # ── C10 camera ──────────────────────────────────────────
         DeclareLaunchArgument(
             'video_device',
-            default_value='/dev/video0'),
+            default_value='/dev/video2'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(

@@ -121,7 +121,7 @@ print(transforms3d.__file__)
 PY
 
 ros2 launch wvcsc_calibration auto_handeye.launch.py \
-  video_device:=/dev/video0 serial_port:=/dev/ttyACM0
+  video_device:=/dev/video2 serial_port:=/dev/ttyACM0
 ```
 
 上面的 Python 检查中，NumPy 路径不得位于 `/home/eisa/.local`。终端 A
