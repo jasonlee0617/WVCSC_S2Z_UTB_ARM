@@ -1,9 +1,15 @@
-# Resolve the calibrated spray-nozzle aim point for one fixed working plane.
-float32 working_range_m
+# Calibrated nozzle aim-point calculation service.  SprayTask calls it after a
+# disease target is selected and before AlignTarget.  The server returns the
+# target pixel for a fixed positive working plane; it performs no arm movement,
+# visual-servo command or relay operation, so callers retain execution control.
+# Request: working-plane distance from the configured calibration, in metres.
+float32 working_range_m                # Must be finite and strictly positive; 0 is invalid here.
 ---
-bool success
-float32 desired_u_px
-float32 desired_v_px
-uint32 image_width
-uint32 image_height
-string message
+# Response: desired full-image nozzle-axis pixel and the image dimensions used
+# to validate it.  success=false prevents normal visual-servo entry.
+bool success                           # True when calibration/range resolution succeeded.
+float32 desired_u_px                   # Horizontal target pixel in the returned image frame.
+float32 desired_v_px                   # Vertical target pixel in the returned image frame.
+uint32 image_width                     # Image width that bounds desired_u_px.
+uint32 image_height                    # Image height that bounds desired_v_px.
+string message                         # Human-readable calibration/validation detail.

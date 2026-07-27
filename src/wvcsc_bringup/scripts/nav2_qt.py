@@ -494,7 +494,6 @@ class Nav2QtNode(Node):
         self.declare_parameter('goal_pose_topic', '/manual_goal_pose')
         self.declare_parameter('marker_topic', '/waypoints')
         self.declare_parameter('require_global_relocalization_service', True)
-        self.declare_parameter('show_sim_spray_status', False)
         self.declare_parameter('simulation_parking_clearance_check', False)
         self.declare_parameter(
             'default_arm_spray_duration_sec',
@@ -508,8 +507,6 @@ class Nav2QtNode(Node):
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.require_global_relocalization_service = bool(
             self.get_parameter('require_global_relocalization_service').value)
-        self.show_sim_spray_status = bool(
-            self.get_parameter('show_sim_spray_status').value)
         self.simulation_parking_clearance_check = bool(
             self.get_parameter('simulation_parking_clearance_check').value)
         self.default_arm_spray_duration_sec = float(
@@ -539,7 +536,7 @@ class Nav2QtNode(Node):
         self.latest_goal_pose = None
         self.goal_sequence = 0
         self.status = None
-        self.sim_relay_active = {1: False, 2: False}
+        self.spray_active = {'wide': None, 'nozzle': None}
 
         latched = QoSProfile(
             depth=1,
@@ -556,13 +553,12 @@ class Nav2QtNode(Node):
             self._on_goal_pose, 10)
         self.create_subscription(MissionStatus, '/mission/status',
                                  self._on_status, latched)
-        if self.show_sim_spray_status:
-            self.create_subscription(
-                Bool, '/relay/sim/channel_1_active',
-                lambda message: self._on_sim_relay(1, message), latched)
-            self.create_subscription(
-                Bool, '/relay/sim/channel_2_active',
-                lambda message: self._on_sim_relay(2, message), latched)
+        self.create_subscription(
+            Bool, '/spray/wide_active',
+            lambda message: self._on_spray_active('wide', message), latched)
+        self.create_subscription(
+            Bool, '/spray/simulated_active',
+            lambda message: self._on_spray_active('nozzle', message), latched)
         self.marker_pub = self.create_publisher(
             MarkerArray, str(self.get_parameter('marker_topic').value), 10)
         self.service_clients = {
@@ -600,8 +596,8 @@ class Nav2QtNode(Node):
     def _on_status(self, message):
         self.status = message
 
-    def _on_sim_relay(self, channel, message):
-        self.sim_relay_active[channel] = bool(message.data)
+    def _on_spray_active(self, name, message):
+        self.spray_active[name] = bool(message.data)
 
     def current_pose(self):
         try:
@@ -1011,15 +1007,12 @@ class Nav2Gui(QWidget):
         layout.addWidget(self.start_label)
         layout.addLayout(option_layout)
 
-        self.wide_relay_label = None
-        self.arm_relay_label = None
-        if self.node.show_sim_spray_status:
-            relay_layout = QHBoxLayout()
-            self.wide_relay_label = QLabel('广域喷洒: ● 关闭')
-            self.arm_relay_label = QLabel('喷嘴喷洒: ● 关闭')
-            relay_layout.addWidget(self.wide_relay_label)
-            relay_layout.addWidget(self.arm_relay_label)
-            layout.addLayout(relay_layout)
+        relay_layout = QHBoxLayout()
+        self.wide_relay_label = QLabel('广域喷洒: ● 未收到状态')
+        self.arm_relay_label = QLabel('喷嘴喷洒: ● 未收到状态')
+        relay_layout.addWidget(self.wide_relay_label)
+        relay_layout.addWidget(self.arm_relay_label)
+        layout.addLayout(relay_layout)
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(
@@ -1131,13 +1124,12 @@ class Nav2Gui(QWidget):
         if self.node.status and self.node.status.last_error:
             state_text += f' - {self.node.status.last_error}'
         self.status_label.setText(f'状态: {state_text}')
-        wide_relay_label = getattr(self, 'wide_relay_label', None)
-        arm_relay_label = getattr(self, 'arm_relay_label', None)
-        if wide_relay_label is not None and arm_relay_label is not None:
-            self._set_relay_label(
-                wide_relay_label, '广域喷洒', self.node.sim_relay_active[1])
-            self._set_relay_label(
-                arm_relay_label, '喷嘴喷洒', self.node.sim_relay_active[2])
+        self._set_spray_label(
+            self.wide_relay_label, '广域喷洒',
+            self.node.spray_active['wide'], '#1e88e5')
+        self._set_spray_label(
+            self.arm_relay_label, '喷嘴喷洒',
+            self.node.spray_active['nozzle'], '#e53935')
         busy = state in self.ACTIVE
         editable = not self.pending and not busy
         has_start = self.editor.start_pose is not None
@@ -1181,11 +1173,15 @@ class Nav2Gui(QWidget):
                     f'yaw={pose_yaw(pose):.2f}')
 
     @staticmethod
-    def _set_relay_label(label, name, active):
+    def _set_spray_label(label, name, active, active_color):
+        if active is None:
+            label.setText(f'{name}: ● 未收到状态')
+            label.setStyleSheet('color: #808080;')
+            return
         label.setText(f'{name}: ● ' + ('开启' if active else '关闭'))
         label.setStyleSheet(
-            'color: #00d7d7; font-weight: bold;' if active
-            else 'color: #808080;')
+            f'color: {active_color}; font-weight: bold;'
+            if active else 'color: #808080;')
 
     def _record_start(self):
         if not self.relocalization_ready:
@@ -1443,8 +1439,6 @@ class Nav2Gui(QWidget):
                     point,
                     getattr(self.node, 'simulation_parking_clearance_check', False))
             point_type = self._point_type_label(point.point_type)
-            if point.wide_spray_on_approach:
-                point_type += '（广域）'
             static_cells = (
                 (0, QTableWidgetItem(str(row + 1))),
                 (1, QTableWidgetItem(point_type)),

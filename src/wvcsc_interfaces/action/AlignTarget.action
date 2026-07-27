@@ -1,37 +1,44 @@
-# Goal
-string mission_id
-string tree_id
-string target_id
-float32 timeout
-# Contract shared with the MoveIt recenter stage.  The target must be aligned
-# to the calibrated nozzle-axis projection, never to an implicit image centre.
+# 在 SprayTask 选定一个 Target2D 并且 ComputeSprayAim 解析出校准后的喷嘴像素点后，
+# 所执行的视觉伺服对准 Action。SprayTask 是客户端，wvcsc_visual_servo 是服务端。
+# 接受此 Goal 即开始受限的机械臂运动；调用方必须已经通过任务级的观察、碰撞
+# 以及目标有效性检查。
+# Goal: 单个目标的不变身份、时间限制和图像平面契约。
+string mission_id                    # 路线或独立测试标识符。
+string tree_id                       # 当前检查点 / 植物标识符。
+string target_id                     # 稳定的病果账目标识符。
+float32 timeout                      # 最大闭环持续时间（秒）。
+# 工作平面距离（米）。必须为正值：与 ExecuteSpray 不同，
+# 对于这个底层动作，零值不作为自动几何标记。
 float32 working_range_m
+# 当前图像中期望的喷嘴轴线像素坐标（像素）。
 float32 desired_u_px
 float32 desired_v_px
+# 用于验证像素坐标和误差计算的图像尺寸。
 uint32 image_width
 uint32 image_height
 ---
-# Result
-uint16 OK=0
-uint16 INVALID_GOAL=1
-uint16 BUSY=2
-uint16 TIMEOUT=3
-uint16 TARGET_STALE=4
-uint16 CANCELED=5
-uint16 SERVO_SINGULARITY=6
-uint16 SERVO_SAFETY_STOP=7
-uint16 SERVO_ACTUATION_STALL=8
-uint16 SERVO_DIRECTION_DIVERGENCE=9
-bool success
-uint16 error_code
-string message
-float32 final_error_u
-float32 final_error_v
+# Result: 仅当 error_code 为 OK 时，success 才为 true。
+# 被拒绝的 Goal 不会产生自定义 Result，因此客户端必须单独处理 Action Goal 的拒绝。
+uint16 OK=0                          # 目标已达到配置的公差。
+uint16 INVALID_GOAL=1                # ID、图像几何或范围无效。
+uint16 BUSY=2                        # 另一个对准任务已处于激活状态。
+uint16 TIMEOUT=3                     # 在超时前未完成对准收敛。
+uint16 TARGET_STALE=4                # 目标图像数据已过时或无法使用。
+uint16 CANCELED=5                    # 客户端或任务取消已完成。
+uint16 SERVO_SINGULARITY=6           # 硬运动学奇异点保护。
+uint16 SERVO_SAFETY_STOP=7           # 硬碰撞/限位/安全停止。
+uint16 SERVO_ACTUATION_STALL=8       # 控制器停止响应指令。
+uint16 SERVO_DIRECTION_DIVERGENCE=9  # 图像误差反复向错误方向移动。
+bool success                          # 仅当 error_code 为 OK 时，为 true。
+uint16 error_code                     # 错误代码常量，保持数值契约。
+string message                        # 人类可读的诊断信息，非解析器 API。
+float32 final_error_u                 # 最终水平图像误差（像素）。
+float32 final_error_v                 # 最终垂直图像误差（像素）。
 ---
-# Feedback
-uint8 ACQUIRING=0
-uint8 ALIGNED=1
-uint8 phase
-float32 error_u
-float32 error_v
-uint32 stable_frames
+# Feedback: 在已接受的闭环运行期间发出。
+uint8 ACQUIRING=0                     # 等待可用的当前目标图像帧。
+uint8 ALIGNED=1                       # 已达到公差/稳定条件。
+uint8 phase                           # 当前反馈阶段常量。
+float32 error_u                       # 瞬时水平图像误差（像素）。
+float32 error_v                       # 瞬时垂直图像误差（像素）。
+uint32 stable_frames                  # 已观测到的连续在公差范围内的帧数。

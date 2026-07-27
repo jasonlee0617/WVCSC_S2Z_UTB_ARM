@@ -133,6 +133,7 @@ def test_qt_launch_exposes_the_ik_recording_admission_policy():
     assert "DeclareLaunchArgument('ik_recording_range_max_m', default_value='1.45')" in source
     assert "'simulation_parking_clearance_check', default_value='false'" in source
     assert "'default_arm_spray_duration_sec', default_value='3.0'" in source
+    assert 'show_sim_spray_status' not in source
 
 
 def test_navigation_qt_keeps_spray_indicators_but_removes_extra_task_controls():
@@ -142,10 +143,47 @@ def test_navigation_qt_keeps_spray_indicators_but_removes_extra_task_controls():
     assert "QCheckBox('开启广域喷洒')" in source
     assert "QPushButton('终止任务')" in source
     assert "QCheckBox('显示相机/YOLO画面')" in source
-    assert "QLabel('广域喷洒: ● 关闭')" in source
-    assert "QLabel('喷嘴喷洒: ● 关闭')" in source
+    assert "QLabel('广域喷洒: ● 未收到状态')" in source
+    assert "QLabel('喷嘴喷洒: ● 未收到状态')" in source
+    assert "'/spray/wide_active'" in source
+    assert "'/spray/simulated_active'" in source
+    assert '#1e88e5' in source
+    assert '#e53935' in source
+    assert 'show_sim_spray_status' not in source
+    assert "point_type += '（广域）'" not in source
     for obsolete in ('暂停', '继续', '跳过当前', '取消任务', '重置任务'):
         assert f"QPushButton('{obsolete}')" not in source
+
+
+def test_spray_indicator_uses_blue_red_and_gray_states():
+    class Label:
+        def __init__(self):
+            self.text = ''
+            self.style = ''
+
+        def setText(self, value):
+            self.text = value
+
+        def setStyleSheet(self, value):
+            self.style = value
+
+    label = Label()
+    nav2_qt.Nav2Gui._set_spray_label(label, '广域喷洒', None, '#1e88e5')
+    assert label.text == '广域喷洒: ● 未收到状态'
+    assert label.style == 'color: #808080;'
+
+    nav2_qt.Nav2Gui._set_spray_label(label, '广域喷洒', True, '#1e88e5')
+    assert label.text == '广域喷洒: ● 开启'
+    assert '#1e88e5' in label.style
+    assert 'font-weight: bold' in label.style
+
+    nav2_qt.Nav2Gui._set_spray_label(label, '喷嘴喷洒', True, '#e53935')
+    assert label.text == '喷嘴喷洒: ● 开启'
+    assert '#e53935' in label.style
+
+    nav2_qt.Nav2Gui._set_spray_label(label, '喷嘴喷洒', False, '#e53935')
+    assert label.text == '喷嘴喷洒: ● 关闭'
+    assert label.style == 'color: #808080;'
 
 
 def test_simulation_parking_preflight_keeps_valid_work_distance_but_rejects_costmap_overlap():
@@ -389,6 +427,7 @@ class _Widget:
     def __init__(self):
         self.enabled = None
         self.text = ''
+        self.style = ''
 
     def setEnabled(self, value):
         assert type(value) is bool
@@ -396,6 +435,9 @@ class _Widget:
 
     def setText(self, value):
         self.text = value
+
+    def setStyleSheet(self, value):
+        self.style = value
 
     def currentData(self):
         return nav2_qt.POINT_TRANSIT
@@ -410,6 +452,7 @@ class _GuiProbe:
     _record_start = nav2_qt.Nav2Gui._record_start
     _relocalize_and_clear = nav2_qt.Nav2Gui._relocalize_and_clear
     _update_record_point_button = nav2_qt.Nav2Gui._update_record_point_button
+    _set_spray_label = staticmethod(nav2_qt.Nav2Gui._set_spray_label)
 
 
 def _gui(editor):
@@ -420,6 +463,7 @@ def _gui(editor):
         initial_pose_sequence=0,
         latest_initial_pose=None,
         status=None,
+        spray_active={'wide': None, 'nozzle': None},
     )
     gui.editor = editor
     gui.candidate = None
@@ -436,7 +480,8 @@ def _gui(editor):
             'clear_button', 'save_button', 'load_button', 'home_button',
             'abort_home_button', 'point_type_combo', 'wide_spray_checkbox',
             'candidate_label', 'status_label',
-            'start_label', 'capture_label', 'relocalize_button'):
+            'start_label', 'capture_label', 'relocalize_button',
+            'wide_relay_label', 'arm_relay_label'):
         setattr(gui, name, _Widget())
     gui._publish_markers = lambda: None
     gui._update_table = lambda: None

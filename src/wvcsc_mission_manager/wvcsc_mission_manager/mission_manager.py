@@ -27,7 +27,7 @@ from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.msg import (
@@ -175,6 +175,8 @@ class MissionManager(Node):
             MissionStatus, '/mission/status', latched)
         self._plan_pub = self.create_publisher(
             MissionPlan, '/mission/plan', latched)
+        self._wide_active_pub = self.create_publisher(
+            Bool, '/spray/wide_active', latched)
 
         # 订阅里程计和定位质量；任务仅通过 /mission/load_manual 注入。
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
@@ -213,6 +215,7 @@ class MissionManager(Node):
         self._wide_motion_pending = False
         self._wide_motion_deadline = None
         self._wide_relay_enabled = False
+        self._publish_wide_active()
         self._relay_failure_latched = False
         self._abort_and_home_requested = False
         self._abort_reset_sent = False
@@ -838,6 +841,7 @@ class MissionManager(Node):
                 else:
                     if channel == self._wide_relay_channel:
                         self._wide_relay_enabled = enabled
+                        self._publish_wide_active()
                     state = 'ON' if enabled else 'OFF'
                     self.get_logger().info(
                         f'[RELAY] channel={channel} state={state} '
@@ -851,6 +855,10 @@ class MissionManager(Node):
                 continuation()
 
         future.add_done_callback(done)
+
+    def _publish_wide_active(self):
+        """Publish the last successfully confirmed wide-relay command."""
+        self._wide_active_pub.publish(Bool(data=self._wide_relay_enabled))
 
     def _command_all_relays_off(self):
         self._wide_motion_pending = False

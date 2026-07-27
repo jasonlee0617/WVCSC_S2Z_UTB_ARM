@@ -12,7 +12,6 @@ def generate_launch_description():
     goal_pose_topic = LaunchConfiguration('goal_pose_topic')
     require_global_relocalization_service = LaunchConfiguration(
         'require_global_relocalization_service')
-    show_sim_spray_status = LaunchConfiguration('show_sim_spray_status')
     simulation_parking_clearance_check = LaunchConfiguration(
         'simulation_parking_clearance_check')
     observation_mode = LaunchConfiguration('observation_mode')
@@ -27,7 +26,6 @@ def generate_launch_description():
         DeclareLaunchArgument('goal_pose_topic', default_value='/manual_goal_pose'),
         DeclareLaunchArgument(
             'require_global_relocalization_service', default_value='true'),
-        DeclareLaunchArgument('show_sim_spray_status', default_value='false'),
         DeclareLaunchArgument(
             'simulation_parking_clearance_check', default_value='false'),
         DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
@@ -45,8 +43,6 @@ def generate_launch_description():
                 'goal_pose_topic': goal_pose_topic,
                 'require_global_relocalization_service': ParameterValue(
                     require_global_relocalization_service, value_type=bool),
-                'show_sim_spray_status': ParameterValue(
-                    show_sim_spray_status, value_type=bool),
                 'simulation_parking_clearance_check': ParameterValue(
                     simulation_parking_clearance_check, value_type=bool),
                 'observation_mode': observation_mode,

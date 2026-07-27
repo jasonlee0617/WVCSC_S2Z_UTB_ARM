@@ -221,56 +221,34 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     assert 'ActionClient(self, ExecuteSpray, \'/arm/execute_spray\')' in script
 
 
-def test_real_arm_spray_server_wrapper_has_explicit_action_mode():
+def test_real_arm_spray_server_wrapper_starts_qt_launch_only():
     wrapper = PACKAGE.parent / 'run_real_arm_spray_server.sh'
     source = wrapper.read_text(encoding='utf-8')
 
     assert wrapper.stat().st_mode & 0o111
-    assert 'real_arm_spray_test.launch.py' in source
-    assert 'auto_execute=false' in source
-    assert 'auto_execute:=true' in source
-    assert 'ros2 action send_goal /arm/execute_spray' in source
-    assert 'wvcsc_interfaces/action/ExecuteSpray' in source
-    assert '"$goal" -f' in source
-    assert "use_qt_gui:=false \"${launch_args[@]}\"" in source
-    assert 'observation_mode_launch_arg' in source
-    assert 'launch_args+=("$observation_mode_launch_arg")' in source
-    for argument in (
-            'observation_mode', 'auto_side', 'auto_tree_distance_m',
-            'auto_working_range_m', 'auto_spray_duration_sec',
-            'auto_mission_id', 'auto_tree_id'):
-        assert f'{argument}:=' in source
-
-    # The wrapper may document downstream topics, but it must not implement
-    # their behavior itself; SprayTask remains the single execution owner.
-    assert "'/servo_node/delta_twist_cmds'" not in source
-    assert "'/relay/set'" not in source
-    assert "'/motion_control/command'" not in source
+    assert ('exec ros2 launch wvcsc_bringup '
+            'real_arm_spray_test.launch.py "$@"') in source
+    for removed in (
+            'auto_execute', 'auto_', 'ros2 action send_goal',
+            'use_qt_gui:=false', '/arm/execute_spray', '/relay/set',
+            '/motion_control/command'):
+        assert removed not in source
 
 
-def test_real_arm_spray_server_goal_validation_and_side_mapping_are_explicit():
-    source = (PACKAGE.parent / 'run_real_arm_spray_server.sh').read_text(
-        encoding='utf-8')
-    assert 'auto_side must be left or right' in source
-    assert 'auto_tree_distance_m must be within 0.80-1.50 m' in source
-    assert 'auto_working_range_m must be 0 or within 0.20-2.00 m' in source
-    assert 'auto_spray_duration_sec must be within 0.20-10.00 s' in source
-    assert 'frame_id: alicia_base_link' in source
-    assert 'y: ${tree_y}' in source
-    assert 'Action Server' in source
-
-
-def test_spray_workflow_doc_is_first_person_and_separates_spray_triggers():
+def test_full_task_dataflow_doc_covers_triggers_and_indicator_contract():
     document = (PACKAGE.parent / 'docs' / '喷洒任务全流程.md').read_text(
         encoding='utf-8')
-    assert '## 4. 我如何区分两种喷洒触发' in document
+    assert '# WVCSC 全流程任务的数据流说明' in document
     assert 'wide_spray_on_approach' in document
     assert 'wide_spray_motion_linear_threshold' in document
     assert '0.03 m/s' in document
     assert '通道 1' in document
     assert '`point_type=INSPECT`' in document
-    assert '`/arm/execute_spray` Action' in document
-    assert '我不会因为病态目标检测结果而触发广域喷洒' in document
+    assert '/arm/execute_spray' in document
+    assert '/spray/wide_active' in document
+    assert '/spray/simulated_active' in document
+    assert '软件命令确认状态' in document
+    assert 'auto_execute:=true' not in document
 
 
 def test_arm_test_exposes_separate_ik_and_manual_working_ranges():

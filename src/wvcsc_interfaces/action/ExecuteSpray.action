@@ -1,42 +1,52 @@
-# Goal
-string mission_id
-string tree_id
-float32 spray_duration
-# Tree-root hint expressed in tree_hint.header.frame_id.
+# 顶层单棵植物喷洒动作。任务管理器（MissionManager）仅在检查点（INSPECT point）
+# 到达 Nav2 目标、车辆停稳及可选的停靠检查（docking gates）完成后发送此命令；
+# 独立的机械臂 Qt 界面也是客户端之一。SprayTask 是唯一的服务端，并按顺序执行：
+# 观察、病果检测、瞄准、对准、喷嘴喷洒、目标复检和 HOME。
+# 接收目标本身并不代表最终执行结果。
+# Goal: 单棵植物及其每个病果目标的请求处理时长。
+string mission_id                     # 路线或独立测试标识符。
+string tree_id                        # 检查点 / 植物标识符。
+float32 spray_duration                # 每个病果目标的喷洒秒数，而非整棵树的累计时长。
+# tree_hint.header.frame_id 中的树根提示点；完整任务通常提供记录的
+# alicia_base_link 相对位置。
 geometry_msgs/PointStamped tree_hint
-# Optional per-goal observation override. Empty keeps the node configuration.
+# 可选的观察模式覆盖项：留空则保留节点配置；
+# 支持的值包括配置的 ik 或 关节预设（joint_presets）模式。
 string observation_mode
-# Optional nozzle aim-plane range override in metres.
-# 0.0 keeps the normal tree/camera geometry calculation.
+# 可选的喷嘴瞄准平面距离（米）。0.0 表示在此 Action 中仅使用正常的自动树/相机几何计算；
+# 正值表示独立测试模式下手动覆盖，这些值不会写回完整的导航任务中。
 float32 working_range_m
 ---
-# Result
-uint16 OK=0
-uint16 INVALID_GOAL=1
-uint16 BUSY=2
-uint16 LOCKED=3
-uint16 OBSERVE_FAILED=4
-uint16 CANCELED=5
-uint16 HOME_FAILED=6
-uint16 INTERNAL_ERROR=7
-uint16 VISION_FAILED=8
-uint16 SPRAY_FAILED=9
-uint16 INSPECTED_NO_DISEASE=10
-uint16 PARTIAL_SUCCESS=11
-bool success
-uint16 error_code
-string message
+# Result: success 可涵盖“完整处理”、“检查完成且无病果”或“部分处理”。
+# 调用方在解释处理覆盖范围前必须检查 error_code 和 message。
+# 被服务端拒绝的 Goal 不会产生 Result。
+uint16 OK=0                           # 所有选中的病果目标已处理完成。
+uint16 INVALID_GOAL=1                 # ID、时长、坐标系或参数无效。
+uint16 BUSY=2                         # SprayTask 已有激活的 Goal。
+uint16 LOCKED=3                       # 机械臂安全锁阻止执行。
+uint16 OBSERVE_FAILED=4               # 观察位姿阶段失败。
+uint16 CANCELED=5                     # 取消/中止路径安全完成。
+uint16 HOME_FAILED=6                  # 最终 HOME/复位阶段失败（硬故障）。
+uint16 INTERNAL_ERROR=7               # 未预期的任务编排错误。
+uint16 VISION_FAILED=8                # 此棵树无可用的感知/目标数据。
+uint16 SPRAY_FAILED=9                 # 选定的目标无法喷洒。
+uint16 INSPECTED_NO_DISEASE=10        # 检查完成，未发现病果目标。
+uint16 PARTIAL_SUCCESS=11             # 至少处理了一个目标，其余未解决。
+bool success                           # 对于 OK、INSPECTED_NO_DISEASE、PARTIAL_SUCCESS 为真。
+uint16 error_code                      # 错误代码常量，保持网络传输兼容 API。
+string message                         # 人类可读的结果和统计信息。
 ---
-# Feedback
-uint8 ACCEPTED=0
-uint8 MOVING_TO_OBSERVE=1
-uint8 DETECTING_TARGETS=3
-uint8 QUEUING=4
-uint8 ALIGNING=5
-uint8 SPRAYING=6
-uint8 RETURNING_TO_OBSERVE=7
-uint8 RETURNING_HOME=8
-uint8 COMPLETED=9
-uint8 phase
-float32 progress
-string phase_text
+# Feedback: 任务阶段和进度，供 MissionManager 和机械臂 Qt 界面使用。
+uint8 ACCEPTED=0                       # 保留的兼容阶段；当前未发布。
+uint8 MOVING_TO_OBSERVE=1              # 正在移动到配置的观察位姿。
+# 值 2 在之前的树扫描移除后有意保留。
+uint8 DETECTING_TARGETS=3              # 正在收集/刷新病果目标。
+uint8 QUEUING=4                        # 正在更新目标账目和队列。
+uint8 ALIGNING=5                       # 正在为当前目标调用视觉伺服。
+uint8 SPRAYING=6                       # SprayActuator 占用通道 2 进行计时。
+uint8 RETURNING_TO_OBSERVE=7           # 正在重新观察剩余目标。
+uint8 RETURNING_HOME=8                 # 最终植物完成或安全清理 HOME。
+uint8 COMPLETED=9                      # 在返回 Result 之前的终端反馈。
+uint8 phase                            # 当前阶段常量。
+float32 progress                       # UI 进度；不保证严格单调递增。
+string phase_text                      # 人类可读的阶段细节。

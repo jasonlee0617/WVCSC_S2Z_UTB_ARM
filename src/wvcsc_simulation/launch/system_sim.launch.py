@@ -178,7 +178,6 @@ def generate_launch_description():
     enable_ackermann = LaunchConfiguration('enable_ackermann')
     use_mission_manager = LaunchConfiguration('use_mission_manager')
     observation_mode = LaunchConfiguration('observation_mode')
-    show_sim_spray_status = LaunchConfiguration('show_sim_spray_status')
     default_arm_spray_duration_sec = LaunchConfiguration(
         'default_arm_spray_duration_sec')
     arm_velocity_scaling = LaunchConfiguration('arm_velocity_scaling')
@@ -651,7 +650,6 @@ def generate_launch_description():
             # Gazebo 使用静态 map->odom，不运行 AMCL 的全局重定位服务；仍要求
             # 操作员在 RViz 重新给出初始位姿后才能记录任务起点。
             'require_global_relocalization_service': 'false',
-            'show_sim_spray_status': show_sim_spray_status,
             # The simulation map contains the same circular trunk envelope as
             # Gazebo.  Reject manually-recorded inspect parking poses that
             # would be inside its static inflation cost before Nav2 starts.
@@ -724,7 +722,6 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_ackermann', default_value='true'),
         DeclareLaunchArgument('use_mission_manager', default_value='true'),
         DeclareLaunchArgument('observation_mode', default_value='ik'),
-        DeclareLaunchArgument('show_sim_spray_status', default_value='true'),
         DeclareLaunchArgument(
             'default_arm_spray_duration_sec', default_value='3.0'),
         DeclareLaunchArgument('arm_velocity_scaling', default_value='0.40'),

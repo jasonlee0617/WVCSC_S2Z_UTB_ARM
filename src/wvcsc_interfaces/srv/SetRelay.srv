@@ -1,6 +1,15 @@
-uint8 channel
-bool enabled
+# MissionManager 和 SprayActuator 使用的通用继电器命令服务。
+# 在完整任务流程中，通道 1 为车辆行进中的广域喷洒；
+# 通道 2 为机械臂喷嘴，其正常定时开启动作由 SprayActuator 持有。
+# 响应成功仅确认软件命令路径已执行完毕，不表示独立的电气触点、
+# 泵流量或液体流量测量已经达成。
+# Request: 继电器输出选择与期望状态。
+uint8 channel                          # 项目约定：1=广域喷洒，2=机械臂喷嘴。
+bool enabled                           # True 请求开启；False 请求立即关闭。
+# 定时开启命令的时长（秒）。enabled=true 且 duration=0 表示持续开启，
+# 直至后续收到显式的 False 请求；enabled=false 且 duration=0 为正常关闭。
 float32 duration
 ---
-bool success
-string message
+# Response: 调用方仅在收到 success=true 时，更新其软件确认的活跃状态。
+bool success                           # 当继电器后端接受/完成命令时为 True。
+string message                         # 供日志和 UI 使用的后端特定诊断信息。
