@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from wvcsc_arm_task.ik_observation import (
+from wvcsc_arm_task.observation.ik_observation import (
     camera_look_at_pose,
     recenter_camera_pose,
     rotation_matrix_from_quaternion,

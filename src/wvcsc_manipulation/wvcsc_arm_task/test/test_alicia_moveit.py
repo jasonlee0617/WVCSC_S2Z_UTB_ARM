@@ -7,7 +7,7 @@ pytest.importorskip('rclpy')
 from moveit_msgs.msg import MoveItErrorCodes
 from pymoveit2 import MoveIt2State
 
-from wvcsc_arm_task.alicia_moveit import AliciaMoveIt
+from wvcsc_arm_task.motion.alicia_moveit import AliciaMoveIt
 
 
 class _Future:

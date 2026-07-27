@@ -618,22 +618,7 @@ def generate_launch_description():
                 # Alicia 在车顶以 pi yaw 安装；手动树点必须按该真实安装姿态
                 # 解释，才能和 Qt/RViz 记录的 map 坐标一致。
                 'arm_base_yaw_rad': 3.141592653589793,
-                # 仿真 map->odom 为静态单位变换，因此可用新鲜 /odom 对近目标
-                # Nav2 abort 进行停靠质量复核；实机仍使用 AMCL 默认配置。
-                'require_docking_quality': True,
-                'docking_pose_source': 'odom',
-                'accept_aborted_near_goal': True,
-                'nav_goal_xy_tolerance_m': 0.08,
-                'nav_goal_yaw_tolerance_rad': 0.10,
-                'max_docking_position_error_m': 0.10,
-                'max_docking_yaw_error_rad': 0.12,
                 'nav_goal_timeout_sec': 45.0,
-                'inspect_nav_behavior_tree': os.path.join(
-                    simulation_share, 'config', 'behavior_trees',
-                    'navigate_inspect.xml'),
-                'route_nav_behavior_tree': os.path.join(
-                    simulation_share, 'config', 'behavior_trees',
-                    'navigate_route.xml'),
                 'use_sim_time': True,
             },
         ],

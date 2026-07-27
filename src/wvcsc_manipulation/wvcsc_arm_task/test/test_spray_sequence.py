@@ -16,7 +16,7 @@ from wvcsc_arm_task.target_flow import (
     limit_targets_per_tree, spray_summary, target_accounting,
     stable_candidates_from_frames, target_accounting_is_complete,
     target_requires_recenter)
-from wvcsc_arm_task.ik_observation import ObservationCandidate
+from wvcsc_arm_task.observation.candidate import ObservationCandidate
 
 
 def _target(target_id, center_u, center_v, confidence=0.9):

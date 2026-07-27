@@ -1,10 +1,10 @@
-from wvcsc_arm_task.motion_state import (
+from wvcsc_arm_task.motion.motion_state import (
     MotionControlState,
     begin_reset,
     perform_reset,
 )
 
-from wvcsc_arm_task.motion_control_keyboard import command_for_key
+from wvcsc_arm_task.motion.motion_control_keyboard import command_for_key
 
 
 def test_motion_control_keyboard_mapping():

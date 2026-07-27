@@ -28,28 +28,6 @@ mission_manager:
     # 仿真通用默认值；实车入口按 alicia_mount_joint 覆盖为 pi。
     arm_base_yaw_rad: 0.0
 
-    # 实机逐树实测任务启用；默认由 AMCL 提供 map 中的停靠质量位姿。
-    # system_sim 会以参数覆盖为 odom，因为该仿真 map->odom 恒等。
-    require_docking_quality: false
-    docking_pose_source: localization
-    # 仅仿真可在 Nav2 近目标 ABORTED 时，经停靠质量门控后继续停稳检查；
-    # 实机保持 false，避免用控制器失败掩盖定位或底盘故障。
-    accept_aborted_near_goal: false
-    localization_pose_topic: /amcl_pose
-    localization_max_age_sec: 1.0
-    # 机械臂观察距离对停靠误差敏感。Nav2 成功后仍必须满足这组独立
-    # 门槛，才能把 ExecuteSpray Goal 交给机械臂。
-    # 这两个 Nav2 值仅用于停靠诊断日志；实机入口按实际 Nav2 配置覆盖，
-    # 不参与任务门控计算。
-    nav_goal_xy_tolerance_m: 0.10
-    nav_goal_yaw_tolerance_rad: 0.10
-    max_localization_position_stddev_m: 0.12
-    max_localization_yaw_stddev_rad: 0.12
-    max_docking_position_error_m: 0.12
-    max_docking_yaw_error_rad: 0.12
-    docking_retry_limit: 1
-    localization_recovery_timeout_sec: 5.0
-
     # ----------------------------------------------------------------
     # 通讯超时控制
     # ----------------------------------------------------------------

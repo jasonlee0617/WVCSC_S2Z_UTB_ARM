@@ -24,7 +24,7 @@ setup(
     entry_points={'console_scripts': [
         'spray_task = wvcsc_arm_task.spray_task:main',
         'spray_actuator = wvcsc_arm_task.spray_actuator:main',
-        'motion_control = wvcsc_arm_task.motion_control:main',
-        'motion_control_keyboard = wvcsc_arm_task.motion_control_keyboard:main',
+        'motion_control = wvcsc_arm_task.motion.motion_control:main',
+        'motion_control_keyboard = wvcsc_arm_task.motion.motion_control_keyboard:main',
     ]},
 )

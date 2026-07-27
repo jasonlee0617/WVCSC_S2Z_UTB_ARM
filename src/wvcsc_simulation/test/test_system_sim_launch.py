@@ -48,31 +48,25 @@ def test_gazebo_spray_visual_uses_the_gazebo_owned_ros_executor():
     assert 'this->hide();' in plugin
 
 
-def test_sim_navigation_uses_per_point_goal_checker_behavior_trees():
+def test_sim_navigation_uses_one_nav2_goal_checker_without_mission_docking_gate():
     behavior_tree_dir = Path(__file__).parents[1] / 'config' / 'behavior_trees'
-    inspect_tree = (behavior_tree_dir / 'navigate_inspect.xml').read_text(
-        encoding='utf-8')
     route_tree = (behavior_tree_dir / 'navigate_route.xml').read_text(
         encoding='utf-8')
     config = yaml.safe_load((
         Path(__file__).parents[1] / 'config' / 'nav2_sim.yaml'
     ).read_text(encoding='utf-8'))
 
-    assert 'goal_checker_id="inspection_goal_checker"' in inspect_tree
     assert 'goal_checker_id="route_goal_checker"' in route_tree
     assert config['controller_server']['ros__parameters']['progress_checker'][
         'required_movement_radius'] == pytest.approx(0.05)
     assert config['controller_server']['ros__parameters'][
         'failure_tolerance'] == pytest.approx(2.0)
     parameters = config['controller_server']['ros__parameters']
-    inspect_goal_checker = parameters['inspection_goal_checker']
+    assert parameters['goal_checker_plugins'] == ['route_goal_checker']
     route_goal_checker = parameters['route_goal_checker']
-    assert inspect_goal_checker['stateful'] is False
     assert route_goal_checker['stateful'] is False
     assert config['controller_server']['ros__parameters'][
         'robot_base_frame'] == 'base_footprint'
-    assert inspect_goal_checker['xy_goal_tolerance'] == pytest.approx(0.08)
-    assert inspect_goal_checker['yaw_goal_tolerance'] == pytest.approx(0.10)
     assert route_goal_checker['xy_goal_tolerance'] == pytest.approx(0.08)
     assert route_goal_checker['yaw_goal_tolerance'] == pytest.approx(0.12)
     assert config['planner_server']['ros__parameters']['GridBased'][
@@ -86,23 +80,19 @@ def test_sim_navigation_uses_per_point_goal_checker_behavior_trees():
     assert follow_path['use_collision_detection'] is True
     assert follow_path['use_cost_regulated_linear_velocity_scaling'] is False
     assert 'RewrittenYaml' in LAUNCH_SOURCE
-    assert "'accept_aborted_near_goal': True" in LAUNCH_SOURCE
-    assert "'docking_pose_source': 'odom'" in LAUNCH_SOURCE
-    assert "'max_docking_position_error_m': 0.10" in LAUNCH_SOURCE
-    assert "'max_docking_yaw_error_rad': 0.12" in LAUNCH_SOURCE
-    assert "'nav_goal_xy_tolerance_m': 0.08" in LAUNCH_SOURCE
-    assert "'nav_goal_yaw_tolerance_rad': 0.10" in LAUNCH_SOURCE
+    assert 'require_docking_quality' not in LAUNCH_SOURCE
+    assert 'accept_aborted_near_goal' not in LAUNCH_SOURCE
+    assert 'navigate_inspect.xml' not in LAUNCH_SOURCE
     assert "'nav_goal_timeout_sec': 45.0" in LAUNCH_SOURCE
     # Nav2's velocity smoother publishes at 20 Hz. The simulator timeout must
     # leave transport jitter margin rather than matching that 50 ms period.
     assert "'command_timeout': 0.25" in LAUNCH_SOURCE
-    for behavior_tree in (inspect_tree, route_tree):
-        assert '<RecoveryNode number_of_retries="4" name="NavigateRecovery">' in behavior_tree
-        assert 'ClearEntireCostmap' in behavior_tree
-        assert 'BackUp name="BackUpRecovery"' in behavior_tree
-        assert 'IsPathValid path="{path}"' in behavior_tree
-        assert '<GlobalUpdatedGoal/>' in behavior_tree
-        assert '<Spin' not in behavior_tree
+    assert '<RecoveryNode number_of_retries="4" name="NavigateRecovery">' in route_tree
+    assert 'ClearEntireCostmap' in route_tree
+    assert 'BackUp name="BackUpRecovery"' in route_tree
+    assert 'IsPathValid path="{path}"' in route_tree
+    assert '<GlobalUpdatedGoal/>' in route_tree
+    assert '<Spin' not in route_tree
 
 
 def test_simulation_uses_confirmed_real_vehicle_geometry_and_driver_semantics():

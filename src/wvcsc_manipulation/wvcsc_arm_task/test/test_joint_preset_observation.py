@@ -4,12 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from wvcsc_arm_task.ik_observation import ObservationCandidate
-from wvcsc_arm_task.joint_preset_observation import (
+from wvcsc_arm_task.observation.candidate import ObservationCandidate
+from wvcsc_arm_task.observation.joint_preset_observation import (
     DEFAULT_JOINT_PRESETS_DEG,
     JointPresetObservationMixin,
 )
-from wvcsc_arm_task.observation_flow import ObservationFlowMixin
+from wvcsc_arm_task.observation.observation_flow import ObservationFlowMixin
 from wvcsc_arm_task.spray_config import joint_preset_parameters
 from wvcsc_arm_task.spray_task import SprayTask
 

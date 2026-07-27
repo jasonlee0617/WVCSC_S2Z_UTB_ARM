@@ -7,8 +7,8 @@
 
 import math
 
-from .observation_flow import _build_candidate
-from .spray_config import DEFAULT_JOINT_PRESETS_DEG
+from .candidate import build_candidate
+from ..spray_config import DEFAULT_JOINT_PRESETS_DEG
 
 
 class JointPresetObservationMixin:
@@ -79,7 +79,7 @@ class JointPresetObservationMixin:
                 f'for side={self._joint_preset_side or "none"}')
             return False
         for index, (name, joints) in enumerate(presets):
-            candidate = _build_candidate(
+            candidate = build_candidate(
                 candidate_id=f'joint_preset_{self._joint_preset_side}_{name}',
                 distance_m=0.0,
                 camera_height_m=0.0,

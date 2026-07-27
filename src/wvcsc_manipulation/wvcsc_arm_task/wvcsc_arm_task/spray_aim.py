@@ -9,7 +9,7 @@ import time
 
 from wvcsc_interfaces.srv import ComputeSprayAim
 
-from .ik_observation import rotate_vector
+from .observation.ik_observation import rotate_vector
 
 
 WORKING_RANGE_MIN_M = 0.2

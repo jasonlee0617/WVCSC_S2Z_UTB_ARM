@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from wvcsc_arm_task.ik_observation import ObservationOptimizer
+from wvcsc_arm_task.observation.ik_observation import ObservationOptimizer
 
 
 ROBOT = '''

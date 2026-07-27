@@ -6,12 +6,10 @@ from wvcsc_mission_manager.core import (
     MissionCore,
     MissionState,
     PointType,
-    StopDetector,
     Target,
-    arm_base_xy,
     tree_hint_from_arm_base_offset,
-    tree_offset_from_docking,
 )
+from wvcsc_mission_manager.stop_detector import StopDetector
 
 
 def _targets():
@@ -26,16 +24,9 @@ def test_manual_task_keeps_the_operator_selected_vehicle_docking_pose():
     assert _targets()[1].docking_pose == (5.4, -0.2, 0.0)
 
 
-def test_tree_hint_uses_signed_arm_base_xy_and_round_trips():
+def test_tree_hint_uses_signed_arm_base_offset():
     hint = tree_hint_from_arm_base_offset((3.0, 0.5, 0.0), 0.0, -1.5)
     assert hint == (2.6, -1.0, 0.0)
-    assert tree_offset_from_docking((3.0, 0.5, 0.0), hint) == pytest.approx(
-        (0.0, -1.5))
-
-
-def test_arm_base_xy_uses_mount_translation_but_not_arm_yaw():
-    assert arm_base_xy((3.0, 0.5, 0.0)) == pytest.approx((2.6, 0.5))
-    assert arm_base_xy((3.0, 0.5, math.pi / 2.0)) == pytest.approx((3.0, 0.1))
 
 
 def test_tree_hint_round_trips_with_alicia_mount_yaw():
@@ -44,22 +35,8 @@ def test_tree_hint_round_trips_with_alicia_mount_yaw():
         docking, 0.0, 1.5,
         arm_base_yaw_rad=math.pi)
 
-    # The actual Alicia installation rotates its base by pi.  Positive arm Y
-    # must remain positive when the map hint is transformed back into arm axes.
+    # The actual Alicia installation rotates its base by pi.
     assert hint == pytest.approx((2.6, -1.0, 0.0))
-    assert tree_offset_from_docking(
-        docking, hint, arm_base_yaw_rad=math.pi) == pytest.approx((0.0, 1.5))
-
-
-def test_stop_verification_can_return_to_navigation_for_same_target():
-    core = MissionCore()
-    core.load('retry', [
-        Target('tree_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0))])
-    assert core.start()
-    assert core.nav_succeeded()
-    assert core.retry_navigation()
-    assert core.state == MissionState.NAVIGATING
-    assert core.current_index == 0
 
 
 def test_two_target_success_path():

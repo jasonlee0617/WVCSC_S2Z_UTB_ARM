@@ -9,10 +9,10 @@ from wvcsc_mission_manager.core import (
     MissionCore,
     MissionState,
     PointType,
-    StopDetector,
     Target,
 )
 from wvcsc_mission_manager.mission_manager import MissionManager
+from wvcsc_mission_manager.stop_detector import StopDetector
 
 
 class _Future:
@@ -66,48 +66,26 @@ class _NavClient:
         return self.ready
 
 
-class _RelayClient:
-    def __init__(self, response):
-        self.response = response
-        self.requests = []
+class _Relay:
+    def __init__(self):
+        self.commands = []
+        self.reset_count = 0
 
     @staticmethod
     def service_is_ready():
         return True
 
-    def call_async(self, request):
-        self.requests.append(request)
-        return _Future(self.response)
+    def command(self, channel, enabled, duration, continuation, context, **_kwargs):
+        self.commands.append((channel, enabled, duration, context))
+        if continuation is not None:
+            continuation()
 
+    def command_all_off(self):
+        self.commands.extend(((1, False, 0.0, 'mission shutdown: disable wide spray'),
+                              (2, False, 0.0, 'mission shutdown: disable arm spray')))
 
-class _WideStatePublisher:
-    def __init__(self):
-        self.values = []
-
-    def publish(self, message):
-        self.values.append(bool(message.data))
-
-
-class _WideRelayHarness:
-    def __init__(self):
-        self._wide_relay_channel = 1
-        self._wide_relay_enabled = False
-        self._wide_active_pub = _WideStatePublisher()
-        self._relay_client = _RelayClient(
-            SimpleNamespace(success=True, message='ok'))
-        self._require_relay_service = False
-        self._publish_wide_active = MissionManager._publish_wide_active.__get__(
-            self, _WideRelayHarness)
-        self._relay_command_failed = (
-            MissionManager._relay_command_failed.__get__(
-                self, _WideRelayHarness))
-        self._command_relay_best_effort = (
-            MissionManager._command_relay_best_effort.__get__(
-                self, _WideRelayHarness))
-
-    @staticmethod
-    def get_logger():
-        return _Logger()
+    def reset_failure_latch(self):
+        self.reset_count += 1
 
 
 class _WideMotionHarness:
@@ -124,7 +102,8 @@ class _WideMotionHarness:
         self._latest_linear_speed = 0.0
         self._wide_motion_linear_threshold = 0.03
         self._wide_relay_channel = 1
-        self.commands = []
+        self._relay = _Relay()
+        self.commands = self._relay.commands
 
     @staticmethod
     def get_parameter(name):
@@ -134,11 +113,6 @@ class _WideMotionHarness:
     @staticmethod
     def get_logger():
         return _Logger()
-
-    def _command_relay_best_effort(
-            self, channel, enabled, duration, continuation, context):
-        self.commands.append((channel, enabled, duration, context))
-
 
 class _Harness:
     def __init__(self, state=MissionState.NAVIGATING):
@@ -168,14 +142,13 @@ class _Harness:
         self._abort_reset_sent = False
         self._motion_control_state = ''
         self._recovery_return_home = False
-        self._recovery_pause = False
         self._nav_timeout_canceling = False
         self._nav_timeout_cancel_deadline = None
         self._wide_motion_pending = False
         self._wide_relay_channel = 1
-        self._accept_aborted_near_goal = False
         self.failures = []
-        self.relay_commands = []
+        self._relay = _Relay()
+        self.relay_commands = self._relay.commands
         self.nav_cancels = 0
         self.spray_cancels = 0
         self.status_updates = 0
@@ -198,7 +171,6 @@ class _Harness:
             MissionManager._finish_noninspect_point.__get__(self, _Harness))
         self._advance_abort_and_home = lambda: None
         self._command_all_relays_off = lambda: None
-        self._command_relay_best_effort = self._relay_then_continue
         self._start_navigation = lambda: setattr(self, 'nav_sent', True)
         self._begin_stop_verification = lambda: None
         self._tick_wide_spray_motion = lambda _now: None
@@ -215,11 +187,6 @@ class _Harness:
 
     def _cancel_spray_goal(self):
         self.spray_cancels += 1
-
-    def _relay_then_continue(self, channel, enabled, duration, continuation, context):
-        self.relay_commands.append((channel, enabled, duration, context))
-        if continuation is not None:
-            continuation()
 
     def _now(self):
         return 6.0
@@ -290,25 +257,6 @@ def test_nav_rejection_and_confirmed_failure_skip_current_route_point():
     assert failed.relay_commands[0][:3] == (1, False, 0.0)
 
 
-def test_simulation_accepts_only_an_aborted_goal_that_passes_docking_gate():
-    harness = _docking_harness(
-        (5.8, 3.43, 0.22, 0.04, 0.05, 0.05),
-        state=MissionState.NAVIGATING)
-    harness._accept_aborted_near_goal = True
-    harness._navigation_arrived = (
-        MissionManager._navigation_arrived.__get__(harness, _Harness))
-    harness._begin_stop_verification = lambda: None
-
-    MissionManager._nav_result(
-        harness,
-        _Future(SimpleNamespace(status=GoalStatus.STATUS_ABORTED)),
-    )
-
-    assert harness.core.state == MissionState.VERIFYING_STOP
-    assert harness.core.skipped_targets == 0
-    assert harness.relay_commands[0][:3] == (1, False, 0.0)
-
-
 def test_transit_arrival_disables_wide_spray_before_any_dwell_or_next_point():
     harness = _Harness()
     transit = Target(
@@ -324,29 +272,6 @@ def test_transit_arrival_disables_wide_spray_before_any_dwell_or_next_point():
     assert harness.core.state == MissionState.VERIFYING_STOP
     assert harness.relay_commands == [
         (1, False, 0.0, 'transit_1: disable wide spray at stop')]
-
-
-def test_wide_spray_status_changes_only_after_confirmed_relay_response():
-    harness = _WideRelayHarness()
-    harness._publish_wide_active()
-
-    harness._command_relay_best_effort(
-        1, True, 0.0, None, 'wide spray enabled')
-    assert harness._wide_active_pub.values == [False, True]
-    assert harness._wide_relay_enabled is True
-
-    harness._relay_client.response = SimpleNamespace(
-        success=False, message='relay rejected off')
-    harness._command_relay_best_effort(
-        1, False, 0.0, None, 'wide spray disabled')
-    assert harness._wide_active_pub.values == [False, True]
-    assert harness._wide_relay_enabled is True
-
-    harness._relay_client.response = SimpleNamespace(success=True, message='ok')
-    harness._command_relay_best_effort(
-        1, False, 0.0, None, 'wide spray disabled')
-    assert harness._wide_active_pub.values == [False, True, False]
-    assert harness._wide_relay_enabled is False
 
 
 def test_wide_spray_waits_for_motion_and_times_out_with_relay_off():
@@ -489,38 +414,16 @@ def test_nav_timeout_cancels_for_skip_while_spray_timeout_stays_blocking():
     assert stale.core.skipped_targets == 1
 
 
-def test_simulation_docking_quality_gate_applies_to_inspection_points():
-    """Only arm work needs the stricter alicia-base docking quality gate."""
+def test_stable_inspection_point_sends_spray_without_docking_quality_gate():
     harness = _Harness(MissionState.VERIFYING_STOP)
     harness._stop_detector = _Detector(StopDetector.STABLE)
-    harness.core.targets = (Target(
-        'route_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0),
-        point_type=PointType.INSPECT),)
-    harness._require_docking_quality = True
-    checks = []
-    harness._verify_docking_quality = lambda _now: checks.append(True) or False
+    sent = []
+    harness._send_spray_goal = lambda: sent.append(True)
 
     MissionManager._tick(harness)
 
-    assert checks == [True]
-    assert harness.core.state == MissionState.VERIFYING_STOP
-
-
-@pytest.mark.parametrize('point_type', [PointType.TRANSIT, PointType.FINISH])
-def test_simulation_route_points_bypass_arm_docking_quality(point_type):
-    harness = _Harness(MissionState.VERIFYING_STOP)
-    harness._stop_detector = _Detector(StopDetector.STABLE)
-    harness.core.targets = (Target(
-        'route_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0),
-        point_type=point_type),)
-    harness._require_docking_quality = True
-    checks = []
-    harness._verify_docking_quality = lambda _now: checks.append(True) or False
-
-    MissionManager._tick(harness)
-
-    assert checks == []
-    assert harness.core.state == MissionState.MISSION_COMPLETED
+    assert sent == [True]
+    assert harness.core.state == MissionState.ARM_SPRAYING
 
 
 def test_late_nav_goal_acceptance_stays_canceled_after_timeout():
@@ -595,7 +498,7 @@ def test_manual_targets_preserve_selected_pose_and_validate_input():
     targets, home = MissionManager._validate_manual_request(validator, request)
     assert targets[0].docking_pose[:2] == (3.0, 0.5)
     assert math.isclose(targets[0].docking_pose[2], 0.2)
-    assert MissionManager._tree_hint(targets[0]) == pytest.approx(
+    assert (targets[0].x, targets[0].y, targets[0].z) == pytest.approx(
         (2.309969, 1.890632, 0.0), abs=1e-6)
     assert home == (0.0, 0.0, 0.0)
 
@@ -617,86 +520,6 @@ def test_manual_target_requires_a_nonzero_signed_arm_offset():
     request.targets[0].tree_y_m = 0.0
     with pytest.raises(ValueError, match='tree offset is zero'):
         MissionManager._validate_manual_request(validator, request)
-
-
-def _docking_harness(actual, *, state=MissionState.VERIFYING_STOP):
-    harness = _Harness(state)
-    harness._arm_base_forward_offset = -0.40
-    harness._arm_base_left_offset = 0.0
-    harness._localization_max_age = 1.0
-    harness._max_localization_position_stddev = 0.12
-    harness._max_localization_yaw_stddev = 0.12
-    harness._max_docking_position_error = 0.12
-    harness._max_docking_yaw_error = 0.12
-    harness._localization_recovery_timeout = 5.0
-    harness._localization_recovery_started = None
-    harness._docking_retry_limit = 1
-    harness._docking_retry_count = 0
-    harness._docking_retry_target_index = 0
-    harness._last_docking_log_state = None
-    harness._localization_pose = actual
-    harness._docking_pose_source = 'localization'
-    harness._docking_pose_for_quality = (
-        MissionManager._docking_pose_for_quality.__get__(harness, _Harness))
-    harness._docking_quality = MissionManager._docking_quality.__get__(
-        harness, _Harness)
-    harness._log_docking_quality = MissionManager._log_docking_quality.__get__(
-        harness, _Harness)
-    harness._verify_docking_quality = (
-        MissionManager._verify_docking_quality.__get__(harness, _Harness))
-    harness._pause_for_recovery = (
-        MissionManager._pause_for_recovery.__get__(harness, _Harness))
-    harness._angle_error = MissionManager._angle_error
-    harness._recovery_return_home = False
-    harness._recovery_pause = False
-    return harness
-
-
-def test_docking_quality_gate_passes_only_fresh_precise_localization():
-    harness = _docking_harness((5.8, 3.43, 0.22, 0.04, 0.05, 0.05))
-    # _Harness._now() is 6.0 and the automatic left docking pose is (3.4, 0.2, 0).
-    harness._localization_pose = (5.8, 3.43, 0.22, 0.04, 0.05, 0.05)
-    status, details = MissionManager._docking_quality(harness, 6.0)
-    assert status == 'ok'
-    assert details['position_error'] < 0.12
-
-    harness._localization_pose = (4.0, 3.43, 0.22, 0.04, 0.05, 0.05)
-    assert MissionManager._docking_quality(harness, 6.0)[0] == 'stale'
-    harness._localization_pose = (5.8, 3.43, 0.22, 0.04, 0.20, 0.05)
-    assert MissionManager._docking_quality(harness, 6.0)[0] == 'uncertain'
-
-
-def test_docking_quality_reports_arm_anchor_error_but_vehicle_goal_yaw():
-    # The automatic left-side target has a vehicle goal of (3.4, 0.2, 0).
-    # The corresponding arm base is (3.0, 0.2), proving the quality gate and
-    # the Qt click semantics use the same mounting translation.
-    harness = _docking_harness((6.0, 3.4, 0.2, 0.0, 0.05, 0.05))
-    status, details = MissionManager._docking_quality(harness, 6.0)
-
-    assert status == 'ok'
-    assert details['desired'] == pytest.approx((3.4, 0.2, 0.0))
-    assert details['arm_desired'] == pytest.approx((3.0, 0.2))
-    assert details['arm_actual'] == pytest.approx((3.0, 0.2))
-    assert details['position_error'] == pytest.approx(0.0)
-
-
-def test_outside_docking_tolerance_retries_once_without_spraying():
-    harness = _docking_harness((5.8, 3.8, 0.2, 0.0, 0.05, 0.05))
-    harness.nav_sent = 0
-    harness._send_nav_goal = lambda: setattr(harness, 'nav_sent', harness.nav_sent + 1)
-
-    assert not MissionManager._verify_docking_quality(harness, 6.0)
-    assert harness.core.state == MissionState.NAVIGATING
-    assert harness.core.current_index == 0
-    assert harness._docking_retry_count == 1
-    assert harness.nav_sent == 1
-
-    harness.core.nav_succeeded()
-    harness._localization_pose = (6.1, 3.8, 0.2, 0.0, 0.05, 0.05)
-    assert not MissionManager._verify_docking_quality(harness, 6.2)
-    assert harness.core.state == MissionState.PAUSED
-    assert harness.failures == []
-    assert harness._recovery_pause
 
 
 def test_start_rejects_when_action_servers_are_absent():

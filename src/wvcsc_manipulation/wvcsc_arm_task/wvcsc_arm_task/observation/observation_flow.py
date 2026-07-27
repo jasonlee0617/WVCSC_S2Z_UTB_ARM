@@ -12,9 +12,7 @@ import rclpy
 from tf2_ros import TransformException
 
 from .ik_observation import (
-    ObservationCandidate,
     ObservationOptimizer,
-    _build_candidate,
     camera_look_at_pose,
     camera_orientation_for_pixel,
     camera_pose_from_bearing,
@@ -28,7 +26,8 @@ from .ik_observation import (
     tool_pose_from_camera_pose,
     transform_point,
 )
-from .target_flow import target_pixel_error
+from .candidate import ObservationCandidate, build_candidate
+from ..target_flow import target_pixel_error
 
 
 class ObservationFlowMixin:
@@ -71,7 +70,7 @@ class ObservationFlowMixin:
             return False, (
                 'active observation is not motion-safe: '
                 f'{observation.rejection_reason}')
-        preflight = _build_candidate(
+        preflight = build_candidate(
             candidate_id=f'{observation.candidate_id}_servo_preflight',
             distance_m=observation.distance_m,
             camera_height_m=observation.camera_height_m,
@@ -312,7 +311,7 @@ class ObservationFlowMixin:
             except (TypeError, ValueError) as error:
                 rejection_reason = str(error)
                 continue
-            trial = _build_candidate(
+            trial = build_candidate(
                 candidate_id=(
                     f'{observation.candidate_id}_target_{target.target_id}'
                     f'_r{residual_px:g}{suffix}'),

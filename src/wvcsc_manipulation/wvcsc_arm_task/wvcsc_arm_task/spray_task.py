@@ -28,11 +28,11 @@ from wvcsc_interfaces.msg import Target2D
 from wvcsc_interfaces.srv import ComputeSprayAim
 
 from .action_flow import DownstreamActionMixin
-from .ik_observation import ObservationOptimizer
-from .joint_preset_observation import JointPresetObservationMixin
-from .motion_state import MotionControlState
-from .node_parameters import create_alicia_moveit
-from .observation_flow import ObservationFlowMixin
+from .motion.motion_state import MotionControlState
+from .motion.node_parameters import create_alicia_moveit
+from .observation.ik_observation import ObservationOptimizer
+from .observation.joint_preset_observation import JointPresetObservationMixin
+from .observation.observation_flow import ObservationFlowMixin
 from .spray_aim import (
     SprayAimMixin,
     WORKING_RANGE_MAX_M,

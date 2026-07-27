@@ -7,7 +7,6 @@
 # 1. 定义任务状态枚举 (`MissionState`)。
 # 2. 管理任务队列、当前进度与目标状态流转 (`MissionCore`)。
 # 3. 保存 Qt/RViz 给出的停车位，并提供车辆与机械臂基座坐标转换。
-# 4. 提供里程计停稳检测器 (`StopDetector`)。
 #
 # 设计目的：
 # 将 ROS2 通讯与核心业务逻辑解耦，便于进行单元测试，并降低状态异常转移的风险。
@@ -155,10 +154,6 @@ class MissionCore:
             MissionState.ARM_SPRAYING if target.requires_arm
             else MissionState.DWELLING)
         return True
-
-    def retry_navigation(self):
-        """停靠质量不合格时重新导航当前目标，不推进任务索引。"""
-        return self._transition(MissionState.VERIFYING_STOP, MissionState.NAVIGATING)
 
     @property
     def processed_targets(self):
@@ -321,27 +316,6 @@ class MissionCore:
         return True
 
 
-def arm_base_xy(
-        vehicle_pose,
-        arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
-        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET):
-    """Return the map XY position of ``alicia_base_link``.
-
-    ``vehicle_pose`` is an ``(x, y, yaw)`` pose for ``base_footprint``.  The
-    yaw remains the vehicle heading; only the fixed planar mounting offset is
-    applied here.
-    """
-    x, y, yaw = (float(value) for value in vehicle_pose)
-    if not all(math.isfinite(value) for value in (
-            x, y, yaw, arm_base_forward_offset, arm_base_left_offset)):
-        raise ValueError('arm base pose values must be finite')
-    cosine, sine = math.cos(yaw), math.sin(yaw)
-    return (
-        x + cosine * arm_base_forward_offset - sine * arm_base_left_offset,
-        y + sine * arm_base_forward_offset + cosine * arm_base_left_offset,
-    )
-
-
 def tree_hint_from_arm_base_offset(
         docking, tree_x_m, tree_y_m, tree_base_z=0.0,
         arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
@@ -371,95 +345,3 @@ def tree_hint_from_arm_base_offset(
         arm_y + arm_sine * tree_x_m + arm_cosine * tree_y_m,
         tree_base_z,
     )
-
-
-def tree_offset_from_docking(
-        docking, tree_hint,
-        arm_base_forward_offset=DEFAULT_ARM_BASE_FORWARD_OFFSET,
-        arm_base_left_offset=DEFAULT_ARM_BASE_LEFT_OFFSET,
-        arm_base_yaw_rad=0.0):
-    """Return signed alicia_base_link XY coordinates for a map tree hint."""
-    x, y, yaw = (float(value) for value in docking)
-    tree_x, tree_y, _tree_z = (float(value) for value in tree_hint)
-    if not all(math.isfinite(value) for value in (
-            x, y, yaw, tree_x, tree_y,
-            arm_base_forward_offset, arm_base_left_offset,
-            arm_base_yaw_rad)):
-        raise ValueError('tree offset values must be finite')
-    cosine, sine = math.cos(yaw), math.sin(yaw)
-    arm_x = (
-        x + cosine * arm_base_forward_offset -
-        sine * arm_base_left_offset)
-    arm_y = (
-        y + sine * arm_base_forward_offset +
-        cosine * arm_base_left_offset)
-    arm_yaw = yaw + arm_base_yaw_rad
-    arm_cosine, arm_sine = math.cos(arm_yaw), math.sin(arm_yaw)
-    dx, dy = tree_x - arm_x, tree_y - arm_y
-    return (
-        arm_cosine * dx + arm_sine * dy,
-        -arm_sine * dx + arm_cosine * dy,
-    )
-
-
-class StopDetector:
-    """
-    小车停稳检测器。
-    
-    作用：根据 /odom 发来的线速度和角速度，判断小车是否已经完全静止。
-    这是一个严格的物理“刹车”检测，必须持续 `stable_duration` (1s) 都满足阈值，
-    才允许机械臂展开喷洒。这防止了小车在还没停稳的惯性滑动阶段机械臂意外展开。
-    """
-    WAITING = 'waiting'
-    STABLE = 'stable'
-    STALE = 'stale'    # 里程计数据长时间未更新 (断连)
-    TIMEOUT = 'timeout'
-
-    def __init__(
-            self, linear_threshold=0.03, angular_threshold=0.03,
-            stable_duration=1.0, stale_timeout=1.0, timeout=5.0):
-        self.linear_threshold = float(linear_threshold)
-        self.angular_threshold = float(angular_threshold)
-        self.stable_duration = float(stable_duration)
-        self.stale_timeout = float(stale_timeout)
-        self.timeout = float(timeout)
-        self.active = False
-        self.started_at = None
-        self.last_update = None
-        self.stable_since = None
-
-    def start(self, now):
-        self.active = True
-        self.started_at = float(now)
-        self.last_update = None
-        self.stable_since = None
-
-    def update(self, now, linear_speed, angular_speed):
-        if not self.active:
-            return
-        now = float(now)
-        self.last_update = now
-        stopped = (
-            abs(linear_speed) <= self.linear_threshold
-            and abs(angular_speed) <= self.angular_threshold
-        )
-        if stopped and self.stable_since is None:
-            self.stable_since = now
-        elif not stopped:
-            self.stable_since = None
-
-    def status(self, now):
-        if not self.active:
-            return self.WAITING
-        now = float(now)
-        if now - self.started_at >= self.timeout:
-            return self.TIMEOUT
-        freshness_origin = self.last_update if self.last_update is not None else self.started_at
-        if now - freshness_origin >= self.stale_timeout:
-            return self.STALE
-        if self.stable_since is not None and now - self.stable_since >= self.stable_duration:
-            return self.STABLE
-        return self.WAITING
-
-    def stop(self):
-        self.active = False

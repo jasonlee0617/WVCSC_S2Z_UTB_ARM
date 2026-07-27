@@ -38,9 +38,9 @@ from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from wvcsc_arm_task.motion_state import MotionControlState
-from wvcsc_arm_task.node_parameters import create_alicia_moveit
-from wvcsc_arm_task.ik_observation import (
+from wvcsc_arm_task.motion.motion_state import MotionControlState
+from wvcsc_arm_task.motion.node_parameters import create_alicia_moveit
+from wvcsc_arm_task.observation.ik_observation import (
     ObservationOptimizer,
 )
 
