@@ -140,6 +140,7 @@ class _Harness:
         self._nav_client = _NavClient()
         self._abort_and_home_requested = False
         self._abort_reset_sent = False
+        self._abort_reset_started = False
         self._motion_control_state = ''
         self._recovery_return_home = False
         self._nav_timeout_canceling = False
@@ -424,6 +425,39 @@ def test_stable_inspection_point_sends_spray_without_docking_quality_gate():
 
     assert sent == [True]
     assert harness.core.state == MissionState.ARM_SPRAYING
+
+
+def test_abort_and_home_returns_to_ready_only_after_resetting_then_running():
+    harness = _Harness(MissionState.CANCELED)
+    harness._abort_and_home_requested = True
+    harness._abort_reset_sent = True
+
+    MissionManager._on_motion_control_state(
+        harness, SimpleNamespace(data='RUNNING'))
+    assert harness._abort_and_home_requested
+
+    MissionManager._on_motion_control_state(
+        harness, SimpleNamespace(data='RESETTING'))
+    assert harness._abort_reset_started
+
+    MissionManager._on_motion_control_state(
+        harness, SimpleNamespace(data='RUNNING'))
+    assert not harness._abort_and_home_requested
+    assert not harness._abort_reset_sent
+    assert harness.core.last_error == 'abort_and_home: arm HOME complete and ready'
+
+
+def test_abort_and_home_keeps_recovery_pending_after_home_failure():
+    harness = _Harness(MissionState.CANCELED)
+    harness._abort_and_home_requested = True
+    harness._abort_reset_sent = True
+
+    MissionManager._on_motion_control_state(
+        harness, SimpleNamespace(data='RESET_FAILED'))
+
+    assert harness._abort_and_home_requested
+    assert harness._abort_reset_sent
+    assert harness.core.last_error == 'abort_and_home: arm HOME reset failed'
 
 
 def test_late_nav_goal_acceptance_stays_canceled_after_timeout():

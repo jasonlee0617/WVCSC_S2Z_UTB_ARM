@@ -16,12 +16,11 @@ def command_for_key(key):
     return {
         ' ': 'stop',
         'h': 'reset',
-        'r': 'resume',
     }.get(key)
 
 
 class MotionControlKeyboard(Node):
-    """Publish direct stop/reset/resume commands for the arm controller."""
+    """Publish direct stop/reset commands for the arm controller."""
 
     def __init__(self):
         super().__init__('wvcsc_motion_control_keyboard')
@@ -47,7 +46,7 @@ class MotionControlKeyboard(Node):
             float(self.get_parameter('keyboard_poll_period_sec').value))
         self.create_timer(period, self._poll)
         self.get_logger().info(
-            'Keys: SPACE stop, h reset/HOME, r resume')
+            'Keys: SPACE stop, h reset/HOME')
 
     def _configure_tty(self):
         try:

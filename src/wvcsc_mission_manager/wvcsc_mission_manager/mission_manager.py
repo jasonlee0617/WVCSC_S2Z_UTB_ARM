@@ -159,6 +159,7 @@ class MissionManager(Node):
         self._wide_motion_deadline = None
         self._abort_and_home_requested = False
         self._abort_reset_sent = False
+        self._abort_reset_started = False
         self._motion_control_state = ''
         self._recovery_return_home = False
         self._nav_timeout_canceling = False
@@ -179,7 +180,7 @@ class MissionManager(Node):
         self.create_service(
             LoadManualMission, '/mission/load_manual', self._load_manual)
         self.create_subscription(
-            String, '/motion_control/state', self._on_motion_control_state, 10)
+            String, '/motion_control/state', self._on_motion_control_state, latched)
 
         # 调度定时器 (100ms 的高频看门狗，用于超时判断和停稳检测)
         self.create_timer(0.1, self._tick)
@@ -239,6 +240,10 @@ class MissionManager(Node):
 
     def _load_manual(self, request, response):
         """处理 Qt/RViz 保存的人工任务；加载本身永不隐式启动。"""
+        if self._abort_and_home_requested:
+            return self._reply(
+                response, False,
+                'abort and HOME reset is still in progress')
         try:
             points, home_pose = self._validate_manual_request(request)
             outcome = self.core.load(request.mission_id.strip(), points)
@@ -254,8 +259,6 @@ class MissionManager(Node):
         self._return_home_after_mission = bool(
             request.return_home_after_mission)
         self._manual_return_home = False
-        self._abort_and_home_requested = False
-        self._abort_reset_sent = False
         self._recovery_return_home = False
         self._nav_timeout_canceling = False
         self._nav_timeout_cancel_deadline = None
@@ -290,7 +293,16 @@ class MissionManager(Node):
     def _start(self, _request, response):
         if self.core.state != MissionState.READY:
             return self._reply(response, False, 'mission is not READY')
+        if self._abort_and_home_requested:
+            return self._reply(
+                response, False,
+                'abort and HOME reset is still in progress')
         if not self._servers_ready():
+            if any(point.requires_arm for point in self.core.points):
+                if self._motion_control_state != 'RUNNING':
+                    return self._reply(
+                        response, False,
+                        'arm HOME/reset is not complete; wait for RUNNING')
             return self._reply(
                 response, False,
                 'required Nav2, spray Action, or relay service is not ready')
@@ -327,7 +339,7 @@ class MissionManager(Node):
         return self._reply(response, True, 'mission canceled')
 
     def _abort_and_home(self, _request, response):
-        """Cancel the route, then request a locked MoveIt HOME reset.
+        """Cancel the route, then request a controlled MoveIt HOME reset.
 
         ``motion_control`` owns the physical arm reset.  This node only
         sequences its request after the Nav2 and arm Actions have settled.
@@ -342,6 +354,7 @@ class MissionManager(Node):
             self.core.cancel()
         self._abort_and_home_requested = True
         self._abort_reset_sent = False
+        self._abort_reset_started = False
         self._stop_detector.stop()
         self._clear_nav_startup_retry()
         self._cancel_nav_goal()
@@ -397,6 +410,10 @@ class MissionManager(Node):
         return self._reply(response, True, 'return home started')
 
     def _reset(self, _request, response):
+        if self._abort_and_home_requested:
+            return self._reply(
+                response, False,
+                'abort and HOME reset is still in progress')
         if (self._nav_handle is not None or self._spray_handle is not None or
                 self._nav_pending or self._spray_pending):
             return self._reply(response, False, 'active goal has not settled')
@@ -404,8 +421,6 @@ class MissionManager(Node):
             return self._reply(response, False, 'reset requires a terminal state')
         self._restore_configured_mission_options()
         self._manual_return_home = False
-        self._abort_and_home_requested = False
-        self._abort_reset_sent = False
         self._recovery_return_home = False
         self._nav_timeout_canceling = False
         self._nav_timeout_cancel_deadline = None
@@ -425,7 +440,9 @@ class MissionManager(Node):
         needs_spray = any(point.requires_arm for point in self.core.points)
         return (
             self._nav_client.server_is_ready()
-            and (not needs_spray or self._spray_client.server_is_ready())
+            and (not needs_spray or (
+                self._spray_client.server_is_ready()
+                and self._motion_control_state == 'RUNNING'))
             and (not self._require_relay_service or self._relay.service_is_ready()))
 
     def _clear_nav_startup_retry(self):
@@ -626,6 +643,7 @@ class MissionManager(Node):
                 self._nav_handle is not None, self._spray_handle is not None)):
             return
         self._abort_reset_sent = True
+        self._abort_reset_started = False
         self._publish_motion_command('reset')
         self.core.last_error = 'abort_and_home: motion_control reset requested'
         self._publish_status()
@@ -755,13 +773,20 @@ class MissionManager(Node):
 
     def _on_motion_control_state(self, message):
         self._motion_control_state = str(message.data)
-        if self._abort_and_home_requested and self._abort_reset_sent:
-            if self._motion_control_state in {'HOME_LOCKED', 'RESET_FAILED'}:
-                self.core.last_error = (
-                    'abort_and_home: arm HOME complete'
-                    if self._motion_control_state == 'HOME_LOCKED'
-                    else 'abort_and_home: arm HOME reset failed')
-                self._publish_status()
+        if not (self._abort_and_home_requested and self._abort_reset_sent):
+            return
+        if self._motion_control_state == 'RESETTING':
+            self._abort_reset_started = True
+        elif (self._motion_control_state == 'RUNNING' and
+              self._abort_reset_started):
+            self._abort_and_home_requested = False
+            self._abort_reset_sent = False
+            self._abort_reset_started = False
+            self.core.last_error = 'abort_and_home: arm HOME complete and ready'
+            self._publish_status()
+        elif self._motion_control_state == 'RESET_FAILED':
+            self.core.last_error = 'abort_and_home: arm HOME reset failed'
+            self._publish_status()
 
     def _send_spray_goal(self):
         """构建并发送机械臂 Action 目标。"""

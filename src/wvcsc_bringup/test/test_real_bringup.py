@@ -220,7 +220,9 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     assert "self.declare_parameter('base_frame', 'alicia_base_link')" in script
     assert "String(data='stop')" in script
     assert "String(data='reset')" in script
-    assert "String(data='resume')" in script
+    assert "String(data='resume')" not in script
+    assert 'HOME_LOCKED' not in script
+    assert 'unlock_after_home' not in script
     assert 'ActionClient(self, ExecuteSpray, \'/arm/execute_spray\')' in script
 
 

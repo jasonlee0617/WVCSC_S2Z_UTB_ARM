@@ -4,7 +4,7 @@
 The launch terminal owns hardware, MoveIt, C10, ArUco and easy_handeye2.  This
 second-terminal process owns fixed-sequence motion and sample collection.
 Press ``s`` or Enter to start one fresh session and ``q`` to cancel it.  Any
-external stop/reset event invalidates the whole session; after HOME and resume,
+external stop/reset event invalidates the whole session; after HOME returns to RUNNING,
 the operator must press ``s`` again.
 """
 
@@ -535,16 +535,15 @@ class AutoCalibrationCollector(Node):
         if self._external_locked:
             self._invalidate_session('motion locked')
         else:
-            self._state.resume()
+            self._state.release()
 
     def _on_motion_state(self, message):
         state = str(message.data).strip().upper()
         if state in {
-                'STOPPED', 'STOPPED_LOCKED', 'RESETTING', 'RESET_FAILED',
-                'HOME_LOCKED'}:
+                'STOPPED', 'STOPPED_LOCKED', 'RESETTING', 'RESET_FAILED'}:
             self._invalidate_session(state)
         elif state in {'NORMAL', 'RUNNING', 'READY'}:
-            self._state.resume()
+            self._state.release()
 
     def _keyboard_loop(self):
         if not sys.stdin.isatty():
@@ -581,7 +580,7 @@ class AutoCalibrationCollector(Node):
                 return
             if self._external_locked or self._state.locked:
                 self.get_logger().error(
-                    '[CALIBRATION] motion is locked; complete h -> HOME_LOCKED -> r first')
+                    '[CALIBRATION] motion is locked; wait for reset HOME to return RUNNING')
                 return
             self._session_cancel.clear()
             self._session_invalid.clear()

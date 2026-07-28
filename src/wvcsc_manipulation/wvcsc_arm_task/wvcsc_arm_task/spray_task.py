@@ -200,7 +200,7 @@ class SprayTask(
             self._abort.set()
             self.arm.cancel()
         else:
-            self.state.resume()
+            self.state.release()
             if not self._is_busy():
                 self._abort.clear()
 

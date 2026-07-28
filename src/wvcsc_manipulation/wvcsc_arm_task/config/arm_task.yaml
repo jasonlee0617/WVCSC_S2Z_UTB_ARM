@@ -70,20 +70,20 @@ wvcsc_spray_task:
     # 6. 视觉目标检测阈值与稳定门控
     # ----------------------------------------------------------------------
     # YOLO 置信度阈值。
-    disease_confidence: 0.20   # 病态目标检测置信度阈值
+    disease_confidence: 0.50   # 病态目标检测置信度阈值
     target_class_name: diseased_target
     # 仿真保留一个或多个目标的完整队列。
     max_targets_per_tree: 0
 
     # 视觉确认帧数：连续 3 帧满足条件，才认为目标有效，防止单帧误检。
-    confirmation_frames: 3
+    confirmation_frames: 1
 
     # 在不同视觉状态下等待检测结果的最长超时时间。
     detection_timeout_sec: 4.0            # 果实检测阶段超时
     fruit_collection_settle_sec: 1.00     # 果实队列稳定等待时间
 
     # 单颗病果最多尝试对准的次数。
-    max_alignment_attempts: 3
+    max_alignment_attempts: 2
 
     # ----------------------------------------------------------------------
     # 7. 目标重心修正 (Recenter) 与 IBVS 视觉伺服配置

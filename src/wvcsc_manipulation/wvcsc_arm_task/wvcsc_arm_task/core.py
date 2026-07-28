@@ -105,8 +105,8 @@ class SprayInterlock:
         设置机械臂运动锁状态。
 
         该状态一旦设为 True，将导致后续所有 `claim()` 请求失败。
-        通常由订阅 `/motion_control/locked` 的节点调用。
-        `resume` 解除锁后才允许新的喷洒目标。
+        通常由订阅 `/motion_control/locked` 的节点调用。复位成功后状态话题
+        自动发布 False，才允许新的喷洒目标。
 
         Args:
             active (bool): True 表示锁定，False 表示解除锁定。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-target Alicia-M spray test with operator-visible recovery controls."""
+"""Single-target Alicia-M spray test with automatic HOME recovery readiness."""
 
 from __future__ import annotations
 
@@ -146,6 +146,9 @@ class ArmSprayTestNode(Node):
             observation_mode):
         if self._active:
             raise RuntimeError('spray Action is already active')
+        if self.motion_state != 'RUNNING':
+            raise RuntimeError(
+                f'arm is not ready ({self.motion_state}); wait for HOME to complete')
         if not self.client.wait_for_server(timeout_sec=1.0):
             raise RuntimeError('/arm/execute_spray is unavailable')
         observation_mode = normalize_observation_mode(observation_mode)
@@ -192,12 +195,6 @@ class ArmSprayTestNode(Node):
 
     def request_home(self):
         self.motion_pub.publish(String(data='reset'))
-
-    def unlock_after_home(self):
-        if self.motion_state != 'HOME_LOCKED':
-            return False
-        self.motion_pub.publish(String(data='resume'))
-        return True
 
     def _publish_active_status(self):
         if not self._active:
@@ -314,10 +311,8 @@ class ArmSprayTestGui(QWidget):
         buttons = QVBoxLayout()
         self.start_button = QPushButton('启动')
         self.stop_home_button = QPushButton('复位')
-        self.unlock_button = QPushButton('HOME 完成后解锁')
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.stop_home_button)
-        buttons.addWidget(self.unlock_button)
         layout.addLayout(buttons)
         self.action_label = QLabel('Action: 空闲')
         self.progress_label = QLabel('进度: 0%')
@@ -343,7 +338,6 @@ class ArmSprayTestGui(QWidget):
 
         self.start_button.clicked.connect(self._execute)
         self.stop_home_button.clicked.connect(self._stop_and_home)
-        self.unlock_button.clicked.connect(self._unlock)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.image_toggle.toggled.connect(self._set_image_panel_visible)
         self._on_mode_changed()
@@ -391,12 +385,6 @@ class ArmSprayTestGui(QWidget):
             self.node.request_home()
             self.home_pending = False
 
-    def _unlock(self):
-        if self.node.unlock_after_home():
-            self._log('已发送解除 HOME 锁定请求')
-        else:
-            self._log('机械臂尚未到达 HOME_LOCKED，不能解锁')
-
     def _on_mode_changed(self, *_args):
         mode = str(self.mode_combo.currentData())
         visible = mode == 'ik'
@@ -427,8 +415,9 @@ class ArmSprayTestGui(QWidget):
 
     def _refresh(self):
         self.motion_label.setText(f'机械臂: {self.node.motion_state}')
-        self.start_button.setEnabled(not self.node.active)
-        self.unlock_button.setEnabled(self.node.motion_state == 'HOME_LOCKED')
+        self.start_button.setEnabled(
+            not self.node.active and not self.home_pending and
+            self.node.motion_state == 'RUNNING')
 
     def _log(self, text):
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')

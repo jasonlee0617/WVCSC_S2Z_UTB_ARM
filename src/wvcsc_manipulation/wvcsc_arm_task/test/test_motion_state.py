@@ -10,7 +10,7 @@ from wvcsc_arm_task.motion.motion_control_keyboard import command_for_key
 def test_motion_control_keyboard_mapping():
     assert command_for_key(' ') == 'stop'
     assert command_for_key('h') == 'reset'
-    assert command_for_key('r') == 'resume'
+    assert command_for_key('r') is None
     assert command_for_key('x') is None
     assert command_for_key('?') is None
 
@@ -39,25 +39,24 @@ class _Arm:
         return self.home_success
 
 
-def test_stop_blocks_until_resume():
+def test_stop_blocks_until_a_home_reset_completes():
     state = MotionControlState()
     assert not state.locked
     state.stop()
     assert state.locked
-    assert state.resume()
-    assert not state.locked
 
 
-def test_reset_is_single_flight_and_stays_locked():
+def test_reset_is_single_flight_and_releases_only_after_it_finishes():
     state = MotionControlState()
     assert state.begin_reset()
     assert state.locked
     assert state.reset_in_progress
     assert not state.begin_reset()
-    assert not state.resume()
+    assert not state.release()
     state.finish_reset()
     assert state.locked
-    assert state.resume()
+    assert state.release()
+    assert not state.locked
 
 
 def test_reset_stops_opens_and_moves_to_zero_home_in_order():
@@ -69,6 +68,8 @@ def test_reset_stops_opens_and_moves_to_zero_home_in_order():
     assert arm.calls == ['cancel_and_wait', 'open', ('home', home)]
     assert state.locked
     assert not state.reset_in_progress
+    assert state.release()
+    assert not state.locked
 
 
 def test_reset_failure_skips_home_and_remains_locked():

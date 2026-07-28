@@ -18,6 +18,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
+from std_msgs.msg import String
 from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.msg import ManualMissionPoint, MissionPlan, MissionStatus
 from wvcsc_interfaces.srv import LoadManualMission
@@ -48,6 +49,17 @@ class _FakeServers(Node):
             self._execute_spray,
             callback_group=group,
         )
+        self.motion_state_pub = self.create_publisher(
+            String, '/motion_control/state',
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
+        )
+        self.motion_state_pub.publish(String(data='RUNNING'))
+        self.create_timer(
+            0.1, lambda: self.motion_state_pub.publish(String(data='RUNNING')))
 
     def _execute_nav(self, goal_handle):
         pose = goal_handle.request.pose.pose

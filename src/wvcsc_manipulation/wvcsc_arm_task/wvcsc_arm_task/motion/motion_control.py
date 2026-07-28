@@ -3,10 +3,10 @@
 Alicia-M 机械臂运动锁控制节点 (Motion Control Node)。
 
 核心功能：
-1. 接收并执行系统级的运动控制指令：`stop`(急停), `reset`(复位至HOME), `resume`(解除锁定)。
+1. 接收并执行系统级的运动控制指令：`stop`(急停), `reset`(复位至HOME)。
 2. 将当前的运动锁定状态 (`locked`) 通过 QoS 设置为 `TRANSIENT_LOCAL` 实时发布，
    以通知下游节点（如 `spray_task`）阻止新的运动规划。
-3. 扮演“看门狗”角色，确保任何异常发生后的运动恢复均经过人工确认。
+3. 在复位期间保持临时互锁；物理 HOME 成功后自动恢复可执行状态。
 """
 
 import threading
@@ -29,7 +29,6 @@ from .node_parameters import create_alicia_moveit
 RUNNING = 'RUNNING'
 STOPPED_LOCKED = 'STOPPED_LOCKED'
 RESETTING = 'RESETTING'
-HOME_LOCKED = 'HOME_LOCKED'
 RESET_FAILED = 'RESET_FAILED'
 
 
@@ -40,7 +39,7 @@ def normalize_command(value):
     避免大小写和前后空格导致的误触发。
     """
     command = str(value).strip().lower()
-    return command if command in ('stop', 'reset', 'resume') else None
+    return command if command in ('stop', 'reset') else None
 
 
 class MotionControlNode(Node):
@@ -111,10 +110,9 @@ class MotionControlNode(Node):
         """
         运动控制命令的回调函数。
 
-        处理三种状态指令：
+        处理两种状态指令：
         - `stop`：立即锁定并取消所有运动。
         - `reset`：锁定状态，并异步在后台执行 HOME 位姿复位。
-        - `resume`：仅在复位完成后，手动解除锁定。
         """
         command = normalize_command(message.data)
         if command is None:
@@ -157,16 +155,6 @@ class MotionControlNode(Node):
             # 也不会卡死 `MotionControlNode` 的 ROS2 主回调线程，其他节点依然可以正常通讯。
             threading.Thread(target=self._reset, daemon=True).start()
 
-        elif self.state.resume():
-            # --------- 恢复指令 ---------
-            # `resume()` 内部检查：只有 `_reset_in_progress` 为 False（即复位线程已完成）时，
-            # 才会解除 `_locked` 锁定。
-            self._publish_locked()
-            self._set_motion_state(RUNNING)
-            self.get_logger().info('Motion lock released')
-        else:
-            self.get_logger().warn('Cannot resume while reset is in progress')
-
     def _reset(self):
         """
         在后台守护线程中执行的机械臂实际复位动作。
@@ -174,20 +162,28 @@ class MotionControlNode(Node):
         它将调用 `alicia_moveit` 控制机械臂回到 `AliciaMoveIt.HOME` 位置。
         """
         # `perform_reset` 内部会自动完成：打开夹爪 -> 规划关节空间路径 -> 执行至 HOME。
-        # 成功后状态设置为完成（finish_reset），但**依然处于锁定状态**，直到收到 `resume`。
+        # `perform_reset` 返回时已经结束复位线程标记；只有实际 HOME 成功才释放临时互锁。
         success = perform_reset(
             self.state, self.arm, AliciaMoveIt.HOME,
             abort_requested=self._reset_abort.is_set)
         
         if success:
-            self._set_motion_state(HOME_LOCKED)
-            self.get_logger().info('Reset reached HOME; send resume to unlock motion')
+            if not self.state.release():
+                self._set_motion_state(RESET_FAILED)
+                self.get_logger().error(
+                    'HOME completed but reset state did not settle; motion remains locked')
+                self._publish_locked()
+                return
+            self._publish_locked()
+            self._set_motion_state(RUNNING)
+            self.get_logger().info('Reset reached HOME; motion is ready')
         else:
             self._set_motion_state(RESET_FAILED)
             self.get_logger().error('Reset failed; motion remains locked')
-        
-        # 通知订阅者当前的锁定状态（通常仍在锁定状态）
-        self._publish_locked()
+
+        # HOME 失败时发布仍处于锁定状态；成功路径已在发布 RUNNING 前发布 False。
+        if not success:
+            self._publish_locked()
 
 
 def main():

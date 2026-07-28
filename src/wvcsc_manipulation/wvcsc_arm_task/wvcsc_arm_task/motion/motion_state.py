@@ -11,15 +11,15 @@
 2. 急停 (Stop): 设定 `_locked = True` -> 阻断所有新任务，底层运动立即取消。
 3. 复位 (Reset): 设定 `_locked = True`, `_reset_in_progress = True` -> 阻断所有任务，
                 并在后台线程执行机械臂回 HOME 的物理动作。
-4. 恢复 (Resume): 仅当 `_reset_in_progress = False` 时允许执行，重置 `_locked = False`
-                  -> 允许系统重新接收任务。
+4. HOME 成功: 控制节点调用 `release()` 清除临时互锁 -> 自动允许下一次任务。
+   HOME 失败时锁保持为 True，避免将未完成的物理复位误报为可执行状态。
 """
 
 import threading
 
 
 class MotionControlState:
-    """保持停止/复位/恢复语义，与 ROS 基础设施解耦的线程安全状态机。"""
+    """保持停止与复位临时互锁语义的线程安全状态机。"""
 
     def __init__(self):
         # 保护内部状态变量的互斥锁
@@ -70,20 +70,14 @@ class MotionControlState:
         """
         复位流程的结束阶段（无论成功还是失败，都必须调用）。
 
-        仅将 `_reset_in_progress` 置为 False。
-        **注意**：系统依然保持 `_locked = True` 状态，强制要求外部发送 `resume` 指令
-        后才能继续执行任务，这符合“人工确认安全后恢复”的工业安全原则。
+        仅将 `_reset_in_progress` 置为 False。调用方只在物理 HOME 成功后再调用
+        `release()`；失败路径保持 `_locked = True`。
         """
         with self._mutex:
             self._reset_in_progress = False
 
-    def resume(self):
-        """
-        【恢复】动作。
-
-        解除系统的锁定状态，允许新的运动任务下发。
-        安全约束：只有在复位动作完全结束（`_reset_in_progress = False`）后，才能恢复。
-        """
+    def release(self):
+        """仅在复位结束后清除临时互锁，允许下一次任务下发。"""
         with self._mutex:
             if self._reset_in_progress:
                 return False
@@ -108,8 +102,7 @@ def begin_reset(state, arm):
     if arm.cancel_and_wait():
         return True
     
-    # 如果取消等待失败，必须要调用 finish_reset，否则状态机将永远卡在 `_reset_in_progress`，
-    # 导致系统永远无法执行 `resume` 解开锁。
+    # 如果取消等待失败，必须要调用 finish_reset，否则状态机将永远卡在 `_reset_in_progress`。
     state.finish_reset()
     return False
 
@@ -122,7 +115,7 @@ def perform_reset(state, arm, home, abort_requested=None):
     2. 规划并执行回 HOME 点的关节空间轨迹。
     3. **无论成功或失败**，在退出前都必须调用 `state.finish_reset()` 以标记复位流程结束。
     
-    注意：物理执行结束后，状态机仍被锁定 (`_locked=True`)，需要等待外部手动发送 `resume`。
+    注意：物理执行成功后由调用方立即调用 `state.release()`；失败时锁保持不变。
     """
     try:
         if abort_requested is not None and abort_requested():
