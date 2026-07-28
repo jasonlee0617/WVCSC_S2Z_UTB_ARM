@@ -1,27 +1,26 @@
-# 底层喷嘴喷洒动作。SprayTask 仅在正常视觉对准或明确允许的回退机制完成后调用此动作。
-# SprayActuator 是服务端，拥有继电器通道 2 及其定时器，并且在成功执行继电器开启命令
-# 并进入定时区间后，才会发布 /spray/simulated_active 消息。
-# Goal: 一次喷嘴执行动作，独立于广域喷洒通道 1。
-string mission_id                     # 路线或独立测试标识符。
-string tree_id                        # 当前植物 / 检查点标识符。
-float32 duration                      # 请求的该目标喷嘴开启时长（秒）。
-string mode                           # 当前模式约定，通常为 continuous（连续）。
+# 底层喷嘴喷洒 Action。SprayTask 仅在正常视觉对准或明确允许的回退策略完成后调用。
+# SprayActuator 是服务端，拥有继电器通道 2 和定时器；继电器开启命令确认且定时区间开始后，
+# 才发布 /spray/simulated_active=true。该 Action 独立于车辆行进时的广域喷洒通道 1。
+# Goal: 一次病态目标喷嘴执行请求；不携带路线 Point ID 或植物 ID。
+string mission_id                     # 路线或独立测试任务关联 ID。
+float32 duration                      # 本次目标喷嘴请求开启时长（秒）。
+string mode                           # 执行模式；当前项目通常使用 continuous（连续）。
 ---
-# Result: 执行器关闭或清理完成后的完成信息。
-uint16 OK=0                           # 请求的定时喷洒完成。
-uint16 INVALID_GOAL=1                 # 时长或模式验证失败。
-uint16 BUSY=2                         # 先前的喷嘴周期仍处于活跃状态。
-uint16 CANCELED=3                     # 取消触发了清理和继电器关闭。
+# Result: 执行器关闭或清理完成后的软件执行结果，不表示液体流量已经测量确认。
+uint16 OK=0                           # 请求的定时喷洒周期已完成。
+uint16 INVALID_GOAL=1                 # 时长或 mode 验证失败。
+uint16 BUSY=2                         # 前一喷嘴周期仍处于活跃状态。
+uint16 CANCELED=3                     # 取消已触发清理和继电器关闭请求。
 uint16 EMERGENCY_STOPPED=4            # 安全/紧急路径中断了喷洒。
-uint16 RELAY_FAILED=5                 # 通道 2 继电器请求未得到确认。
-bool success                           # 仅当 error_code 为 OK 时为真。
-uint16 error_code                      # 上述错误代码常量之一；请保留数值兼容性。
-string message                         # 人类可读的执行器结果。
-float32 actual_duration                # 测量的定时器间隔（秒）。
+uint16 RELAY_FAILED=5                 # 通道 2 的继电器命令未获得软件确认。
+bool success                           # 仅当 error_code=OK 时为 True。
+uint16 error_code                      # 上述数值错误码；请保留既有数值兼容性。
+string message                         # 供日志和 UI 显示的执行器诊断文本。
+float32 actual_duration                # 本地定时器测得的开启区间（秒），不是流量测量值。
 ---
-# Feedback: 活跃周期进度。即使特定实现不发布 CLOSING，该常量仍保留以保持兼容性。
-uint8 ACTIVE=0                         # 继电器已确认开启，定时器正在运行。
-uint8 CLOSING=1                        # 保留的/可选的继电器关闭清理阶段。
+# Feedback: 活跃喷嘴周期进度。即使实现不发布 CLOSING，该常量仍保留数值兼容性。
+uint8 ACTIVE=0                         # 继电器开启已获软件确认，定时器正在运行。
+uint8 CLOSING=1                        # 保留的可选继电器关闭/清理阶段。
 uint8 phase                            # 当前反馈阶段常量。
-float32 elapsed                        # 已耗喷嘴开启时间（秒）。
-float32 progress                       # 用于 UI 显示的归一化周期进度。
+float32 elapsed                        # 已经过的喷嘴开启时间（秒）。
+float32 progress                       # 供 UI 显示的归一化周期进度。

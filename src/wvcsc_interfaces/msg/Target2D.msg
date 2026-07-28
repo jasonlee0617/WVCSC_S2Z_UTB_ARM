@@ -1,17 +1,16 @@
-# 感知管道发布的规范二维病果目标消息，由 SprayTask/视觉伺服节点消费。
-# 它携带全图像素坐标，内部 ROI 处理后的结果已映射回原图。
-# 目标账目通过 mission/tree/target ID 避免重复喷洒已处理的目标。
-std_msgs/Header header                 # 源图像帧 ID 和检测时间戳。
-string mission_id                      # 当前 ExecuteSpray 任务标识符。
-string tree_id                         # 当前植物标识符。
-string target_id                       # 稳定的跟踪器/账目标识符。
-bool valid                             # False 表示当前没有可用的控制目标。
-float32 confidence                     # 按模型约定的置信度，范围 [0, 1]。
-# 全图像素中的控制点：分割后端使用掩膜安全点；
-# 检测后端无掩膜，因此使用检测框中心。
+# 感知流水线发布的规范二维病态目标消息，由 SprayTask 和视觉伺服消费。
+# 坐标始终属于完整相机图像；当前感知默认直接处理整幅图像，不依赖树 ROI。
+# 目标账本以 mission_id 与 target_id 避免重复喷洒；路线 Point ID 不参与视觉目标匹配。
+std_msgs/Header header                 # 源相机图像的 frame_id 和检测时间戳。
+string mission_id                      # 当前 ExecuteSpray 任务关联 ID。
+# 当前感知会话内唯一且稳定的目标追踪 ID；实现应使用 UUIDv4。它不是跨任务/重启永久的物理叶片 ID。
+string target_id
+bool valid                             # False 表示当前没有可供闭环控制的目标；其余几何字段不得被当作有效目标使用。
+float32 confidence                     # 模型输出置信度，按后端约定应位于 [0, 1]。
+# 完整图像中的控制点：segment 后端为掩膜安全点；detect 后端无掩膜，必须为检测框中心。
 float32 center_u
 float32 center_v
-float32 width                          # 检测框宽度（全图像素）。
-float32 height                         # 检测框高度（全图像素）。
-uint32 image_width                     # 源图像宽度（像素）。
-uint32 image_height                    # 源图像高度（像素）。
+float32 width                          # 对应检测框的完整图像宽度（像素）。
+float32 height                         # 对应检测框的完整图像高度（像素）。
+uint32 image_width                     # 源完整图像宽度（像素）。
+uint32 image_height                    # 源完整图像高度（像素）。

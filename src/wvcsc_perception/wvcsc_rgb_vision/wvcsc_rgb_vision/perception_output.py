@@ -43,7 +43,7 @@ def instance_label(instance):
 
 def annotated_image(
         image, instances, *, draw_diseased_aim_point=False,
-        selected_target_id='', target_class_name='diseased_target'):
+        selected_target_id='', canonical_target_class_name='diseased_target'):
     """Render boxes, labels, selected-target emphasis and aim points."""
     annotated = image.copy()
     for instance in instances:
@@ -73,7 +73,7 @@ def annotated_image(
         )
         if (
                 draw_diseased_aim_point and
-                instance.class_name == target_class_name):
+                instance.class_name == canonical_target_class_name):
             cv2.circle(
                 annotated,
                 (round(instance.aim_u), round(instance.aim_v)),

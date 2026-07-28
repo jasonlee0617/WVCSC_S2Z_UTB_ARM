@@ -5,7 +5,7 @@ from .disease_segmenter import DiseaseSegmenter
 
 
 def create_disease_backend(
-        backend, model_path, target_class_id, target_class_name,
+        backend, model_path, target_class_id, model_target_class_name,
         *, strict_model_classes=False):
     """Return one validated ``segment`` or ``detect`` backend."""
     backend = str(backend).strip().lower()
@@ -21,6 +21,6 @@ def create_disease_backend(
     return backend_type(
         model_path,
         target_class_id,
-        target_class_name,
+        model_target_class_name,
         strict_model_classes=strict_model_classes,
     )

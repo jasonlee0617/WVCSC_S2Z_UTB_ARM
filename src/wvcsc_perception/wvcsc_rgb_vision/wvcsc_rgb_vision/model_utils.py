@@ -15,8 +15,9 @@ import sys
 from ament_index_python.packages import get_package_share_directory
 
 
-# 病态目标的统一外部类别名。
-DISEASED_TARGET_CLASS_NAMES = {0: 'diseased_target'}
+# 病态目标在 ROS 输出中的固定类别名。模型原生类别名由
+# ``model_target_class_name`` 单独配置，不参与下游消息契约。
+CANONICAL_DISEASE_TARGET_CLASS_NAME = 'diseased_target'
 
 # 权重文件保留各自训练时的原生类别名；ROS 输出统一为 diseased_target。
 DISEASED_TARGET_CLASS_ALIASES = {
@@ -24,12 +25,8 @@ DISEASED_TARGET_CLASS_ALIASES = {
     'disease_leaf': 'diseased_target',
     'diseased_target': 'diseased_target',
 }
-DISEASED_TARGET_NATIVE_CLASS_NAMES = frozenset(
-    {'diseased_fruit', 'disease_leaf'})
-
-
 def validate_yolo_model(
-        model, expected_task, expected_names, *, exact_names=False):
+        model, expected_task, expected_native_names, *, exact_names=False):
     """
     在节点初始化时强制校验 YOLO 模型的合规性（快速失败机制）。
 
@@ -41,7 +38,7 @@ def validate_yolo_model(
     Args:
         model (ultralytics.YOLO): 已加载的 YOLO 模型对象。
         expected_task (str): 期望的任务类型 (如 'detect' 或 'segment')。
-        expected_names (dict): 期望的类别 ID 到类别名称的映射字典。
+        expected_native_names (dict): 权重中目标类别 ID 到原生类别名称的映射。
         exact_names (bool): 为 True 时要求模型类别表完全相等。实机
             配置使用此严格模式，防止带有额外类别的权重被误部署。
 
@@ -53,27 +50,18 @@ def validate_yolo_model(
                     if isinstance(model.names, dict)
                     else {index: str(value) for index, value in enumerate(model.names)})
 
-    canonical_names = {
-        key: DISEASED_TARGET_CLASS_ALIASES.get(value, value)
-        for key, value in actual_names.items()}
     names_match = (
-        canonical_names == expected_names if exact_names
-        else expected_names.items() <= canonical_names.items())
-    if (exact_names and expected_task == 'segment' and
-            expected_names == DISEASED_TARGET_CLASS_NAMES):
-        # Deployment weights must retain one of the two known training labels;
-        # the canonical ROS label is an output contract, not a checkpoint label.
-        names_match = names_match and (
-            len(actual_names) == 1 and
-            set(actual_names.values()) <= DISEASED_TARGET_NATIVE_CLASS_NAMES)
+        actual_names == expected_native_names if exact_names
+        else expected_native_names.items() <= actual_names.items())
     if model.task != expected_task or not names_match:
         raise ValueError(
             f'YOLO model contract mismatch: expected task={expected_task}, '
-            f'names={expected_names}; found task={model.task}, '
-            f'native_names={actual_names}, canonical_names={canonical_names}')
+            f'native_names={expected_native_names}; found task={model.task}, '
+            f'native_names={actual_names}')
 
 
-def load_yolo_model(model_path, expected_task, expected_names, *, exact_names=False):
+def load_yolo_model(
+        model_path, expected_task, expected_native_names, *, exact_names=False):
     """Load and validate one disease-model checkpoint once for every backend."""
     try:
         from ultralytics import YOLO
@@ -87,7 +75,7 @@ def load_yolo_model(model_path, expected_task, expected_names, *, exact_names=Fa
         raise FileNotFoundError(f'YOLO weight file is missing: {resolved_path}')
     model = YOLO(resolved_path)
     validate_yolo_model(
-        model, expected_task, expected_names, exact_names=exact_names)
+        model, expected_task, expected_native_names, exact_names=exact_names)
     return model
 
 

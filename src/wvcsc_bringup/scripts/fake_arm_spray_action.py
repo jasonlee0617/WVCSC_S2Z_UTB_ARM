@@ -63,7 +63,6 @@ class FakeArmSprayAction(Node):
     def _goal_callback(self, request):
         duration = float(request.spray_duration)
         if (not str(request.mission_id).strip()
-                or not str(request.tree_id).strip()
                 or not math.isfinite(duration)
                 or duration <= 0.0):
             self.get_logger().error('[FAKE_ARM] rejected invalid spray goal')
@@ -119,7 +118,7 @@ class FakeArmSprayAction(Node):
         self._goal_count += 1
         sequence = self._goal_count
         self.get_logger().info(
-            f'[FAKE_ARM] inspect={sequence} tree={request.tree_id} '
+            f'[FAKE_ARM] inspect={sequence} mission={request.mission_id} '
             f'channel=2 duration={duration:.1f}s')
         result = ExecuteSpray.Result()
 

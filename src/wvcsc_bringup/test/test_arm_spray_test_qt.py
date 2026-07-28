@@ -10,12 +10,11 @@ arm_spray_test_qt = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(arm_spray_test_qt)
 
 
-def test_single_target_goal_uses_the_selected_arm_frame_values_and_mode():
+def test_single_arm_goal_uses_the_selected_arm_frame_values_and_mode():
     goal = arm_spray_test_qt.build_spray_goal(
-        'mission_1', 'corn_01', 'alicia_base_link',
+        'mission_1', 'alicia_base_link',
         0.0, 1.3, 0.0, 3.0, 'ik', 0.9)
     assert goal.mission_id == 'mission_1'
-    assert goal.tree_id == 'corn_01'
     assert goal.tree_hint.header.frame_id == 'alicia_base_link'
     assert (goal.tree_hint.point.x, goal.tree_hint.point.y,
             goal.tree_hint.point.z, goal.spray_duration) == (0.0, 1.3, 0.0, 3.0)

@@ -9,7 +9,7 @@ from wvcsc_mission_manager.core import (
     MissionCore,
     MissionState,
     PointType,
-    Target,
+    RoutePoint,
 )
 from wvcsc_mission_manager.mission_manager import MissionManager
 from wvcsc_mission_manager.stop_detector import StopDetector
@@ -90,11 +90,11 @@ class _Relay:
 
 class _WideMotionHarness:
     def __init__(self):
-        target = Target(
+        point = RoutePoint(
             'transit_1', 3.0, 2.0, 0.0, 0.0, (3.4, 0.2, 0.0),
             point_type=PointType.TRANSIT, wide_spray_on_approach=True)
         self.core = MissionCore()
-        self.core.load('wide_motion', [target])
+        self.core.load('wide_motion', [point])
         self.core.state = MissionState.NAVIGATING
         self._wide_motion_pending = True
         self._wide_motion_deadline = 10.0
@@ -116,9 +116,9 @@ class _WideMotionHarness:
 
 class _Harness:
     def __init__(self, state=MissionState.NAVIGATING):
-        target = Target('tree_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0))
+        point = RoutePoint('point_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0))
         self.core = MissionCore()
-        self.core.load('demo', [target])
+        self.core.load('demo', [point])
         self.core.state = state
         self._nav_pending = True
         self._spray_pending = True
@@ -133,7 +133,7 @@ class _Harness:
         self._spray_timeout = 5.0
         self._spray_progress_timeout = 3.0
         self._spray_last_progress = 0.0
-        self._return_home_after_finish = False
+        self._return_home_after_mission = False
         self._manual_return_home = False
         self._home_pose = (0.0, 0.0, 0.0)
         self._stop_detector = _Detector()
@@ -202,7 +202,7 @@ class _Validator:
         self._arm_base_left_offset = 0.0
         self._arm_base_yaw = 0.0
         self.parameters = {
-            'max_targets': 2,
+            'max_points': 2,
             'max_abs_coordinate': 50.0,
             'min_spray_duration': 0.2,
             'max_spray_duration': 10.0,
@@ -222,8 +222,8 @@ def _pose(x, y, yaw=0.0):
 
 
 def _manual_request(frame='map', x=3.0, count=1):
-    targets = [SimpleNamespace(
-        target_id=f'manual_{index}',
+    points = [SimpleNamespace(
+        point_id=f'manual_{index}',
         docking_pose=_pose(x + index, 0.5, yaw=0.2 + index),
         spray_duration=2.0,
         tree_x_m=0.0,
@@ -234,8 +234,8 @@ def _manual_request(frame='map', x=3.0, count=1):
         header=SimpleNamespace(frame_id=frame),
         mission_id='manual_demo',
         home_pose=_pose(0.0, 0.0),
-        return_home_after_finish=False,
-        targets=targets,
+        return_home_after_mission=False,
+        points=points,
     )
 
 
@@ -244,7 +244,7 @@ def test_nav_rejection_and_confirmed_failure_skip_current_route_point():
     MissionManager._nav_goal_response(
         rejected, _Future(SimpleNamespace(accepted=False)))
     assert rejected.core.state == MissionState.MISSION_COMPLETED
-    assert rejected.core.skipped_targets == 1
+    assert rejected.core.skipped_points == 1
     assert rejected.failures == []
 
     failed = _Harness()
@@ -259,7 +259,7 @@ def test_nav_rejection_and_confirmed_failure_skip_current_route_point():
 
 def test_transit_arrival_disables_wide_spray_before_any_dwell_or_next_point():
     harness = _Harness()
-    transit = Target(
+    transit = RoutePoint(
         'transit_1', 3.0, 2.0, 0.0, 0.0, (3.4, 0.2, 0.0),
         point_type=PointType.TRANSIT, wide_spray_on_approach=True,
         dwell_time_sec=1.0)
@@ -336,7 +336,7 @@ def test_spray_rejection_skips_but_home_failure_remains_blocking():
     assert failed.core.current_index == 0
 
 
-def test_ordinary_vision_failure_skips_target_after_home():
+def test_ordinary_vision_failure_skips_point_after_home():
     harness = _Harness(MissionState.ARM_SPRAYING)
     result = SimpleNamespace(
         success=False,
@@ -351,8 +351,8 @@ def test_ordinary_vision_failure_skips_target_after_home():
     )
 
     assert harness.core.state == MissionState.MISSION_COMPLETED
-    assert harness.core.skipped_targets == 1
-    assert harness.core.target_outcomes == [MissionCore.SKIPPED]
+    assert harness.core.skipped_points == 1
+    assert harness.core.point_outcomes == [MissionCore.SKIPPED]
     assert harness.failures == []
 
 
@@ -371,8 +371,8 @@ def test_inspected_without_disease_completes_the_tree():
     )
 
     assert harness.core.state == MissionState.MISSION_COMPLETED
-    assert harness.core.completed_targets == 1
-    assert harness.core.skipped_targets == 0
+    assert harness.core.completed_points == 1
+    assert harness.core.skipped_points == 0
 
 
 def test_partial_success_marks_tree_incomplete_but_completes_route():
@@ -390,9 +390,9 @@ def test_partial_success_marks_tree_incomplete_but_completes_route():
     )
 
     assert harness.core.state == MissionState.MISSION_COMPLETED
-    assert harness.core.completed_targets == 0
-    assert harness.core.partial_targets == 1
-    assert harness.core.target_outcomes == [MissionCore.PARTIAL]
+    assert harness.core.completed_points == 0
+    assert harness.core.partial_points == 1
+    assert harness.core.point_outcomes == [MissionCore.PARTIAL]
 
 
 def test_nav_timeout_cancels_for_skip_while_spray_timeout_stays_blocking():
@@ -411,7 +411,7 @@ def test_nav_timeout_cancels_for_skip_while_spray_timeout_stays_blocking():
     MissionManager._tick(stale)
     assert stale.failures == []
     assert stale.core.state == MissionState.MISSION_COMPLETED
-    assert stale.core.skipped_targets == 1
+    assert stale.core.skipped_points == 1
 
 
 def test_stable_inspection_point_sends_spray_without_docking_quality_gate():
@@ -480,7 +480,7 @@ def test_fail_cancels_both_children_and_stops_odom_check():
     assert harness.status_updates == 1
 
 
-def test_invalid_manual_frame_coordinate_or_target_count_is_rejected():
+def test_invalid_manual_frame_coordinate_or_point_count_is_rejected():
     validator = _Validator()
     for request in (
             _manual_request(frame='odom'),
@@ -492,32 +492,32 @@ def test_invalid_manual_frame_coordinate_or_target_count_is_rejected():
             continue
         raise AssertionError('invalid mission was accepted')
 
-def test_manual_targets_preserve_selected_pose_and_validate_input():
+def test_manual_points_preserve_selected_pose_and_validate_input():
     validator = _Validator()
     request = _manual_request()
-    targets, home = MissionManager._validate_manual_request(validator, request)
-    assert targets[0].docking_pose[:2] == (3.0, 0.5)
-    assert math.isclose(targets[0].docking_pose[2], 0.2)
-    assert (targets[0].x, targets[0].y, targets[0].z) == pytest.approx(
+    points, home = MissionManager._validate_manual_request(validator, request)
+    assert points[0].docking_pose[:2] == (3.0, 0.5)
+    assert math.isclose(points[0].docking_pose[2], 0.2)
+    assert (points[0].x, points[0].y, points[0].z) == pytest.approx(
         (2.309969, 1.890632, 0.0), abs=1e-6)
     assert home == (0.0, 0.0, 0.0)
 
 
 def test_manual_qt_route_accepts_twenty_three_inspection_points():
     validator = _Validator()
-    validator.parameters['max_targets'] = 64
+    validator.parameters['max_points'] = 64
     request = _manual_request(count=23)
 
-    targets, _home = MissionManager._validate_manual_request(validator, request)
+    points, _home = MissionManager._validate_manual_request(validator, request)
 
-    assert len(targets) == 23
+    assert len(points) == 23
 
 
-def test_manual_target_requires_a_nonzero_signed_arm_offset():
+def test_manual_point_requires_a_nonzero_signed_arm_offset():
     validator = _Validator()
     request = _manual_request()
-    request.targets[0].tree_x_m = 0.0
-    request.targets[0].tree_y_m = 0.0
+    request.points[0].tree_x_m = 0.0
+    request.points[0].tree_y_m = 0.0
     with pytest.raises(ValueError, match='tree offset is zero'):
         MissionManager._validate_manual_request(validator, request)
 
@@ -573,9 +573,9 @@ def test_abort_and_home_accepts_failed_state_and_is_idempotent():
     assert commands == ['stop', 'reset']
 
 
-def test_last_target_can_require_return_home_navigation():
+def test_last_point_can_require_return_home_navigation():
     harness = _Harness(MissionState.ARM_SPRAYING)
-    harness._return_home_after_finish = True
+    harness._return_home_after_mission = True
     harness._send_nav_goal = lambda: setattr(harness, 'nav_sent', True)
     result = SimpleNamespace(success=True, error_code=0, message='HOME')
 
@@ -591,8 +591,8 @@ def test_last_target_can_require_return_home_navigation():
 
 def test_return_home_nav_success_completes_mission():
     harness = _Harness(MissionState.RETURNING_HOME)
-    harness.core.target_outcomes = [MissionCore.COMPLETED]
-    harness.core.completed_targets = 1
+    harness.core.point_outcomes = [MissionCore.COMPLETED]
+    harness.core.completed_points = 1
 
     MissionManager._nav_result(
         harness,
@@ -621,13 +621,13 @@ def test_skip_requires_paused_navigation_to_settle():
 
     MissionManager._skip_current(harness, None, response)
     assert not response.success
-    assert harness.core.skipped_targets == 0
+    assert harness.core.skipped_points == 0
 
     harness._nav_handle = None
     harness._nav_pending = False
     MissionManager._skip_current(harness, None, response)
     assert response.success
-    assert harness.core.skipped_targets == 1
+    assert harness.core.skipped_points == 1
     assert harness.core.state == MissionState.MISSION_COMPLETED
 
 

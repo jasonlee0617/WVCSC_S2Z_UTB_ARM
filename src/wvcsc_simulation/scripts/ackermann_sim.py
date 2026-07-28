@@ -171,7 +171,7 @@ class AckermannSim(Node):
         self._mission_id = mission_id
         self._route_home = self._xy_from_pose(message.home_pose)
         self._route_goals = tuple(
-            self._xy_from_pose(target.docking_pose) for target in message.targets)
+            self._xy_from_pose(point.docking_pose) for point in message.points)
 
     def _on_controller_path(self, message):
         """Cache Nav2's active detour path for comparison with the cyan route."""

@@ -21,7 +21,9 @@ PerceptionPipeline
 视觉伺服 -> 喷洒 -> HOME
 ```
 
-树检测、树视觉话题和树 ROI 已移除。`tree_id`、`tree_hint` 与 Gazebo 树模型仍是任务定位和观察位计算的领域数据，不属于视觉检测器。
+树检测、树视觉话题和树 ROI 已移除。路线和机械臂接口不再传递 `tree_id`；
+`tree_hint` 仅保留为 `ExecuteSpray` 的植物几何提示，用于观察位和工作距离计算，
+不属于视觉检测器输入或输出。
 
 ## 模块边界与坐标契约
 
@@ -39,16 +41,23 @@ PerceptionPipeline
 
 ## 默认配置与接入
 
-实机默认使用 `yolov8s_seg_real.pt`，最多发布置信度最高的两个目标；仿真默认使用 `yolov8s_seg_sim.pt`，不限制目标数量。二者默认均为：
+实机默认使用 `yolov8s_seg_real.pt`，最多发布置信度最高的两个目标；仿真默认使用
+`yolov8s_seg_sim.pt`，不限制目标数量。二者均保持 `segment` 默认后端和固定 ROS
+输出类别 `diseased_target`，但权重内的原始类别名必须显式配置：
 
 ```yaml
 disease_model_backend: segment
 target_class_id: 0
-target_class_name: diseased_target
+target_class_name: diseased_target       # ROS 输出契约，固定不要拿来匹配权重 names
+model_target_class_name: disease_leaf    # 实机默认；仿真默认是 diseased_fruit
 strict_model_classes: true
 ```
 
-接入新的分割模型时，设置 `disease_model_backend: segment` 和权重路径；接入检测模型时，设置 `disease_model_backend: detect`。多类别 detect 权重应设置目标类别 ID 和 `strict_model_classes: false`；模型任务仍必须与后端一致。
+接入新的分割模型时，我设置 `disease_model_backend: segment`、权重路径和权重内原始
+类别名；接入检测模型时，我设置 `disease_model_backend: detect`。多类别 detect
+权重应设置目标类别 ID、`model_target_class_name` 和 `strict_model_classes: false`；
+模型任务仍必须与后端一致。`target_class_name` 始终保留 `diseased_target`，这样
+后续视觉伺服和喷洒链不会因实验模型原始类别名不同而变化。
 
 ```yaml
 # 多类别 detect 实验模型示例
@@ -56,6 +65,7 @@ disease_model_backend: detect
 disease_model_path: /absolute/path/disease_detect.pt
 target_class_id: 2
 target_class_name: diseased_target
+model_target_class_name: disease_leaf
 strict_model_classes: false
 disease_confidence: 0.25
 ```
@@ -76,8 +86,14 @@ source install/setup.bash
 
 ```bash
 ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
-  yolo_python_executable:="$HOME/venvs/wvcsc_yolo_ros/bin/python"
+  yolo_python_executable:="$HOME/venvs/wvcsc_yolo_ros/bin/python" \
+  vision_config_file:=/absolute/path/disease_detect.yaml
 ```
+
+实机完整路线可向 `real_system_mission.launch.py` 传同名 `vision_config_file`；仿真
+向 `system_sim.launch.py` 传同名参数。默认不传时仍加载各自的 segment YAML。当前
+工作区没有可验收的真实 detect 权重，因此上述 detect 路径仅完成接口和启动接入，
+不代表其检测精度已经经过 C10 或 Gazebo 验证。
 
 验收时确认：segment 安全点与 detect 框中心语义正确、实机仅有两个最高置信度目标、仿真可保留多个目标、无目标时返回 `INSPECTED_NO_DISEASE` 并继续任务、相机无帧或模型故障才返回 `VISION_FAILED`。
 

@@ -1,11 +1,12 @@
 import numpy as np
 import pytest
+from uuid import UUID
 from std_msgs.msg import Header
 from types import SimpleNamespace
 from wvcsc_interfaces.msg import MissionStatus
 
 from wvcsc_rgb_vision.model_utils import (
-    DISEASED_TARGET_CLASS_NAMES,
+    CANONICAL_DISEASE_TARGET_CLASS_NAME,
     validate_yolo_model,
 )
 from wvcsc_rgb_vision.disease_segmenter import DiseaseSegmenter, safest_mask_point
@@ -35,19 +36,19 @@ def test_disease_backend_factory_selects_only_explicit_backends(monkeypatch):
     monkeypatch.setattr(
         disease_backend_factory, 'DiseaseSegmenter', fake_backend)
     assert disease_backend_factory.create_disease_backend(
-        'segment', 'weights.pt', 2, 'diseased_target',
+        'segment', 'weights.pt', 2, 'disease_leaf',
         strict_model_classes=True) == 'backend'
     assert created == [(
-        ('weights.pt', 2, 'diseased_target'),
+        ('weights.pt', 2, 'disease_leaf'),
         {'strict_model_classes': True},
     )]
     with pytest.raises(ValueError, match='segment.*detect'):
         disease_backend_factory.create_disease_backend(
-            'unknown', 'weights.pt', 2, 'diseased_target')
+            'unknown', 'weights.pt', 2, 'disease_leaf')
 
 
 def test_disease_model_uses_the_shared_target_contract():
-    assert DISEASED_TARGET_CLASS_NAMES == {0: 'diseased_target'}
+    assert CANONICAL_DISEASE_TARGET_CLASS_NAME == 'diseased_target'
 
 
 def test_deployment_weight_must_match_task_and_classes():
@@ -55,10 +56,10 @@ def test_deployment_weight_must_match_task_and_classes():
         'task': 'segment',
         'names': {0: 'diseased_fruit'},
     })()
-    validate_yolo_model(model, 'segment', DISEASED_TARGET_CLASS_NAMES)
+    validate_yolo_model(model, 'segment', {0: 'diseased_fruit'})
     model.names[0] = 'wrong_class'
     with pytest.raises(ValueError, match='contract mismatch'):
-        validate_yolo_model(model, 'segment', DISEASED_TARGET_CLASS_NAMES)
+        validate_yolo_model(model, 'segment', {0: 'diseased_fruit'})
 
 
 def test_real_deployment_rejects_additional_model_classes():
@@ -67,10 +68,10 @@ def test_real_deployment_rejects_additional_model_classes():
         'names': {0: 'disease_leaf', 1: 'healthy_leaf'},
     })()
 
-    validate_yolo_model(model, 'segment', DISEASED_TARGET_CLASS_NAMES)
+    validate_yolo_model(model, 'segment', {0: 'disease_leaf'})
     with pytest.raises(ValueError, match='contract mismatch'):
         validate_yolo_model(
-            model, 'segment', DISEASED_TARGET_CLASS_NAMES, exact_names=True)
+            model, 'segment', {0: 'disease_leaf'}, exact_names=True)
 
     canonical_checkpoint = type('Model', (), {
         'task': 'segment',
@@ -78,7 +79,7 @@ def test_real_deployment_rejects_additional_model_classes():
     })()
     with pytest.raises(ValueError, match='contract mismatch'):
         validate_yolo_model(
-            canonical_checkpoint, 'segment', DISEASED_TARGET_CLASS_NAMES,
+            canonical_checkpoint, 'segment', {0: 'disease_leaf'},
             exact_names=True)
 
 
@@ -88,9 +89,9 @@ def test_detect_experiment_accepts_a_configured_disease_class_in_a_multiclass_mo
         'names': {0: 'healthy_leaf', 2: 'disease_leaf'},
     })()
 
-    validate_yolo_model(model, 'detect', {2: 'diseased_target'})
+    validate_yolo_model(model, 'detect', {2: 'disease_leaf'})
     with pytest.raises(ValueError, match='contract mismatch'):
-        validate_yolo_model(model, 'detect', {1: 'diseased_target'})
+        validate_yolo_model(model, 'detect', {1: 'disease_leaf'})
 
 
 def test_detection_message_exposes_only_shared_target_class():
@@ -112,7 +113,7 @@ def test_mission_status_activates_and_clears_task_vision_identity():
     node = object.__new__(PerceptionPipeline)
     node._standalone_mode = False
     node._mission_id = ''
-    node._tree_id = ''
+    node._point_id = ''
     node._selected_target_id = 'stale-target'
     node._selected_target_reference = object()
     node._selected_target_template = object()
@@ -123,17 +124,20 @@ def test_mission_status_activates_and_clears_task_vision_identity():
 
     PerceptionPipeline._on_status(node, SimpleNamespace(
         state=MissionStatus.ARM_SPRAYING,
-        mission_id='corn_field_five_point_001', current_tree_id='corn_01'))
-    assert (node._mission_id, node._tree_id) == (
-        'corn_field_five_point_001', 'corn_01')
+        mission_id='corn_field_five_point_001', current_point_id='point_02'))
+    assert (node._mission_id, node._point_id) == (
+        'corn_field_five_point_001', 'point_02')
     assert reset_calls == [True]
+    assert node._selected_target_id == ''
+    assert node._selected_target_reference is None
+    assert node._selected_target_template is None
     assert logger.messages == [
-        '[YOLO][MISSION] active=True mission=corn_field_five_point_001 tree=corn_01']
+        '[YOLO][MISSION] active=True mission=corn_field_five_point_001 point=point_02']
 
     PerceptionPipeline._on_status(node, SimpleNamespace(
         state=MissionStatus.NAVIGATING,
-        mission_id='corn_field_five_point_001', current_tree_id=''))
-    assert (node._mission_id, node._tree_id) == ('', '')
+        mission_id='corn_field_five_point_001', current_point_id=''))
+    assert (node._mission_id, node._point_id) == ('', '')
     assert node._selected_target_id == ''
     assert node._selected_target_reference is None
     assert node._selected_target_template is None
@@ -142,7 +146,6 @@ def test_mission_status_activates_and_clears_task_vision_identity():
 def test_fruit_tracks_survive_a_short_detector_dropout():
     node = object.__new__(PerceptionPipeline)
     node._tracks = []
-    node._next_target_number = 1
     node.get_parameter = lambda name: type('Parameter', (), {'value': {
         'track_iou_threshold': 0.30,
         'track_center_distance_px': 40.0,
@@ -150,6 +153,7 @@ def test_fruit_tracks_survive_a_short_detector_dropout():
     }[name]})()
     fruit = Instance('', 'diseased_fruit', 0.9, 10.0, 10.0, 30.0, 30.0, 20.0, 20.0)
     first = node._assign_track_ids([fruit])[0]
+    assert str(UUID(first.target_id)) == first.target_id
     node._assign_track_ids([])
     again = node._assign_track_ids([fruit])[0]
     assert first.target_id == again.target_id
@@ -260,7 +264,6 @@ def test_template_only_bridges_a_frame_with_no_yolo_candidates():
     node._selected_target_id = 'fruit-1'
     node._selected_target_reference = reference
     node._selected_target_template = template
-    node._target_class_name = 'diseased_fruit'
     node.get_parameter = lambda name: SimpleNamespace(value={
         'track_iou_threshold': 0.20,
         'target_reassociation_distance_px': 50.0,
@@ -296,7 +299,6 @@ def test_template_does_not_bypass_an_ambiguous_yolo_frame():
     node._selected_target_reference = reference
     node._selected_target_template = capture_target_template(
         initial, reference, padding_ratio=0.0, min_padding_px=0.0)
-    node._target_class_name = 'diseased_fruit'
     node.get_parameter = lambda name: SimpleNamespace(value={
         'track_iou_threshold': 0.20,
         'target_reassociation_distance_px': 50.0,
@@ -399,7 +401,6 @@ def test_candidate_id_churn_keeps_the_published_logical_target_id():
         'fruit-1', 'diseased_fruit', 0.9, 10, 10, 30, 30, 20, 20)
     node = _target_selection_node('fruit-1', reference)
     node._mission_id = 'mission-1'
-    node._tree_id = 'tree-1'
     node._target_pub = Publisher()
     node._log_target_state = lambda *_args: None
     image = SimpleNamespace(
@@ -591,7 +592,7 @@ def test_disease_segmenter_keeps_full_image_safe_mask_point():
     segmenter = object.__new__(DiseaseSegmenter)
     segmenter._model = Model()
     segmenter._target_class_id = 0
-    segmenter._target_class_name = 'diseased_target'
+    segmenter._model_target_class_name = 'disease_leaf'
 
     result = segmenter.detect(np.zeros((100, 100, 3), dtype=np.uint8), 0.10)
 
@@ -622,7 +623,7 @@ def test_disease_detector_returns_only_full_image_configured_boxes():
     detector = object.__new__(DiseaseDetector)
     detector._model = Model()
     detector._target_class_id = 1
-    detector._target_class_name = 'diseased_target'
+    detector._model_target_class_name = 'disease_leaf'
 
     result = detector.detect(np.zeros((100, 100, 3), dtype=np.uint8), 0.25)
 
@@ -669,7 +670,6 @@ def test_detect_box_center_is_published_unchanged_in_target2d():
         15.0, 27.0, 35.0, 47.0, 25.0, 37.0)
     node = _target_selection_node('target-1', detected)
     node._mission_id = 'mission-1'
-    node._tree_id = 'tree-1'
     node._target_pub = Publisher()
     node._log_target_state = lambda *_args: None
 
@@ -770,7 +770,7 @@ def test_disease_visualization_follows_the_inference_mode():
 
     fruit = Instance('target-1', 'diseased_target', 0.8, 10, 12, 20, 24, 15, 18)
     node = object.__new__(PerceptionPipeline)
-    node._tree_id = 'tree_01'
+    node._mission_id = 'mission-1'
     node._bridge = SimpleNamespace(
         imgmsg_to_cv2=lambda *_args, **_kwargs: np.zeros(
             (64, 64, 3), dtype=np.uint8))

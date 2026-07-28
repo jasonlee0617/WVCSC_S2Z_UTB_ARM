@@ -181,7 +181,6 @@ class SprayTask(
         self._joint_positions = None
         self._joint_state_sequence = 0
         self._active_mission = ''
-        self._active_tree = ''
         self._active_aim = None
         self._working_range_override = 0.0
 
@@ -284,7 +283,6 @@ class SprayTask(
             self._select_target('')
             self._set_inference_mode('idle')
             self._active_mission = ''
-            self._active_tree = ''
             self._release()
 
     # ---------- ROS 状态与发布工具 ----------
@@ -315,8 +313,8 @@ class SprayTask(
         goal_handle.publish_feedback(message)
 
     def _validate_goal(self, request):
-        if not str(request.mission_id).strip() or not str(request.tree_id).strip():
-            return 'mission_id and tree_id are required'
+        if not str(request.mission_id).strip():
+            return 'mission_id is required'
         if (not math.isfinite(float(request.spray_duration)) or
                 not self._min_duration <= request.spray_duration <= self._max_duration):
             return 'spray_duration out of range'

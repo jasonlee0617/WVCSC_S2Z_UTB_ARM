@@ -77,7 +77,7 @@ def generate_launch_description():
             'YOLO_CONFIG_DIR': '/tmp/wvcsc_ultralytics',
         },
         parameters=[
-            os.path.join(vision_share, 'config', 'vision_real.yaml'),
+            LaunchConfiguration('vision_config_file'),
             {'use_sim_time': False},
         ],
         output='screen')
@@ -147,6 +147,13 @@ def generate_launch_description():
             'yolo_python_executable',
             default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
+        DeclareLaunchArgument(
+            'vision_config_file',
+            default_value=os.path.join(
+                vision_share, 'config', 'vision_real.yaml'),
+            description=(
+                'Perception YAML. Override this to evaluate a detect backend '
+                'without changing the default segment configuration.')),
         DeclareLaunchArgument('use_keyboard', default_value='false'),
         DeclareLaunchArgument('map', default_value=latest_map_yaml()),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),

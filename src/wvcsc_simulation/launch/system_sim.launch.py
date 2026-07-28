@@ -185,7 +185,8 @@ def generate_launch_description():
     planning_pipeline_id = LaunchConfiguration('planning_pipeline_id')
     planner_id = LaunchConfiguration('planner_id')
     yolo_python_executable = LaunchConfiguration('yolo_python_executable')
-    return_home_after_finish = LaunchConfiguration('return_home_after_finish')
+    return_home_after_mission = LaunchConfiguration('return_home_after_mission')
+    vision_config_file = LaunchConfiguration('vision_config_file')
 
     # 获取各个功能包的共享目录路径
     description_share = get_package_share_directory('wvcsc_description')
@@ -613,8 +614,8 @@ def generate_launch_description():
         parameters=[
             os.path.join(mission_share, 'config', 'mission_manager.yaml'),
             {
-                'return_home_after_finish': ParameterValue(
-                    return_home_after_finish, value_type=bool),
+                'return_home_after_mission': ParameterValue(
+                    return_home_after_mission, value_type=bool),
                 # Alicia 在车顶以 pi yaw 安装；手动树点必须按该真实安装姿态
                 # 解释，才能和 Qt/RViz 记录的 map 坐标一致。
                 'arm_base_yaw_rad': 3.141592653589793,
@@ -652,7 +653,7 @@ def generate_launch_description():
             'YOLO_CONFIG_DIR': '/tmp/wvcsc_ultralytics',
         },
         parameters=[
-            os.path.join(vision_share, 'config', 'vision_sim.yaml'),
+            vision_config_file,
             {'use_sim_time': True},
         ],
         on_exit=[Shutdown(reason='YOLO perception node exited')],
@@ -717,7 +718,14 @@ def generate_launch_description():
             'yolo_python_executable',
             default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
-        DeclareLaunchArgument('return_home_after_finish', default_value='false'),
+        DeclareLaunchArgument(
+            'vision_config_file',
+            default_value=os.path.join(
+                vision_share, 'config', 'vision_sim.yaml'),
+            description=(
+                'Perception YAML. Override this to evaluate a detect backend '
+                'without changing the default segment configuration.')),
+        DeclareLaunchArgument('return_home_after_mission', default_value='false'),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),
         SetEnvironmentVariable('GAZEBO_PLUGIN_PATH', gazebo_plugin_path),

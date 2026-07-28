@@ -109,6 +109,7 @@ def test_simulation_records_the_actual_vehicle_path_for_rviz():
     assert "'executed_path_topic', '/vehicle/executed_path'" in source
     assert 'MissionStatus, \'/mission/status\'' in source
     assert "MissionPlan, '/mission/plan'" in source
+    assert 'for point in message.points' in source
     assert "'/vehicle/route_cross_track_error'" in source
     assert "'/vehicle/controller_path_error'" in source
     assert 'def _append_executed_path' in source

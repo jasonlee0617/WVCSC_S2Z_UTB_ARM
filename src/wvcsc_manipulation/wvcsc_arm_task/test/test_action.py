@@ -32,7 +32,6 @@ def _spin_until(executor, predicate, timeout=3.0):
 def _goal(duration):
     goal = Spray.Goal()
     goal.mission_id = 'test_mission'
-    goal.tree_id = 'tree_01'
     goal.duration = duration
     goal.mode = 'continuous'
     return goal

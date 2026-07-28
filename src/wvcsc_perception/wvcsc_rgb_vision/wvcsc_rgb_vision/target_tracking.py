@@ -123,11 +123,12 @@ def track_matches(instances, tracks, iou_threshold, center_distance_px):
 def reassociation_candidate(
         reference, instances, iou_threshold, center_distance_px,
         iou_margin, distance_margin_px, equivalent_aim_distance_px,
-        target_class_name='diseased_target', allow_ambiguous_nearest=False):
+        canonical_target_class_name='diseased_target',
+        allow_ambiguous_nearest=False):
     """Resolve a selected logical target after detector track-ID churn."""
     scored = []
     for instance in instances:
-        if instance.class_name != target_class_name:
+        if instance.class_name != canonical_target_class_name:
             continue
         iou = instance.iou(reference)
         distance = instance.distance_to(reference)
@@ -135,7 +136,9 @@ def reassociation_candidate(
             scored.append((instance, iou, distance))
     overlap = sorted(
         (item for item in scored if item[1] >= iou_threshold),
-        key=lambda item: (-item[1], item[2], item[0].target_id),
+        key=lambda item: (
+            -item[1], item[2], item[0].left, item[0].top,
+            item[0].right, item[0].bottom),
     )
     if overlap:
         if (len(overlap) > 1 and
@@ -149,7 +152,12 @@ def reassociation_candidate(
                 return overlap[0][0], 'nearest_reassociation'
             return None, 'ambiguous_reassociation'
         return overlap[0][0], 'none'
-    nearby = sorted(scored, key=lambda item: (item[2], item[0].target_id))
+    nearby = sorted(
+        scored,
+        key=lambda item: (
+            item[2], item[0].left, item[0].top,
+            item[0].right, item[0].bottom),
+    )
     if not nearby:
         return None, 'selected_id_missing'
     if (len(nearby) > 1 and

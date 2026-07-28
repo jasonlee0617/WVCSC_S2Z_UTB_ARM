@@ -29,7 +29,6 @@ class MissionState(IntEnum):
     NAVIGATING = 3          # 小车正在 Nav2 导航中
     VERIFYING_STOP = 4      # 小车到达目标点，正在检测是否停稳
     ARM_SPRAYING = 5        # 机械臂正在执行喷洒动作
-    TARGET_COMPLETED = 6    # 单棵树处理完毕 (内部中转态)
     PAUSED = 7              # 任务暂停
     MISSION_COMPLETED = 8   # 全部任务成功完成
     CANCELED = 9            # 任务被取消
@@ -39,10 +38,9 @@ class MissionState(IntEnum):
 
 
 class PointType(IntEnum):
-    """Route point kind.  INSPECT is zero for legacy ManualMissionTarget."""
+    """Route point kind. INSPECT remains zero for default-initialized points."""
     INSPECT = 0
     TRANSIT = 1
-    FINISH = 2
 
 
 class WorkSide(IntEnum):
@@ -53,9 +51,9 @@ class WorkSide(IntEnum):
 
 
 @dataclass(frozen=True)
-class Target:
-    """Qt/RViz 人工任务的固定数据；树根坐标仅由基座相对偏移派生。"""
-    tree_id: str
+class RoutePoint:
+    """Qt/RViz 人工任务的固定路线点；树根坐标仅由基座相对偏移派生。"""
+    point_id: str
     x: float
     y: float
     z: float
@@ -102,38 +100,38 @@ class MissionCore:
     def __init__(self):
         self.state = MissionState.WAITING_FOR_TASKS
         self.mission_id = ''
-        self.targets = ()
+        self.points = ()
         self.current_index = 0
-        self.completed_targets = 0
-        self.partial_targets = 0
-        self.skipped_targets = 0
-        self.target_outcomes = []
-        self.target_messages = []
+        self.completed_points = 0
+        self.partial_points = 0
+        self.skipped_points = 0
+        self.point_outcomes = []
+        self.point_messages = []
         self.last_error = ''
 
     @property
-    def current_target(self):
-        """返回当前正在处理的目标树。"""
-        if 0 <= self.current_index < len(self.targets):
-            return self.targets[self.current_index]
+    def current_point(self):
+        """返回当前正在处理的路线点。"""
+        if 0 <= self.current_index < len(self.points):
+            return self.points[self.current_index]
         return None
 
-    def load(self, mission_id, targets):
+    def load(self, mission_id, points):
         """加载任务列表，仅当状态为 WAITING_FOR_TASKS 时才接受。"""
         if mission_id and mission_id == self.mission_id:
             return 'duplicate'
         if self.state != MissionState.WAITING_FOR_TASKS:
             return 'busy'
-        if not mission_id or not targets:
-            raise ValueError('mission_id and targets are required')
+        if not mission_id or not points:
+            raise ValueError('mission_id and points are required')
         self.mission_id = mission_id
-        self.targets = tuple(targets)
+        self.points = tuple(points)
         self.current_index = 0
-        self.completed_targets = 0
-        self.partial_targets = 0
-        self.skipped_targets = 0
-        self.target_outcomes = [self.PENDING] * len(self.targets)
-        self.target_messages = [''] * len(self.targets)
+        self.completed_points = 0
+        self.partial_points = 0
+        self.skipped_points = 0
+        self.point_outcomes = [self.PENDING] * len(self.points)
+        self.point_messages = [''] * len(self.points)
         self.last_error = ''
         self.state = MissionState.READY
         return 'accepted'
@@ -147,46 +145,46 @@ class MissionCore:
     def stop_verified(self):
         if self.state != MissionState.VERIFYING_STOP:
             return False
-        target = self.current_target
-        if target is None:
+        point = self.current_point
+        if point is None:
             return False
         self.state = (
-            MissionState.ARM_SPRAYING if target.requires_arm
+            MissionState.ARM_SPRAYING if point.requires_arm
             else MissionState.DWELLING)
         return True
 
     @property
-    def processed_targets(self):
-        return sum(outcome != self.PENDING for outcome in self.target_outcomes)
+    def processed_points(self):
+        return sum(outcome != self.PENDING for outcome in self.point_outcomes)
 
     @property
-    def all_targets_completed(self):
-        return bool(self.targets) and all(
-            outcome == self.COMPLETED for outcome in self.target_outcomes)
+    def all_points_completed(self):
+        return bool(self.points) and all(
+            outcome == self.COMPLETED for outcome in self.point_outcomes)
 
     @property
-    def all_targets_processed(self):
-        return bool(self.targets) and all(
-            outcome != self.PENDING for outcome in self.target_outcomes)
+    def all_points_processed(self):
+        return bool(self.points) and all(
+            outcome != self.PENDING for outcome in self.point_outcomes)
 
     def _finish_after_current(self, return_home):
         """处理完当前任务后，决定是否进入下一棵树、返回 Home 或完成任务。"""
-        if self.current_index < len(self.targets):
+        if self.current_index < len(self.points):
             self.state = MissionState.NAVIGATING
         elif return_home:
             self.state = MissionState.RETURNING_HOME
-        elif self.all_targets_processed:
+        elif self.all_points_processed:
             self.state = MissionState.MISSION_COMPLETED
         else:
             self.state = MissionState.FAILED
 
     def point_succeeded(self, return_home=False, message=''):
-        """Finish a transit or finish point after its optional dwell."""
+        """Finish a transit point after its optional dwell."""
         if self.state != MissionState.DWELLING:
             return False
-        self.target_outcomes[self.current_index] = self.COMPLETED
-        self.target_messages[self.current_index] = str(message)
-        self.completed_targets += 1
+        self.point_outcomes[self.current_index] = self.COMPLETED
+        self.point_messages[self.current_index] = str(message)
+        self.completed_points += 1
         self.current_index += 1
         self._finish_after_current(return_home)
         return True
@@ -195,9 +193,9 @@ class MissionCore:
         """机械臂喷洒成功。"""
         if self.state != MissionState.ARM_SPRAYING:
             return False
-        self.target_outcomes[self.current_index] = self.COMPLETED
-        self.target_messages[self.current_index] = str(message)
-        self.completed_targets += 1
+        self.point_outcomes[self.current_index] = self.COMPLETED
+        self.point_messages[self.current_index] = str(message)
+        self.completed_points += 1
         self.current_index += 1
         self._finish_after_current(return_home)
         return True
@@ -206,16 +204,16 @@ class MissionCore:
         """记录树级部分成功；路线继续，最终状态仍可正常结束。"""
         if self.state != MissionState.ARM_SPRAYING:
             return False
-        self.target_outcomes[self.current_index] = self.PARTIAL
-        self.target_messages[self.current_index] = str(message)
-        self.partial_targets += 1
+        self.point_outcomes[self.current_index] = self.PARTIAL
+        self.point_messages[self.current_index] = str(message)
+        self.partial_points += 1
         self.last_error = (
-            f'incomplete tree={self.targets[self.current_index].tree_id}: {message}')
+            f'incomplete point={self.points[self.current_index].point_id}: {message}')
         self.current_index += 1
         self._finish_after_current(return_home)
         return True
 
-    def skip_current(self, return_home=False, message='tree skipped'):
+    def skip_current(self, return_home=False, message='point skipped'):
         """跳过当前任务。"""
         if self.state not in {
                 MissionState.READY,
@@ -226,13 +224,13 @@ class MissionCore:
                 MissionState.DWELLING}:
             return False
         previous_state = self.state
-        self.target_outcomes[self.current_index] = self.SKIPPED
-        self.target_messages[self.current_index] = str(message)
+        self.point_outcomes[self.current_index] = self.SKIPPED
+        self.point_messages[self.current_index] = str(message)
         self.last_error = (
-            f'incomplete tree={self.targets[self.current_index].tree_id}: {message}')
+            f'incomplete point={self.points[self.current_index].point_id}: {message}')
         self.current_index += 1
-        self.skipped_targets += 1
-        if self.current_index >= len(self.targets):
+        self.skipped_points += 1
+        if self.current_index >= len(self.points):
             self._finish_after_current(return_home)
         elif previous_state in {
                 MissionState.VERIFYING_STOP,
@@ -296,10 +294,10 @@ class MissionCore:
         previous_state = self.state
         self.last_error = str(message)
         if (previous_state != MissionState.RETURNING_HOME and
-                self.current_index < len(self.target_outcomes) and
-                self.target_outcomes[self.current_index] == self.PENDING):
-            self.target_outcomes[self.current_index] = self.FAILED
-            self.target_messages[self.current_index] = self.last_error
+                self.current_index < len(self.point_outcomes) and
+                self.point_outcomes[self.current_index] == self.PENDING):
+            self.point_outcomes[self.current_index] = self.FAILED
+            self.point_messages[self.current_index] = self.last_error
         self.state = MissionState.FAILED
         return True
 

@@ -85,6 +85,7 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "'real_arm.launch.py', {" in source
     assert "'use_rviz': LaunchConfiguration('use_moveit_rviz')" in source
     assert "_include(launch_dir, 'real_orchestration.launch.py'" in source
+    assert "'vision_config_file': LaunchConfiguration('vision_config_file')" in source
     assert "'nozzle_calibration'" in source
     assert "'--require-nozzle-calibration', 'true'" in source
     assert "'nozzle_mount_xyz'" in source
@@ -131,9 +132,10 @@ def test_real_orchestration_uses_the_qt_mission_manager_only():
     assert 'yolov8s_seg_real.pt' in vision
     assert vision_parameters['disease_model_backend'] == 'segment'
     assert 'target_class_name: diseased_target' in vision
-    assert 'target_id_prefix: target' in vision
+    assert vision_parameters['model_target_class_name'] == 'disease_leaf'
     assert 'strict_model_classes: true' in vision
     assert vision_parameters['max_diseased_targets'] == 2
+    assert "LaunchConfiguration('vision_config_file')" in source
     assert "get_package_share_directory('controller_pkg')" in source
     assert 'spray_actuator_real.yaml' in source
     assert "'relay_config_file'" in source
@@ -205,6 +207,7 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     assert 'nozzle_xyz = (0.0, 0.0, 0.0)' in source
     assert 'c10_camera.launch.py' in source
     assert 'vision_real.yaml' in source
+    assert "LaunchConfiguration('vision_config_file')" in source
     assert "executable='spray_task'" in source
     assert "executable='spray_actuator'" in source
     assert 'spray_actuator_real.yaml' in source

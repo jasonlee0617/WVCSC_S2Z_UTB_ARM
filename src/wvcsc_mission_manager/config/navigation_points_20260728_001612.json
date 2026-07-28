@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "pose_reference": "alicia_base_link_xy_vehicle_yaw",
   "start_pose": {
     "position": {
@@ -15,7 +15,7 @@
     }
   },
   "spray_duration": 3.0,
-  "return_home_after_finish": false,
+  "return_home_after_mission": false,
   "route_points": [
     {
       "pose": {
@@ -151,7 +151,7 @@
           "w": 0.999846878919736
         }
       },
-      "point_type": "FINISH",
+      "point_type": "TRANSIT",
       "tree_x_m": 0.0,
       "tree_y_m": 0.0,
       "tree_base_z_m": 0.0,

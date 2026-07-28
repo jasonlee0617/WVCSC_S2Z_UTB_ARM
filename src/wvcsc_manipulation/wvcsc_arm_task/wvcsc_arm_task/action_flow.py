@@ -23,7 +23,7 @@ class DownstreamActionMixin:
     """
 
     def _align_target(
-            self, mission_id, tree_id, target_id, nozzle_aim,
+            self, mission_id, target_id, nozzle_aim,
             cancel_requested, feedback_callback=None):
         """
         调用下游的视觉伺服 Action (`AlignTarget`) 进行 IBVS 对准。
@@ -32,7 +32,6 @@ class DownstreamActionMixin:
 
         Args:
             mission_id (str): 当前任务的任务 ID。
-            tree_id (str): 当前正在处理的病树 ID。
             target_id (str): 视觉伺服节点锁定的病果逻辑目标 ID。
             cancel_requested (callable): 一个返回 bool 的 lambda/函数，用于检查上层任务是否已请求取消。
 
@@ -45,7 +44,6 @@ class DownstreamActionMixin:
         """
         goal = AlignTarget.Goal()
         goal.mission_id = mission_id
-        goal.tree_id = tree_id
         goal.target_id = target_id
         goal.timeout = self._vision_timeout  # 从节点参数获取的视觉伺服超时时间
         desired_u, desired_v, image_width, image_height, working_range = nozzle_aim
@@ -89,13 +87,12 @@ class DownstreamActionMixin:
             result.message or f'vision status={wrapped.status}'
         )
 
-    def _spray_target(self, mission_id, tree_id, duration, cancel_requested):
+    def _spray_target(self, mission_id, duration, cancel_requested):
         """
         调用下游的喷洒 Action (`Spray`) 执行喷洒操作。
 
         Args:
             mission_id (str): 当前任务 ID。
-            tree_id (str): 当前喷洒目标树 ID。
             duration (float): 设定的喷洒持续时间（秒）。
             cancel_requested (callable): 上层取消请求检查函数。
 
@@ -107,7 +104,6 @@ class DownstreamActionMixin:
         """
         goal = Spray.Goal()
         goal.mission_id = mission_id
-        goal.tree_id = tree_id
         goal.duration = duration
         goal.mode = 'continuous'
 

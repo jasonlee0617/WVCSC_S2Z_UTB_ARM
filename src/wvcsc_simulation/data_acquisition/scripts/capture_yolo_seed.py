@@ -26,8 +26,8 @@ class SeedCapture(Node):
         super().__init__('wvcsc_yolo_seed_capture')
         self.args = args
         self.bridge = CvBridge()
-        self.current_tree = ''
-        self.tree_offsets = {}
+        self.current_point = ''
+        self.point_offsets = {}
         self.pending = ''
         self.captured = set()
         self.failure = ''
@@ -49,23 +49,23 @@ class SeedCapture(Node):
             '/arm/execute_spray/_action/feedback', self._feedback, 10)
 
     def _status(self, message):
-        self.current_tree = message.current_tree_id
+        self.current_point = message.current_point_id
         if message.state == MissionStatus.FAILED:
             self.failure = message.last_error or message.state_text
             self.done.set()
 
     def _plan(self, message):
-        self.tree_offsets.update({
-            target.target_id: {
-                'x_m': target.tree_x_m,
-                'y_m': target.tree_y_m,
+        self.point_offsets.update({
+            point.point_id: {
+                'x_m': point.tree_x_m,
+                'y_m': point.tree_y_m,
             }
-            for target in message.targets})
+            for point in message.points})
 
     def _feedback(self, message):
         if (message.feedback.phase == ExecuteSpray.Feedback.DETECTING_TARGETS and
-                self.current_tree and self.current_tree not in self.captured):
-            self.pending = self.current_tree
+                self.current_point and self.current_point not in self.captured):
+            self.pending = self.current_point
 
     def _camera_pose(self):
         try:
@@ -82,14 +82,14 @@ class SeedCapture(Node):
         }
 
     def _image(self, message):
-        tree_id = self.pending
-        if not tree_id or tree_id in self.captured:
+        point_id = self.pending
+        if not point_id or point_id in self.captured:
             return
         image = self.bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
         stamp = message.header.stamp
         metadata = {
-            'tree_id': tree_id,
-            'tree_offset_arm_base_m': self.tree_offsets.get(tree_id),
+            'point_id': point_id,
+            'tree_offset_arm_base_m': self.point_offsets.get(point_id),
             'orchard_seed': self.args.orchard_seed,
             'diseased_fruit_ratio': self.args.diseased_fruit_ratio,
             'observation_distance': self.args.observation_distance,
@@ -97,7 +97,7 @@ class SeedCapture(Node):
             'ros_timestamp': {'sec': stamp.sec, 'nanosec': stamp.nanosec},
         }
         try:
-            sample_name = f'seed_{self.args.orchard_seed}_{tree_id}'
+            sample_name = f'seed_{self.args.orchard_seed}_{point_id}'
             if self.args.split == 'unlabeled':
                 record = write_unlabeled_sample(
                     self.args.output, image, sample_name, metadata)
@@ -106,9 +106,9 @@ class SeedCapture(Node):
                     self.args.output, image, sample_name, self.args.split,
                     metadata)
         except (OSError, ValueError) as error:
-            self.get_logger().error(f'rejected {tree_id} frame: {error}')
+            self.get_logger().error(f'rejected {point_id} frame: {error}')
             return
-        self.captured.add(tree_id)
+        self.captured.add(point_id)
         self.pending = ''
         status = 'unlabeled' if self.args.split == 'unlabeled' else 'pending annotation'
         self.get_logger().info(f'captured {record["image"]}: {status}')

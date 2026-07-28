@@ -94,9 +94,9 @@ class DirectCapture(Node):
         message.mission_id = f'c10_capture_{self.args.orchard_seed}'
         message.state = MissionStatus.ARM_SPRAYING
         message.state_text = 'direct C10 capture'
-        message.current_tree_id = self.target[0]
+        message.current_point_id = self.target[0]
         message.current_index = self.index
-        message.total_targets = len(TARGETS)
+        message.total_points = len(TARGETS)
         message.arm_goal_active = self.state in {
             'wait_goal', 'action', 'settle', 'wait_pose'}
         self.mission_status.publish(message)
@@ -149,10 +149,9 @@ class DirectCapture(Node):
         self.started_at = time.monotonic()
 
     def _send_goal(self):
-        tree_id, tree_x, tree_y, _dock_y, _base_x, _base_y = self.target
+        _point_id, tree_x, tree_y, _dock_y, _base_x, _base_y = self.target
         goal = ExecuteSpray.Goal()
         goal.mission_id = f'c10_capture_{self.args.orchard_seed}'
-        goal.tree_id = tree_id
         goal.spray_duration = 0.2
         goal.tree_hint = PointStamped()
         goal.tree_hint.header.frame_id = 'map'

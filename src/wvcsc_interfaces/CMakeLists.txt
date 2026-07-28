@@ -7,11 +7,11 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/MissionTargetPlan.msg"
-  "msg/MissionTargetStatus.msg"
+  "msg/MissionPointPlan.msg"
+  "msg/MissionPointStatus.msg"
   "msg/MissionPlan.msg"
   "msg/MissionStatus.msg"
-  "msg/ManualMissionTarget.msg"
+  "msg/ManualMissionPoint.msg"
   "msg/Target2D.msg"
   "srv/ComputeSprayAim.srv"
   "srv/LoadManualMission.srv"

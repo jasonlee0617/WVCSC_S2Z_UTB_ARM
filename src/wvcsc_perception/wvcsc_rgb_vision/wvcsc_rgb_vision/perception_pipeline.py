@@ -11,11 +11,13 @@ C10 感知流水线、病叶跟踪与视觉伺服目标发布节点。
 重要工程概念：
 - 使用 `safe aim point` 代替检测框中心：通过 `cv2.distanceTransform` 计算掩膜内部
   距离边界最远的核心点，将控制点从易变的边缘拉回稳定的果实内部，极大提升了伺服稳定性。
-- 任务层 ID 与感知层 ID 分离：感知层 ID 仅用于当前连续帧的短期跟踪；
-  任务层 ID 由 `spray_task` 管理，跨运动重置。
+- 病态目标 ID 由感知层以 UUIDv4 生成，并通过短期跟踪跨连续帧保持稳定；
+  `spray_task` 只选择该 ID，不另行改写。
 - 模板匹配 (`template tracking`) 兜底：在 YOLO 由于光照或抖动短暂漏检时，
   通过 OpenCV 模板匹配延续目标的视觉追踪，防止 30 Hz 控制环因 2 帧丢失而剧烈震荡。
 """
+
+from uuid import uuid4
 
 from cv_bridge import CvBridge
 import rclpy
@@ -28,7 +30,7 @@ from wvcsc_interfaces.msg import MissionStatus, Target2D
 
 from .disease_backend_factory import create_disease_backend
 from .disease_target_backend import DiseaseTargetBackend
-from .model_utils import DISEASED_TARGET_CLASS_ALIASES
+from .model_utils import CANONICAL_DISEASE_TARGET_CLASS_NAME
 from .perception_output import (
     annotated_image,
     instances_to_array,
@@ -60,24 +62,26 @@ class PerceptionPipeline(Node):
             self.get_parameter('standalone_mode').value)
         self._target_class_name = str(
             self.get_parameter('target_class_name').value).strip()
+        self._model_target_class_name = str(
+            self.get_parameter('model_target_class_name').value).strip()
         self._target_class_id = int(
             self.get_parameter('target_class_id').value)
-        self._target_id_prefix = str(
-            self.get_parameter('target_id_prefix').value).strip()
         self._max_diseased_targets = int(
             self.get_parameter('max_diseased_targets').value)
-        if (not self._target_class_name or not self._target_id_prefix or
+        if (self._target_class_name != CANONICAL_DISEASE_TARGET_CLASS_NAME or
+                not self._model_target_class_name or
                 self._target_class_id < 0 or
                 self._max_diseased_targets < 0):
-            raise ValueError('YOLO class names/prefix must be non-empty and IDs non-negative')
+            raise ValueError(
+                'target_class_name must be diseased_target; model target class '
+                'name must be non-empty and IDs non-negative')
         self._bridge = CvBridge()
         self._mission_id = 'standalone' if self._standalone_mode else ''
-        self._tree_id = 'standalone' if self._standalone_mode else ''
+        self._point_id = 'standalone' if self._standalone_mode else ''
         self._selected_target_id = ''
         self._selected_target_reference = None
         self._selected_target_template = None
         self._inference_mode = str(self.get_parameter('inference_mode').value)
-        self._next_target_number = 1
         self._tracks = []
         self._last_target_state = None
         strict_model_classes = bool(
@@ -88,7 +92,7 @@ class PerceptionPipeline(Node):
             self._disease_model_backend,
             self.get_parameter('disease_model_path').value,
             self._target_class_id,
-            self._configured_target_name,
+            self._model_target_class_name,
             strict_model_classes=strict_model_classes)
         latched = QoSProfile(
             depth=1,
@@ -122,16 +126,10 @@ class PerceptionPipeline(Node):
             f'diseased_target_model={self.get_parameter("disease_model_path").value}')
 
     @property
-    def _configured_target_name(self):
-        """Return the canonical configured target class."""
-        configured = str(getattr(
-            self, '_target_class_name', 'diseased_target')).strip()
-        return DISEASED_TARGET_CLASS_ALIASES.get(configured, configured)
-
-    @property
-    def _configured_target_prefix(self):
-        """Return the configured logical target prefix."""
-        return getattr(self, '_target_id_prefix', 'target')
+    def _canonical_target_name(self):
+        """Return the fixed disease-target class exposed by this pipeline."""
+        return getattr(
+            self, '_target_class_name', CANONICAL_DISEASE_TARGET_CLASS_NAME)
 
     def _declare_parameters(self):
         """声明并加载配置参数，与 `vision_sim.yaml` 对应。"""
@@ -148,8 +146,8 @@ class PerceptionPipeline(Node):
             'disease_model_path': 'yolov8s_seg_sim.pt',
             'disease_model_backend': 'segment',
             'target_class_id': 0,
-            'target_class_name': 'diseased_target',
-            'target_id_prefix': 'target',
+            'target_class_name': CANONICAL_DISEASE_TARGET_CLASS_NAME,
+            'model_target_class_name': 'diseased_fruit',
             'strict_model_classes': False,
             'inference_mode_topic': '/vision/inference_mode',
             'disease_confidence': 0.10,
@@ -187,20 +185,20 @@ class PerceptionPipeline(Node):
             return
         active = message.state == MissionStatus.ARM_SPRAYING
         mission_id = message.mission_id if active else ''
-        tree_id = message.current_tree_id if active else ''
-        changed = (mission_id, tree_id) != (self._mission_id, self._tree_id)
+        point_id = message.current_point_id if active else ''
+        changed = (mission_id, point_id) != (self._mission_id, self._point_id)
         if changed:
             self._reset_tracking()
         self._mission_id = mission_id
-        self._tree_id = tree_id
-        if not active:
+        self._point_id = point_id
+        if changed or not active:
             self._selected_target_id = ''
             self._selected_target_reference = None
             self._selected_target_template = None
         if changed:
             self.get_logger().info(
                 f'[YOLO][MISSION] active={active} mission={mission_id or "-"} '
-                f'tree={tree_id or "-"}')
+                f'point={point_id or "-"}')
 
     def _on_selected_target(self, message):
         """接收来自 `spray_task` 的逻辑目标 ID 锁定指令。"""
@@ -228,7 +226,7 @@ class PerceptionPipeline(Node):
 
     def _on_image(self, message):
         """主推理循环：根据当前模式执行最小化的推理链条。"""
-        if ((not self._tree_id and not self._standalone_mode) or
+        if ((not self._mission_id and not self._standalone_mode) or
                 self._inference_mode == 'idle'):
             return
         try:
@@ -251,8 +249,8 @@ class PerceptionPipeline(Node):
             target, invalid_reason, event = self._publish_selected_target(
                 message, fruits, image)
         elif self._inference_mode == 'disease' and not any(
-            item.class_name == self._configured_target_name for item in fruits):
-            invalid_reason = f'no_{self._configured_target_name}'
+            item.class_name == self._canonical_target_name for item in fruits):
+            invalid_reason = f'no_{self._canonical_target_name}'
 
     def _fruit_instances(self, image):
         """Run the configured disease backend on the full camera image."""
@@ -284,8 +282,7 @@ class PerceptionPipeline(Node):
             if index in matches:
                 target_id = self._tracks[matches[index]].instance.target_id
             else:
-                target_id = f'{self._configured_target_prefix}-{self._next_target_number}'
-                self._next_target_number += 1
+                target_id = str(uuid4())
             assigned.append(Instance(target_id, instance.class_name, instance.confidence,
                                      instance.left, instance.top, instance.right,
                                      instance.bottom, instance.aim_u, instance.aim_v))
@@ -327,7 +324,7 @@ class PerceptionPipeline(Node):
         if reference is None:
             target = next((item for item in instances
                            if item.target_id == self._selected_target_id
-                           and item.class_name == self._configured_target_name), None)
+                           and item.class_name == self._canonical_target_name), None)
             if target is None:
                 return None, 'selected_id_missing', 'target_invalid'
             self._selected_target_reference = target
@@ -336,7 +333,7 @@ class PerceptionPipeline(Node):
             'target_reassociation_distance_px').value)
         exact = next((item for item in instances
                       if item.target_id == self._selected_target_id and
-                      item.class_name == self._configured_target_name and
+                      item.class_name == self._canonical_target_name and
                       (item.iou(reference) >= float(self.get_parameter(
                           'track_iou_threshold').value) or
                        item.distance_to(reference) <= reassociation_distance)),
@@ -355,7 +352,7 @@ class PerceptionPipeline(Node):
         if require_unique_candidate:
             same_class_instances = [
                 item for item in instances
-                if item.class_name == self._configured_target_name]
+                if item.class_name == self._canonical_target_name]
             if len(same_class_instances) > 1:
                 return None, 'selected_id_missing_multiple_candidates', 'target_invalid'
         try:
@@ -373,7 +370,7 @@ class PerceptionPipeline(Node):
                 'target_reassociation_distance_margin_px').value),
             float(self.get_parameter(
                 'target_equivalent_aim_distance_px').value),
-            self._configured_target_name,
+            self._canonical_target_name,
             allow_ambiguous_nearest,
         )
         if target is not None:
@@ -424,7 +421,7 @@ class PerceptionPipeline(Node):
         # 猜测目标。模板只处理整个病果检测短时为空的真正漏检场景。
         same_class_instances = [
             item for item in instances
-            if item.class_name == self._configured_target_name]
+            if item.class_name == self._canonical_target_name]
         if (
                 not tracking_enabled or
                 same_class_instances or
@@ -456,11 +453,10 @@ class PerceptionPipeline(Node):
         message = Target2D()
         message.header = image.header
         message.mission_id = self._mission_id
-        message.tree_id = self._tree_id
         message.target_id = self._selected_target_id
         message.image_width = image.width
         message.image_height = image.height
-        if target is not None and target.class_name == self._configured_target_name:
+        if target is not None and target.class_name == self._canonical_target_name:
             message.valid = True
             message.confidence = target.confidence
             message.center_u = target.aim_u
@@ -497,7 +493,7 @@ class PerceptionPipeline(Node):
             annotated_image(
                 image, fruits, draw_diseased_aim_point=True,
                 selected_target_id=self._selected_target_id,
-                target_class_name=self._configured_target_name))
+                canonical_target_class_name=self._canonical_target_name))
 
 
 def main():

@@ -1,14 +1,14 @@
-# 校准喷嘴瞄准点计算服务。SprayTask 在选定病果目标后，且在调用 AlignTarget 之前调用此服务。
-# 服务端返回一个固定正工作平面距离下的目标像素点；它不执行任何机械臂动作、
-# 视觉伺服指令或继电器操作，因此调用方保留执行控制权。
-# Request: 距离配置标定的工作平面距离（米）。
-float32 working_range_m                # 必须为有限值且严格为正；此处 0 为无效值。
+# 校准喷嘴瞄准点计算服务。SprayTask 选定病态 Target2D 后、调用 AlignTarget 前调用它；
+# wvcsc_visual_servo 根据相机标定、TF 和工作距离返回喷嘴轴线的期望像素点。
+# 本服务不移动机械臂、不发布视觉伺服指令，也不操作继电器，执行控制权始终由调用方保留。
+# Request: 用于当前相机/喷嘴几何计算的工作平面距离（米）。
+float32 working_range_m                # 必须是有限且严格为正的米值；0 在此服务中无效。
 ---
-# Response: 期望的全图像素喷嘴轴线像素点以及用于验证该点的图像尺寸。
-# success=false 时，调用方应据此判断不进入正常视觉伺服流程。
-bool success                           # 当标定/距离解析成功时为 True。
-float32 desired_u_px                   # 在返回的图像帧中的水平目标像素点。
-float32 desired_v_px                   # 在返回的图像帧中的垂直目标像素点。
-uint32 image_width                     # 用于约束 desired_u_px 的图像宽度。
-uint32 image_height                    # 用于约束 desired_v_px 的图像高度。
-string message                         # 人类可读的标定/校验细节。
+# Response: 当前完整相机图像中的喷嘴轴线像素点及其图像尺寸。
+# success=false 时，调用方不应进入正常视觉伺服分支，可按 SprayTask 回退策略处理。
+bool success                           # 相机标定、TF 和距离解析成功时为 True。
+float32 desired_u_px                   # 当前图像中的期望水平喷嘴轴线像素点。
+float32 desired_v_px                   # 当前图像中的期望垂直喷嘴轴线像素点。
+uint32 image_width                     # 用于验证 desired_u_px 的图像宽度（像素）。
+uint32 image_height                    # 用于验证 desired_v_px 的图像高度（像素）。
+string message                         # 供日志和 UI 显示的标定/校验诊断文本。

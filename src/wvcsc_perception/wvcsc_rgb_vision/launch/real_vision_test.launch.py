@@ -36,6 +36,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'standalone_mode', default_value='true',
             description='Process frames without /mission/status or a robot.'),
+        DeclareLaunchArgument(
+            'vision_config_file',
+            default_value=os.path.join(vision_share, 'config', 'vision_real.yaml'),
+            description='Perception YAML, including model backend and class contract.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
@@ -54,7 +58,7 @@ def generate_launch_description():
                 'YOLO_CONFIG_DIR': '/tmp/wvcsc_ultralytics',
             },
             parameters=[
-                os.path.join(vision_share, 'config', 'vision_real.yaml'),
+                LaunchConfiguration('vision_config_file'),
                 {
                     'use_sim_time': False,
                     'standalone_mode': ParameterValue(

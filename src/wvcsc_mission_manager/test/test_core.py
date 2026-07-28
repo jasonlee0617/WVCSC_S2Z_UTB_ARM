@@ -6,22 +6,22 @@ from wvcsc_mission_manager.core import (
     MissionCore,
     MissionState,
     PointType,
-    Target,
+    RoutePoint,
     tree_hint_from_arm_base_offset,
 )
 from wvcsc_mission_manager.stop_detector import StopDetector
 
 
-def _targets():
+def _points():
     return [
-        Target('tree_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0)),
-        Target('tree_2', 5.0, -2.0, 0.0, 0.9, (5.4, -0.2, 0.0)),
+        RoutePoint('point_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0)),
+        RoutePoint('point_2', 5.0, -2.0, 0.0, 0.9, (5.4, -0.2, 0.0)),
     ]
 
 
 def test_manual_task_keeps_the_operator_selected_vehicle_docking_pose():
-    assert _targets()[0].docking_pose == (3.4, 0.2, 0.0)
-    assert _targets()[1].docking_pose == (5.4, -0.2, 0.0)
+    assert _points()[0].docking_pose == (3.4, 0.2, 0.0)
+    assert _points()[1].docking_pose == (5.4, -0.2, 0.0)
 
 
 def test_tree_hint_uses_signed_arm_base_offset():
@@ -39,28 +39,28 @@ def test_tree_hint_round_trips_with_alicia_mount_yaw():
     assert hint == pytest.approx((2.6, -1.0, 0.0))
 
 
-def test_two_target_success_path():
+def test_two_point_success_path():
     core = MissionCore()
-    assert core.load('demo', _targets()) == 'accepted'
+    assert core.load('demo', _points()) == 'accepted'
     assert core.start()
     assert core.nav_succeeded() and core.stop_verified() and core.arm_succeeded()
     assert core.state == MissionState.NAVIGATING
     assert core.nav_succeeded() and core.stop_verified() and core.arm_succeeded()
     assert core.state == MissionState.MISSION_COMPLETED
-    assert core.completed_targets == 2
-    assert core.target_outcomes == [core.COMPLETED, core.COMPLETED]
+    assert core.completed_points == 2
+    assert core.point_outcomes == [core.COMPLETED, core.COMPLETED]
 
 
-def test_transit_and_finish_points_do_not_send_the_arm_to_spray():
+def test_transit_points_do_not_send_the_arm_to_spray():
     core = MissionCore()
     core.load('route', [
-        Target(
+        RoutePoint(
             'transit_01', 0.0, 0.0, 0.0, 1.0, (1.0, 0.0, 0.0),
             point_type=PointType.TRANSIT,
             wide_spray_on_approach=True),
-        Target(
-            'finish_01', 0.0, 0.0, 0.0, 1.0, (2.0, 0.0, 0.0),
-            point_type=PointType.FINISH),
+        RoutePoint(
+            'transit_02', 0.0, 0.0, 0.0, 1.0, (2.0, 0.0, 0.0),
+            point_type=PointType.TRANSIT),
     ])
     assert core.start()
     assert core.nav_succeeded() and core.stop_verified()
@@ -74,7 +74,7 @@ def test_transit_and_finish_points_do_not_send_the_arm_to_spray():
 
 def test_optional_return_home_finishes_only_after_home_navigation():
     core = MissionCore()
-    core.load('demo', [_targets()[0]])
+    core.load('demo', [_points()[0]])
     core.start()
     assert core.nav_succeeded() and core.stop_verified()
     assert core.arm_succeeded(return_home=True)
@@ -83,27 +83,27 @@ def test_optional_return_home_finishes_only_after_home_navigation():
     assert core.state == MissionState.MISSION_COMPLETED
 
 
-def test_partial_tree_continues_remaining_targets_and_completes_mission():
+def test_partial_point_continues_remaining_points_and_completes_mission():
     core = MissionCore()
-    core.load('demo', _targets())
+    core.load('demo', _points())
     core.start()
     assert core.nav_succeeded() and core.stop_verified()
     assert core.arm_partial('sprayed=1 unresolved=1')
     assert core.state == MissionState.NAVIGATING
-    assert core.partial_targets == 1
-    assert core.completed_targets == 0
-    assert core.target_outcomes == [core.PARTIAL, core.PENDING]
+    assert core.partial_points == 1
+    assert core.completed_points == 0
+    assert core.point_outcomes == [core.PARTIAL, core.PENDING]
 
     assert core.nav_succeeded() and core.stop_verified() and core.arm_succeeded()
     assert core.state == MissionState.MISSION_COMPLETED
-    assert core.completed_targets == 1
-    assert core.partial_targets == 1
-    assert core.target_outcomes == [core.PARTIAL, core.COMPLETED]
+    assert core.completed_points == 1
+    assert core.partial_points == 1
+    assert core.point_outcomes == [core.PARTIAL, core.COMPLETED]
 
 
-def test_partial_tree_return_home_completes_after_home_navigation():
+def test_partial_point_return_home_completes_after_home_navigation():
     core = MissionCore()
-    core.load('demo', [_targets()[0]])
+    core.load('demo', [_points()[0]])
     core.start()
     assert core.nav_succeeded() and core.stop_verified()
     assert core.arm_partial('sprayed=1 unresolved=1', return_home=True)
@@ -114,12 +114,12 @@ def test_partial_tree_return_home_completes_after_home_navigation():
 
 def test_safe_skip_and_manual_return_home_semantics():
     core = MissionCore()
-    core.load('demo', _targets())
+    core.load('demo', _points())
     assert core.skip_current()
     assert core.state == MissionState.READY
-    assert core.current_target.tree_id == 'tree_2'
-    assert core.skipped_targets == 1
-    assert core.target_outcomes == [core.SKIPPED, core.PENDING]
+    assert core.current_point.point_id == 'point_2'
+    assert core.skipped_points == 1
+    assert core.point_outcomes == [core.SKIPPED, core.PENDING]
     assert core.return_home()
     assert core.home_succeeded(canceled=True)
     assert core.state == MissionState.CANCELED
@@ -127,7 +127,7 @@ def test_safe_skip_and_manual_return_home_semantics():
 
 def test_completed_mission_can_return_home_without_losing_completion():
     core = MissionCore()
-    core.load('demo', [_targets()[0]])
+    core.load('demo', [_points()[0]])
     core.start()
     core.nav_succeeded()
     core.stop_verified()
@@ -140,28 +140,28 @@ def test_completed_mission_can_return_home_without_losing_completion():
 
 def test_vision_failure_can_safely_skip_after_arm_returns_home():
     core = MissionCore()
-    core.load('demo', _targets())
+    core.load('demo', _points())
     core.start()
     core.nav_succeeded()
     core.stop_verified()
     assert core.skip_current()
     assert core.current_index == 1
     assert core.state == MissionState.NAVIGATING
-    assert core.target_outcomes == [core.SKIPPED, core.PENDING]
+    assert core.point_outcomes == [core.SKIPPED, core.PENDING]
 
 
-def test_failure_marks_only_the_active_target():
+def test_failure_marks_only_the_active_point():
     core = MissionCore()
-    core.load('demo', _targets())
+    core.load('demo', _points())
     core.start()
     core.fail('nav failed')
-    assert core.target_outcomes == [core.FAILED, core.PENDING]
+    assert core.point_outcomes == [core.FAILED, core.PENDING]
 
 
 def test_duplicate_pause_cancel_and_reset_semantics():
     core = MissionCore()
-    assert core.load('demo', _targets()) == 'accepted'
-    assert core.load('demo', _targets()) == 'duplicate'
+    assert core.load('demo', _points()) == 'accepted'
+    assert core.load('demo', _points()) == 'duplicate'
     assert core.start() and core.pause() and core.resume()
     assert core.cancel()
     assert core.reset()
@@ -170,7 +170,7 @@ def test_duplicate_pause_cancel_and_reset_semantics():
 
 def test_recovery_pause_resumes_navigation_or_home_intent():
     core = MissionCore()
-    assert core.load('demo', _targets()) == 'accepted'
+    assert core.load('demo', _points()) == 'accepted'
     assert core.start()
     assert core.pause_for_recovery()
     assert core.resume()
@@ -183,9 +183,9 @@ def test_recovery_pause_resumes_navigation_or_home_intent():
     assert core.state == MissionState.RETURNING_HOME
 
 
-def test_failure_is_terminal_and_does_not_advance_target():
+def test_failure_is_terminal_and_does_not_advance_point():
     core = MissionCore()
-    core.load('demo', _targets())
+    core.load('demo', _points())
     core.start()
     assert core.fail('nav failed')
     assert not core.nav_succeeded()

@@ -32,7 +32,7 @@ def test_editor_round_trip_preserves_signed_tree_xy(tmp_path):
     editor = nav2_qt.MissionEditor()
     editor.start_pose = _pose(0.0, 0.0)
     editor.spray_duration = 2.5
-    editor.return_home_after_finish = True
+    editor.return_home_after_mission = True
     editor.add_point(
         _pose(3.0, 0.5, 0.3), 0.0, 1.5,
         point_type=nav2_qt.POINT_INSPECT,
@@ -43,13 +43,13 @@ def test_editor_round_trip_preserves_signed_tree_xy(tmp_path):
         tree_pose=_pose(2.6, -1.0))
     editor.add_point(
         _pose(5.0, -0.5, -0.2),
-        point_type=nav2_qt.POINT_FINISH,
+        point_type=nav2_qt.POINT_TRANSIT,
         wide_spray_on_approach=False)
     path = tmp_path / 'manual_mission.json'
     editor.save(path)
 
     saved = json.loads(path.read_text(encoding='utf-8'))
-    assert saved['schema_version'] == 7
+    assert saved['schema_version'] == 8
     assert saved['pose_reference'] == (
         nav2_qt.ARM_ANCHOR_POSE_REFERENCE)
     assert 'auto_start' not in saved
@@ -57,7 +57,7 @@ def test_editor_round_trip_preserves_signed_tree_xy(tmp_path):
     loaded = nav2_qt.MissionEditor()
     loaded.load(path)
     assert loaded.spray_duration == 2.5
-    assert loaded.return_home_after_finish
+    assert loaded.return_home_after_mission
     assert [(point.tree_x_m, point.tree_y_m) for point in loaded.points] == [
         (0.0, 1.5), (0.0, 0.0)]
     assert math.isclose(nav2_qt.pose_yaw(loaded.points[0].pose), 0.3)
@@ -67,7 +67,7 @@ def test_editor_round_trip_preserves_signed_tree_xy(tmp_path):
     assert loaded.points[0].arm_spray_duration_sec == 3.0
     assert loaded.points[0].dwell_time_sec == 1.5
     assert loaded.points[0].tree_pose is not None
-    assert loaded.points[1].point_type == nav2_qt.POINT_FINISH
+    assert loaded.points[1].point_type == nav2_qt.POINT_TRANSIT
 
 
 def test_new_editor_defaults_to_three_second_spray_and_timeline_is_explicit():
@@ -107,6 +107,9 @@ def test_standard_navigation_points_uses_three_seconds_only_for_inspection():
 
     assert [point['arm_spray_duration_sec'] for point in data['route_points']] == [
         0.0, 3.0, 3.0, 0.0, 0.0]
+    assert [point['point_type'] for point in data['route_points']] == [
+        'TRANSIT', 'INSPECT', 'INSPECT', 'TRANSIT', 'TRANSIT']
+    assert data['return_home_after_mission'] is False
 
 
 def test_timestamped_mission_exports_never_reuse_an_existing_filename(tmp_path):
@@ -144,8 +147,8 @@ def test_manual_mission_service_keeps_the_qt_route_request_contract():
 
     for field in (
             'std_msgs/Header header', 'string mission_id',
-            'geometry_msgs/Pose home_pose', 'bool return_home_after_finish',
-            'wvcsc_interfaces/ManualMissionTarget[] targets'):
+            'geometry_msgs/Pose home_pose', 'bool return_home_after_mission',
+            'wvcsc_interfaces/ManualMissionPoint[] points'):
         assert field in source
     assert 'float32 working_range_m' not in source
 
@@ -153,7 +156,7 @@ def test_manual_mission_service_keeps_the_qt_route_request_contract():
 def test_manual_mission_request_schema_mismatch_is_reported_before_submit():
     valid = SimpleNamespace(
         header=object(), mission_id='', home_pose=object(),
-        return_home_after_finish=False, targets=[])
+        return_home_after_mission=False, points=[])
     assert nav2_qt.manual_mission_request_contract_error(valid) is None
 
     message = nav2_qt.manual_mission_request_contract_error(
@@ -178,6 +181,7 @@ def test_navigation_qt_keeps_spray_indicators_but_removes_extra_task_controls():
     assert '#e53935' in source
     assert 'show_sim_spray_status' not in source
     assert "point_type += '（广域）'" not in source
+    assert "addItem('终点'" not in source
     for obsolete in ('暂停', '继续', '跳过当前', '取消任务', '重置任务'):
         assert f"QPushButton('{obsolete}')" not in source
 
@@ -232,25 +236,6 @@ def test_simulation_parking_preflight_keeps_valid_work_distance_but_rejects_cost
         unsafe, enabled=True)
 
 
-def test_editor_migrates_schema_v3_with_a_visible_warning(tmp_path):
-    path = tmp_path / 'legacy.json'
-    path.write_text(
-        '{"schema_version": 3, "spray_duration": 2.0, "targets": ['
-        '{"pose": {"position": {"x": 3, "y": 0, "z": 0}, '
-        '"orientation": {"x": 0, "y": 0, "z": 0, "w": 1}}, '
-        '"tree_x_m": 0.1, "tree_y_m": -1.5}]}',
-        encoding='utf-8')
-    editor = nav2_qt.MissionEditor()
-    editor.load(path)
-    assert editor.load_warning
-    assert editor.points[0].point_type == nav2_qt.POINT_INSPECT
-    assert editor.points[0].work_side == nav2_qt.WORK_SIDE_RIGHT
-    assert editor.points[0].tree_pose is None
-    # v3 stored the vehicle-base goal.  The new editor exposes the fixed
-    # Alicia base point instead, while later converting it back for Nav2.
-    assert editor.points[0].pose.position.x == pytest.approx(2.6)
-
-
 @pytest.mark.parametrize('vehicle', [
     _pose(3.0, 0.5, 0.0),
     _pose(3.0, 0.5, math.pi / 2.0),
@@ -281,7 +266,7 @@ def test_all_operator_point_types_submit_vehicle_base_goals():
         ik_recording_range_min_m = 0.85
         ik_recording_range_max_m = 1.45
         get_clock = staticmethod(_Clock)
-        _target_constant = staticmethod(nav2_qt.Nav2QtNode._target_constant)
+        _point_constant = staticmethod(nav2_qt.Nav2QtNode._point_constant)
 
     start = _pose(1.0, 2.0, 0.3)
     points = [
@@ -291,7 +276,7 @@ def test_all_operator_point_types_submit_vehicle_base_goals():
                            point_type=nav2_qt.POINT_INSPECT,
                            work_side=nav2_qt.WORK_SIDE_LEFT),
         nav2_qt.WorkPoint(_pose(4.0, 2.0, 0.4),
-                           point_type=nav2_qt.POINT_FINISH),
+                           point_type=nav2_qt.POINT_TRANSIT),
     ]
 
     request = nav2_qt.Nav2QtNode.build_manual_request(
@@ -301,13 +286,13 @@ def test_all_operator_point_types_submit_vehicle_base_goals():
     assert request.home_pose.position.x == pytest.approx(expected_home.position.x)
     assert request.home_pose.position.y == pytest.approx(expected_home.position.y)
     assert nav2_qt.pose_yaw(request.home_pose) == pytest.approx(0.3)
-    for point, target in zip(points, request.targets):
+    for point, route_point in zip(points, request.points):
         expected_goal = nav2_qt.vehicle_pose_from_arm_anchor(point.pose)
-        assert target.docking_pose.position.x == pytest.approx(
+        assert route_point.docking_pose.position.x == pytest.approx(
             expected_goal.position.x)
-        assert target.docking_pose.position.y == pytest.approx(
+        assert route_point.docking_pose.position.y == pytest.approx(
             expected_goal.position.y)
-        assert nav2_qt.pose_yaw(target.docking_pose) == pytest.approx(
+        assert nav2_qt.pose_yaw(route_point.docking_pose) == pytest.approx(
             nav2_qt.pose_yaw(point.pose))
 
 
@@ -400,7 +385,7 @@ def test_ik_request_rejects_an_out_of_range_inspection_point():
         ik_recording_range_min_m = 0.85
         ik_recording_range_max_m = 1.45
         get_clock = staticmethod(_Clock)
-        _target_constant = staticmethod(nav2_qt.Nav2QtNode._target_constant)
+        _point_constant = staticmethod(nav2_qt.Nav2QtNode._point_constant)
 
     point = nav2_qt.WorkPoint(
         _pose(3.0, 0.5), tree_x_m=0.0, tree_y_m=-1.50,
@@ -434,20 +419,6 @@ def test_vehicle_route_marker_connects_converted_vehicle_goals():
     for actual, vehicle_pose in zip(marker.points, expected):
         assert actual.x == pytest.approx(vehicle_pose.position.x)
         assert actual.y == pytest.approx(vehicle_pose.position.y)
-
-
-def test_finish_point_forces_wide_spray_off(tmp_path):
-    editor = nav2_qt.MissionEditor()
-    editor.add_point(
-        _pose(2.0, 0.0), point_type=nav2_qt.POINT_FINISH,
-        wide_spray_on_approach=True)
-    assert not editor.points[0].wide_spray_on_approach
-
-    path = tmp_path / 'finish.json'
-    editor.save(path)
-    loaded = nav2_qt.MissionEditor()
-    loaded.load(path)
-    assert not loaded.points[0].wide_spray_on_approach
 
 
 class _Widget:
@@ -535,7 +506,7 @@ class _ServiceClient:
         return _ImmediateFuture()
 
 
-def test_gui_task_button_accepts_one_or_more_queued_targets():
+def test_gui_task_button_accepts_one_or_more_queued_points():
     editor = nav2_qt.MissionEditor()
     editor.start_pose = _pose(0.0, 0.0)
     gui = _gui(editor)
@@ -592,7 +563,7 @@ def test_fresh_start_accepts_rviz_initial_pose_before_explicit_relocalization():
     assert 'explicit re-localization flow below closes this gate again' in source
 
 
-def test_task_uses_all_queued_targets_and_keeps_the_editor_list():
+def test_task_uses_all_queued_points_and_keeps_the_editor_list():
     editor = nav2_qt.MissionEditor()
     editor.start_pose = _pose(0.0, 0.0)
     editor.add_point(_pose(3.0, 0.5, 0.3), 0.0, -1.5)

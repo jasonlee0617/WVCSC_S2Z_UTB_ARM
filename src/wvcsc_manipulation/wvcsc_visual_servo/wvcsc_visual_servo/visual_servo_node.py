@@ -159,7 +159,6 @@ class VisualServo(Node):
         self._lock = threading.Lock()
         self._busy = False
         self._active_mission = ''
-        self._active_tree = ''
         self._active_target = ''
         self._camera = None
         self._aim_solution = None
@@ -289,7 +288,6 @@ class VisualServo(Node):
         timeout = float(request.timeout) or self._config.default_timeout_sec
         valid = (
             str(request.mission_id).strip()
-            and str(request.tree_id).strip()
             and str(request.target_id).strip()
             and math.isfinite(timeout)
             and float(self.get_parameter('min_goal_timeout_sec').value)
@@ -334,7 +332,6 @@ class VisualServo(Node):
             if not self._busy:
                 return
             if not (message.mission_id == self._active_mission
-                    and message.tree_id == self._active_tree
                     and message.target_id == self._active_target):
                 return
             if self._aim_solution is None:
@@ -486,7 +483,6 @@ class VisualServo(Node):
         started = self._now()
         with self._lock:
             self._active_mission = request.mission_id
-            self._active_tree = request.tree_id
             self._active_target = request.target_id
             self._session.reset(started, time.monotonic())
             self._servo_status = 0
@@ -633,7 +629,6 @@ class VisualServo(Node):
             with self._lock:
                 self._busy = False
                 self._active_mission = ''
-                self._active_tree = ''
                 self._active_target = ''
                 self._session.reset(0.0, 0.0)
 

@@ -104,7 +104,6 @@ class _GoalValidationHarness:
 def _spray_request(working_range_m):
     return SimpleNamespace(
         mission_id='mission',
-        tree_id='tree',
         spray_duration=3.0,
         observation_mode='joint_presets',
         working_range_m=working_range_m,

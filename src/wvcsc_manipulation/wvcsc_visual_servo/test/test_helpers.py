@@ -428,7 +428,6 @@ def _node_session_harness():
     node._lock = threading.Lock()
     node._busy = True
     node._active_mission = 'mission-1'
-    node._active_tree = 'tree-1'
     node._active_target = 'target-1'
     node._aim_solution = object()
     node._camera = (500.0, 500.0, 640.0, 360.0, 1280, 720)
@@ -449,7 +448,7 @@ def test_node_target_callback_holds_matching_invalid_target_without_lock_reentry
     callback = threading.Thread(
         target=node._on_target,
         args=(_target(
-            mission_id='mission-1', tree_id='tree-1', target_id='target-1',
+            mission_id='mission-1', target_id='target-1',
             valid=False, confidence=0.0, image_width=0, image_height=0),))
     callback.start()
     callback.join(timeout=0.25)
@@ -462,7 +461,7 @@ def test_node_target_callback_ignores_non_matching_target():
     node = _node_session_harness()
     node._session.state.target.latest = {'valid': True, 'received': 10.0}
     node._on_target(_target(
-        mission_id='mission-1', tree_id='tree-1', target_id='other',
+        mission_id='mission-1', target_id='other',
         valid=False, confidence=0.0, image_width=0, image_height=0))
     assert node._session.latest == {'valid': True, 'received': 10.0}
 
@@ -523,7 +522,7 @@ def test_each_execute_exit_path_calls_servo_stop_once(outcome, monkeypatch):
 
     class Goal:
         request = SimpleNamespace(
-            timeout=8.0, mission_id='mission-1', tree_id='tree-1',
+            timeout=8.0, mission_id='mission-1',
             target_id='target-1', working_range_m=1.0,
             desired_u_px=640.0, desired_v_px=360.0,
             image_width=1280, image_height=720)

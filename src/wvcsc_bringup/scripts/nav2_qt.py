@@ -39,7 +39,7 @@ from std_srvs.srv import Empty, Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 from wvcsc_interfaces.msg import (
-    ManualMissionTarget,
+    ManualMissionPoint,
     MissionStatus,
 )
 from wvcsc_interfaces.srv import LoadManualMission
@@ -72,8 +72,7 @@ SIM_NAV_MIN_PARKING_CLEARANCE_M = 0.05
 
 POINT_INSPECT = 'INSPECT'
 POINT_TRANSIT = 'TRANSIT'
-POINT_FINISH = 'FINISH'
-POINT_TYPES = (POINT_TRANSIT, POINT_INSPECT, POINT_FINISH)
+POINT_TYPES = (POINT_TRANSIT, POINT_INSPECT)
 
 WORK_SIDE_UNSPECIFIED = 'UNSPECIFIED'
 WORK_SIDE_LEFT = 'LEFT'
@@ -83,8 +82,8 @@ DEFAULT_ARM_SPRAY_DURATION_SEC = 3.0
 MIN_ARM_SPRAY_DURATION_SEC = 0.2
 MAX_ARM_SPRAY_DURATION_SEC = 10.0
 MANUAL_MISSION_REQUEST_FIELDS = (
-    'header', 'mission_id', 'home_pose', 'return_home_after_finish',
-    'targets')
+    'header', 'mission_id', 'home_pose', 'return_home_after_mission',
+    'points')
 
 
 class ManualMissionInterfaceMismatchError(RuntimeError):
@@ -362,7 +361,7 @@ class WorkPoint:
 class MissionEditor:
     """Qt 保存的人工任务；所有停靠点均由操作员在 RViz 中记录。"""
 
-    schema_version = 7
+    schema_version = 8
 
     def __init__(self, spray_duration=DEFAULT_ARM_SPRAY_DURATION_SEC):
         spray_duration = float(spray_duration)
@@ -375,8 +374,7 @@ class MissionEditor:
         self.start_pose = None
         self.points = []
         self.spray_duration = spray_duration
-        self.return_home_after_finish = False
-        self.load_warning = None
+        self.return_home_after_mission = False
 
     def add_point(self, pose, tree_x_m=0.0, tree_y_m=0.0, tree_base_z_m=0.0,
                   point_type=POINT_TRANSIT,
@@ -389,8 +387,6 @@ class MissionEditor:
             raise ValueError(f'unsupported point type: {point_type}')
         if point_type == POINT_INSPECT and work_side == WORK_SIDE_UNSPECIFIED:
             work_side = work_side_from_tree_y(tree_y_m)
-        if point_type == POINT_FINISH:
-            wide_spray_on_approach = False
         if arm_spray_duration_sec is None:
             arm_spray_duration_sec = self.spray_duration
         self.points.append(WorkPoint(
@@ -407,7 +403,7 @@ class MissionEditor:
             'start_pose': (
                 pose_to_json(self.start_pose) if self.start_pose else None),
             'spray_duration': self.spray_duration,
-            'return_home_after_finish': self.return_home_after_finish,
+            'return_home_after_mission': self.return_home_after_mission,
             'route_points': [
                 {'pose': pose_to_json(point.pose),
                  'point_type': point.point_type,
@@ -431,58 +427,20 @@ class MissionEditor:
         with open(path, encoding='utf-8') as stream:
             data = json.load(stream)
         version = data.get('schema_version')
-        if version not in (3, 4, 5, 6, self.schema_version):
+        if version != self.schema_version:
             raise ValueError(
                 f'unsupported navigation file schema_version: {version!r}')
-        if (version in (5, 6, self.schema_version) and
-                data.get('pose_reference') != ARM_ANCHOR_POSE_REFERENCE):
+        if data.get('pose_reference') != ARM_ANCHOR_POSE_REFERENCE:
             raise ValueError(
-                'schema v5/v6/v7 requires pose_reference='
+                'schema v8 requires pose_reference='
                 f'{ARM_ANCHOR_POSE_REFERENCE!r}')
-        legacy_vehicle_pose = version in (3, 4)
-
-        def load_pose(data_item):
-            pose = pose_from_json(data_item)
-            return (arm_anchor_from_vehicle_pose(pose)
-                    if legacy_vehicle_pose else pose)
 
         self.start_pose = (
-            load_pose(data['start_pose'])
+            pose_from_json(data['start_pose'])
             if data.get('start_pose') else None)
         self.spray_duration = float(data.get('spray_duration', 3.0))
-        self.return_home_after_finish = bool(
-            data.get('return_home_after_finish', False))
-        self.load_warning = None
-        if version == 3:
-            # Schema v3/v4 stored vehicle-base Nav2 goals.  Convert them to
-            # the new operator-facing arm-base anchor without changing the
-            # eventual vehicle path submitted to Nav2.
-            raw_points = data.get('targets', [])
-            self.points = [
-                WorkPoint(
-                    load_pose(item['pose']),
-                    float(item['tree_x_m']),
-                    float(item['tree_y_m']),
-                    float(item.get('tree_base_z_m', 0.0)),
-                    POINT_INSPECT,
-                    work_side_from_tree_y(item['tree_y_m']),
-                    False,
-                    float(data.get('spray_duration', 3.0)),
-                    0.0,
-                    None,
-                )
-                for item in raw_points
-            ]
-            self.load_warning = (
-                '已导入旧版车辆基座任务：已转换为机械臂基座点击语义。'
-                '所有点均按病株检查点处理；请复核点类型、广域喷洒和侧位。')
-            return
-
-        if version in (5, 6) and 'auto_start' in data:
-            self.load_warning = (
-                '已导入旧版任务：已忽略 auto_start。加载只预览任务，'
-                '请人工点击“开始任务”。')
-
+        self.return_home_after_mission = bool(
+            data.get('return_home_after_mission', False))
         self.points = []
         for item in data.get('route_points', []):
             point_type = str(item.get('point_type', POINT_TRANSIT))
@@ -490,14 +448,13 @@ class MissionEditor:
                 raise ValueError(f'unsupported point type: {point_type}')
             tree_pose_data = item.get('tree_pose')
             self.points.append(WorkPoint(
-                load_pose(item['pose']),
+                pose_from_json(item['pose']),
                 float(item.get('tree_x_m', 0.0)),
                 float(item.get('tree_y_m', 0.0)),
                 float(item.get('tree_base_z_m', 0.0)),
                 point_type,
                 str(item.get('work_side', WORK_SIDE_UNSPECIFIED)),
-                (False if point_type == POINT_FINISH else
-                 bool(item.get('wide_spray_on_approach', False))),
+                bool(item.get('wide_spray_on_approach', False)),
                 float(item.get('arm_spray_duration_sec',
                                data.get('spray_duration', 3.0))),
                 float(item.get('dwell_time_sec', 0.0)),
@@ -634,11 +591,11 @@ class Nav2QtNode(Node):
         return pose
 
     @staticmethod
-    def _target_constant(name, fallback):
-        return int(getattr(ManualMissionTarget, name, fallback))
+    def _point_constant(name, fallback):
+        return int(getattr(ManualMissionPoint, name, fallback))
 
     def build_manual_request(self, start_pose, points,
-                             return_home_after_finish, prefix):
+                             return_home_after_mission, prefix):
         request = LoadManualMission.Request()
         contract_error = manual_mission_request_contract_error(request)
         if contract_error is not None:
@@ -647,7 +604,7 @@ class Nav2QtNode(Node):
         request.header.frame_id = self.map_frame
         request.mission_id = f'manual_{prefix}_{uuid.uuid4().hex[:8]}'
         request.home_pose = vehicle_pose_from_arm_anchor(start_pose)
-        request.return_home_after_finish = return_home_after_finish
+        request.return_home_after_mission = return_home_after_mission
         for index, point in enumerate(points, start=1):
             error = valid_work_side(point)
             if error is None:
@@ -661,42 +618,36 @@ class Nav2QtNode(Node):
                     getattr(self, 'simulation_parking_clearance_check', False))
             if error is not None:
                 raise ValueError(f'第 {index} 个点无效：{error}')
-            target = ManualMissionTarget()
-            target.target_id = f'{prefix}_{index:02d}'
-            target.docking_pose = vehicle_pose_from_arm_anchor(point.pose)
+            route_point = ManualMissionPoint()
+            route_point.point_id = f'{prefix}_{index:02d}'
+            route_point.docking_pose = vehicle_pose_from_arm_anchor(point.pose)
             is_inspect = point.point_type == POINT_INSPECT
-            target.tree_x_m = point.tree_x_m if is_inspect else 0.0
-            target.tree_y_m = point.tree_y_m if is_inspect else 0.0
-            target.tree_base_z_m = point.tree_base_z_m if is_inspect else 0.0
-            target.spray_duration = (
+            route_point.tree_x_m = point.tree_x_m if is_inspect else 0.0
+            route_point.tree_y_m = point.tree_y_m if is_inspect else 0.0
+            route_point.tree_base_z_m = point.tree_base_z_m if is_inspect else 0.0
+            route_point.spray_duration = (
                 float(point.arm_spray_duration_sec)
                 if is_inspect else 0.0)
-            # These fields are part of the typed real-route extension.  The
-            # guard keeps a source checkout usable with an older generated
-            # interface until the whole workspace is rebuilt.
             point_type = {
-                POINT_INSPECT: self._target_constant('POINT_INSPECT', 0),
-                POINT_TRANSIT: self._target_constant('POINT_TRANSIT', 1),
-                POINT_FINISH: self._target_constant('POINT_FINISH', 2),
+                POINT_INSPECT: self._point_constant('POINT_INSPECT', 0),
+                POINT_TRANSIT: self._point_constant('POINT_TRANSIT', 1),
             }[point.point_type]
             work_side = {
-                WORK_SIDE_UNSPECIFIED: self._target_constant(
+                WORK_SIDE_UNSPECIFIED: self._point_constant(
                     'WORK_SIDE_UNSPECIFIED', 0),
-                WORK_SIDE_LEFT: self._target_constant('WORK_SIDE_LEFT', 1),
-                WORK_SIDE_RIGHT: self._target_constant('WORK_SIDE_RIGHT', 2),
+                WORK_SIDE_LEFT: self._point_constant('WORK_SIDE_LEFT', 1),
+                WORK_SIDE_RIGHT: self._point_constant('WORK_SIDE_RIGHT', 2),
             }[point.work_side]
             for name, value in (
                     ('point_type', point_type),
                     ('wide_spray_on_approach',
-                     bool(point.wide_spray_on_approach)
-                     if point.point_type != POINT_FINISH else False),
+                     bool(point.wide_spray_on_approach)),
                     ('dwell_time_sec', float(point.dwell_time_sec)),
                     ('work_side', work_side),
                     ('arm_spray_duration_sec',
                      float(point.arm_spray_duration_sec) if is_inspect else 0.0)):
-                if hasattr(target, name):
-                    setattr(target, name, value)
-            request.targets.append(target)
+                setattr(route_point, name, value)
+            request.points.append(route_point)
         return request
 
     def publish_markers(self, editor, candidate, pending_dock=None):
@@ -715,7 +666,6 @@ class Nav2QtNode(Node):
             color = {
                 POINT_TRANSIT: (0.1, 0.6, 1.0),
                 POINT_INSPECT: (1.0, 0.75, 0.0),
-                POINT_FINISH: (0.15, 0.85, 0.3),
             }[point.point_type]
             markers.markers.append(self._marker(
                 point.pose, 'manual_target', index, *color))
@@ -1001,7 +951,6 @@ class Nav2Gui(QWidget):
         self.point_type_combo = QComboBox()
         self.point_type_combo.addItem('通行点', POINT_TRANSIT)
         self.point_type_combo.addItem('病株检查点', POINT_INSPECT)
-        self.point_type_combo.addItem('终点', POINT_FINISH)
         self.record_point_button = QPushButton('记录当前点')
         self.wide_spray_checkbox = QCheckBox('开启广域喷洒')
         self.wide_spray_checkbox.setToolTip(
@@ -1127,8 +1076,6 @@ class Nav2Gui(QWidget):
             self.record_point_button.setText('记录当前点')
 
     def _on_point_type_changed(self, *_args):
-        if self.point_type_combo.currentData() == POINT_FINISH:
-            self.wide_spray_checkbox.setChecked(False)
         self._update_record_point_button()
 
     def _refresh(self):
@@ -1165,8 +1112,7 @@ class Nav2Gui(QWidget):
         waiting_for_tree = self.pending_dock_pose is not None
         self.point_type_combo.setEnabled(editable and not waiting_for_tree)
         self.wide_spray_checkbox.setEnabled(
-            editable and not waiting_for_tree and
-            self.point_type_combo.currentData() != POINT_FINISH)
+            editable and not waiting_for_tree)
         required_sequence = (
             self.pending_dock_sequence if waiting_for_tree
             else self.consumed_goal_sequence)
@@ -1373,7 +1319,6 @@ class Nav2Gui(QWidget):
         return {
             POINT_TRANSIT: '通行点',
             POINT_INSPECT: '病株检查点',
-            POINT_FINISH: '终点',
         }[point_type]
 
     def _start_task(self):
@@ -1394,7 +1339,7 @@ class Nav2Gui(QWidget):
         if self.editor.start_pose is None or not points:
             self._log('请先记录起点和作业目标')
             return
-        self.editor.return_home_after_finish = self.return_home_checkbox.isChecked()
+        self.editor.return_home_after_mission = self.return_home_checkbox.isChecked()
         self._log(f'路线预览: {route_timeline(points)}')
         if self.node.status and self.node.status.state in self.TERMINAL:
             self._trigger('reset', lambda _result: self._load_manual(points, prefix))
@@ -1405,7 +1350,7 @@ class Nav2Gui(QWidget):
         try:
             request = self.node.build_manual_request(
                 self.editor.start_pose, points,
-                self.editor.return_home_after_finish, prefix)
+                self.editor.return_home_after_mission, prefix)
         except (ValueError, ManualMissionInterfaceMismatchError) as error:
             title = (
                 'ROS 接口版本不一致'
@@ -1517,7 +1462,7 @@ class Nav2Gui(QWidget):
             return
         path = non_overwriting_json_path(path)
         try:
-            self.editor.return_home_after_finish = self.return_home_checkbox.isChecked()
+            self.editor.return_home_after_mission = self.return_home_checkbox.isChecked()
             self.editor.save(path)
         except (OSError, ValueError, KeyError) as error:
             QMessageBox.warning(self, '保存失败', str(error))
@@ -1536,7 +1481,7 @@ class Nav2Gui(QWidget):
             QMessageBox.warning(self, '加载失败', str(error))
             return
         self.save_directory = os.path.dirname(path) or DEFAULT_SAVE_DIRECTORY
-        self.return_home_checkbox.setChecked(self.editor.return_home_after_finish)
+        self.return_home_checkbox.setChecked(self.editor.return_home_after_mission)
         if self.editor.start_pose is not None:
             self.start_label.setText(
                 f'起点（机械臂基座）: x={self.editor.start_pose.position.x:.2f}, '
@@ -1548,9 +1493,6 @@ class Nav2Gui(QWidget):
         self._update_table()
         self._publish_markers()
         self._log(f'已加载任务: {path}')
-        if self.editor.load_warning:
-            QMessageBox.warning(self, '旧任务已迁移', self.editor.load_warning)
-            self._log(self.editor.load_warning)
         self._log('任务已加载，仅预览；请点击“开始任务”后提交导航与喷洒任务')
 
     def _publish_markers(self):

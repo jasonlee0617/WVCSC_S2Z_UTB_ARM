@@ -99,7 +99,6 @@ class SprayActuator(Node):
         # 使用 core.py 中的 SprayInterlock 进行参数验证
         error = self._interlock.validate(
             request.mission_id,
-            request.tree_id,
             float(request.duration),
             request.mode,
         )

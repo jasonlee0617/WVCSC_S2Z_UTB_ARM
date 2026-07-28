@@ -25,7 +25,7 @@ from wvcsc_interfaces.action import ExecuteSpray
 from wvcsc_interfaces.msg import MissionStatus
 
 
-ARM_TEST_TREE_ID = 'arm_test_tree'
+ARM_TEST_POINT_ID = 'single_arm_test'
 OBSERVATION_MODES = {'ik', 'joint_presets'}
 
 
@@ -56,12 +56,11 @@ def arm_test_coordinates(
 
 
 def build_spray_goal(
-        mission_id, tree_id, frame_id, x_m, y_m, z_m, duration,
+        mission_id, frame_id, x_m, y_m, z_m, duration,
         observation_mode='', working_range_m=0.0):
     """Build the one and only target accepted by the arm-only test UI."""
     goal = ExecuteSpray.Goal()
     goal.mission_id = str(mission_id)
-    goal.tree_id = str(tree_id)
     goal.spray_duration = float(duration)
     goal.tree_hint = PointStamped()
     goal.tree_hint.header.frame_id = str(frame_id)
@@ -129,7 +128,7 @@ class ArmSprayTestNode(Node):
             String, '/motion_control/state', self._on_motion_state, latched)
         self.goal_handle = None
         self.mission_id = ''
-        self.target_id = ''
+        self.point_id = ''
         self._active = False
         self.on_feedback = None
         self.on_result = None
@@ -170,9 +169,9 @@ class ArmSprayTestNode(Node):
             observation_mode, side, base_distance_m,
             self.joint_preset_hint_distance)
         self.mission_id = f'arm_qt_{uuid.uuid4().hex[:8]}'
-        self.target_id = ARM_TEST_TREE_ID
+        self.point_id = ARM_TEST_POINT_ID
         goal = build_spray_goal(
-            self.mission_id, self.target_id, self.base_frame,
+            self.mission_id, self.base_frame,
             x_m, y_m, z_m, duration, observation_mode, working_range_m)
         goal.tree_hint.header.stamp = self.get_clock().now().to_msg()
         self._active = True
@@ -209,9 +208,9 @@ class ArmSprayTestNode(Node):
         message.mission_id = self.mission_id
         message.state = MissionStatus.ARM_SPRAYING
         message.state_text = 'ARM_SPRAYING'
-        message.current_tree_id = self.target_id
+        message.current_point_id = self.point_id
         message.current_index = 0
-        message.total_targets = 1
+        message.total_points = 1
         message.arm_goal_active = True
         self.status_pub.publish(message)
 
@@ -259,8 +258,8 @@ class ArmSprayTestNode(Node):
         status.state_text = (
             'MISSION_COMPLETED' if success else
             ('CANCELED' if canceled else 'FAILED'))
-        status.total_targets = 1
-        status.completed_targets = 1 if success else 0
+        status.total_points = 1
+        status.completed_points = 1 if success else 0
         status.last_error = '' if success else message
         self.status_pub.publish(status)
         if self.on_result is not None:

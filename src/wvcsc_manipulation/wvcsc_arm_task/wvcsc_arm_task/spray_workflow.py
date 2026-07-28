@@ -9,7 +9,6 @@ from .target_flow import spray_summary, target_accounting
 class SpraySession:
     """State owned by one ``ExecuteSpray`` goal, never by the ROS node."""
 
-    tree_id: str
     processed: list = field(default_factory=list)
     exhausted: list = field(default_factory=list)
     known_targets: list = field(default_factory=list)
@@ -41,4 +40,3 @@ class SpraySession:
             self.recenter_failures,
             self.alignment_attempts,
         )
-

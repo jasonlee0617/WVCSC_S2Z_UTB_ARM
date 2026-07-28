@@ -19,7 +19,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 from wvcsc_interfaces.action import ExecuteSpray
-from wvcsc_interfaces.msg import ManualMissionTarget, MissionPlan, MissionStatus
+from wvcsc_interfaces.msg import ManualMissionPoint, MissionPlan, MissionStatus
 from wvcsc_interfaces.srv import LoadManualMission
 
 from wvcsc_mission_manager.mission_manager import MissionManager
@@ -31,7 +31,7 @@ class _FakeServers(Node):
         group = ReentrantCallbackGroup()
         self.nav_goals = []
         self.nav_yaws = []
-        self.spray_goals = []
+        self.spray_missions = []
         self.tree_hints = []
         self.working_ranges = []
         self.nav_server = ActionServer(
@@ -60,7 +60,7 @@ class _FakeServers(Node):
 
     def _execute_spray(self, goal_handle):
         request = goal_handle.request
-        self.spray_goals.append(request.tree_id)
+        self.spray_missions.append(request.mission_id)
         self.tree_hints.append((
             request.tree_hint.header.frame_id,
             request.tree_hint.point.x,
@@ -116,45 +116,45 @@ class _Harness(Node):
         request.header.stamp = self.get_clock().now().to_msg()
         request.header.frame_id = 'map'
         request.mission_id = mission_id
-        request.return_home_after_finish = return_home
+        request.return_home_after_mission = return_home
         request.home_pose.position.x = home[0]
         request.home_pose.position.y = home[1]
         request.home_pose.orientation.z = math.sin(home[2] / 2.0)
         request.home_pose.orientation.w = math.cos(home[2] / 2.0)
-        for tree_id, dock_x, dock_y, tree_y_m in (
-                ('tree_01', 3.4, 0.2, 1.8),
-                ('tree_02', 5.4, -0.2, -1.8)):
-            target = ManualMissionTarget()
-            target.target_id = tree_id
-            target.docking_pose.position.x = dock_x
-            target.docking_pose.position.y = dock_y
-            target.docking_pose.orientation.w = 1.0
-            target.tree_x_m = 0.0
-            target.tree_y_m = tree_y_m
-            target.tree_base_z_m = 0.0
-            target.spray_duration = 0.2
-            request.targets.append(target)
+        for point_id, dock_x, dock_y, tree_y_m in (
+                ('point_01', 3.4, 0.2, 1.8),
+                ('point_02', 5.4, -0.2, -1.8)):
+            point = ManualMissionPoint()
+            point.point_id = point_id
+            point.docking_pose.position.x = dock_x
+            point.docking_pose.position.y = dock_y
+            point.docking_pose.orientation.w = 1.0
+            point.tree_x_m = 0.0
+            point.tree_y_m = tree_y_m
+            point.tree_base_z_m = 0.0
+            point.spray_duration = 0.2
+            request.points.append(point)
         return self.manual_client.call_async(request)
 
-    def load_manual(self, mission_id, targets, return_home=False):
+    def load_manual(self, mission_id, points, return_home=False):
         request = LoadManualMission.Request()
         request.header.stamp = self.get_clock().now().to_msg()
         request.header.frame_id = 'map'
         request.mission_id = mission_id
         request.home_pose.orientation.w = 1.0
-        request.return_home_after_finish = return_home
-        for target_id, x, y, yaw, tree_x_m, tree_y_m in targets:
-            target = ManualMissionTarget()
-            target.target_id = target_id
-            target.docking_pose.position.x = x
-            target.docking_pose.position.y = y
-            target.docking_pose.orientation.z = math.sin(yaw / 2.0)
-            target.docking_pose.orientation.w = math.cos(yaw / 2.0)
-            target.spray_duration = 0.2
-            target.tree_x_m = tree_x_m
-            target.tree_y_m = tree_y_m
-            target.tree_base_z_m = 0.0
-            request.targets.append(target)
+        request.return_home_after_mission = return_home
+        for point_id, x, y, yaw, tree_x_m, tree_y_m in points:
+            point = ManualMissionPoint()
+            point.point_id = point_id
+            point.docking_pose.position.x = x
+            point.docking_pose.position.y = y
+            point.docking_pose.orientation.z = math.sin(yaw / 2.0)
+            point.docking_pose.orientation.w = math.cos(yaw / 2.0)
+            point.spray_duration = 0.2
+            point.tree_x_m = tree_x_m
+            point.tree_y_m = tree_y_m
+            point.tree_base_z_m = 0.0
+            request.points.append(point)
         return self.manual_client.call_async(request)
 
 
@@ -167,7 +167,7 @@ def _spin_until(executor, predicate, timeout=5.0):
     return False
 
 
-def test_three_two_target_fake_closed_loops_complete_in_order():
+def test_three_two_point_fake_closed_loops_complete_in_order():
     context = Context()
     rclpy.init(context=context)
     servers = _FakeServers(context)
@@ -217,7 +217,8 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
         for actual, expected in zip(servers.nav_goals, expected_nav):
             assert math.isclose(actual[0], expected[0], abs_tol=1e-6)
             assert math.isclose(actual[1], expected[1], abs_tol=1e-6)
-        assert servers.spray_goals == ['tree_01', 'tree_02'] * 3
+        assert servers.spray_missions == [
+            f'fake_closed_loop_{run}' for run in range(3) for _ in range(2)]
         expected_hints = [
             ('map', 3.0, 2.0, 0.0),
             ('map', 5.0, -2.0, 0.0),
@@ -225,12 +226,12 @@ def test_three_two_target_fake_closed_loops_complete_in_order():
         for actual, expected in zip(servers.tree_hints, expected_hints):
             assert actual[0] == expected[0]
             assert actual[1:] == pytest.approx(expected[1:])
-        assert servers.working_ranges == [0.0] * len(servers.spray_goals)
+        assert servers.working_ranges == [0.0] * len(servers.spray_missions)
         assert harness.plan.mission_id == 'fake_closed_loop_2'
-        assert [item.target_id for item in harness.plan.targets] == [
-            'tree_01', 'tree_02']
+        assert [item.point_id for item in harness.plan.points] == [
+            'point_01', 'point_02']
         assert math.isclose(
-            harness.plan.targets[0].docking_pose.position.y,
+            harness.plan.points[0].docking_pose.position.y,
             0.2,
             abs_tol=1e-6,
         )
@@ -257,7 +258,7 @@ def test_optional_return_home_adds_final_nav_goal():
     manager = MissionManager(
         context=context,
         parameter_overrides=[
-            Parameter('return_home_after_finish', value=True),
+            Parameter('return_home_after_mission', value=True),
             Parameter('home_x', value=0.25),
             Parameter('home_y', value=-0.1),
             Parameter('home_yaw', value=0.0),
@@ -292,7 +293,7 @@ def test_optional_return_home_adds_final_nav_goal():
         )
         assert servers.nav_goals == [
             (3.4, 0.2), (5.4, -0.2), (0.25, -0.1)]
-        assert servers.spray_goals == ['tree_01', 'tree_02']
+        assert servers.spray_missions == ['return_home_loop'] * 2
         assert servers.working_ranges == [0.0, 0.0]
     finally:
         for _ in range(5):
@@ -349,13 +350,13 @@ def test_manual_mission_preserves_rviz_pose_and_yaw():
         )
         assert servers.nav_goals == [(3.2, 0.7)]
         assert math.isclose(servers.nav_yaws[0], 0.4, abs_tol=1e-6)
-        assert servers.spray_goals == ['single_01']
+        assert servers.spray_missions == ['manual_pose_loop']
         assert servers.working_ranges == [0.0]
         assert servers.tree_hints[0][0] == 'map'
         assert servers.tree_hints[0][1:] == pytest.approx(
             (2.247448, 1.925824, 0.0))
-        assert harness.plan.targets[0].docking_pose.position.x == 3.2
-        assert harness.plan.targets[0].docking_pose.position.y == 0.7
+        assert harness.plan.points[0].docking_pose.position.x == 3.2
+        assert harness.plan.points[0].docking_pose.position.y == 0.7
     finally:
         for _ in range(5):
             executor.spin_once(timeout_sec=0.02)

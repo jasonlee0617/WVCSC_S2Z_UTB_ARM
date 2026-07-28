@@ -23,18 +23,16 @@ class SpraySequenceMixin:
         按几何关系跨轮合并；循环退出前强制满足
         ``detected == sprayed + unresolved``，从而禁止病果静默丢失。
         """
-        tree = str(request.tree_id).strip()
         self._active_mission = str(request.mission_id).strip()
-        self._active_tree = tree
         self.get_logger().info(
-            f'[ARM][{tree}] GOAL_ACCEPTED mission={request.mission_id.strip()} '
+            f'[ARM] GOAL_ACCEPTED mission={request.mission_id.strip()} '
             f'spray_duration={request.spray_duration:.1f}s')
         self._reset_vision()
         self._set_inference_mode('idle')
 
         # 阶段 1: MOVING_TO_OBSERVE（动态计算观察位姿并执行）
         self.get_logger().info(
-            f'[ARM][{tree}] OBSERVE mode={self._observation_mode} '
+            f'[ARM] OBSERVE mode={self._observation_mode} '
             'preparing observation motion from tree_hint...')
         feedback(ExecuteSpray.Feedback.MOVING_TO_OBSERVE, 0.05, 'MOVING_TO_OBSERVE')
         if not self._move_to_observation(request.tree_hint):
@@ -44,12 +42,12 @@ class SpraySequenceMixin:
                 f'observation motion failed: {failure}', cancel_requested,
                 'observation and HOME motion failed')
         self.get_logger().info(
-            f'[ARM][{tree}] OBSERVE selected distance={self._observation_distance}m '
+            f'[ARM] OBSERVE selected distance={self._observation_distance}m '
             f'index={self._observation_candidate_index} '
             f'tree_in_base=({self._tree_in_base[0]:.2f},{self._tree_in_base[1]:.2f},'
             f'{self._tree_in_base[2]:.2f})')
 
-        session = SpraySession(tree)
+        session = SpraySession()
 
         def relay_alignment_feedback(message):
             """Keep the parent Action alive while the child Servo is active."""
@@ -69,7 +67,7 @@ class SpraySequenceMixin:
             self._set_inference_mode('disease')
             feedback(ExecuteSpray.Feedback.DETECTING_TARGETS, 0.25, 'DETECTING_TARGETS')
             self.get_logger().debug(
-                f'[ARM][{tree}] DETECT inference_mode=disease '
+                f'[ARM] DETECT inference_mode=disease '
                 f'timeout={self.config.detection_timeout:.1f}s '
                 f'confirmation={self.config.confirmation_frames}')
 
@@ -94,7 +92,7 @@ class SpraySequenceMixin:
                     break
                 self._remember_targets(session.known_targets, candidates)
                 self.get_logger().info(
-                    f'[ARM][{tree}] TARGET_LEDGER stable='
+                    f'[ARM] TARGET_LEDGER stable='
                     f'{len(session.known_targets)} '
                     f'ids=({",".join(target.target_id for target in session.known_targets)})')
                 associations = [
@@ -116,7 +114,7 @@ class SpraySequenceMixin:
                 for logical, current, forced in associations:
                     if forced:
                         self.get_logger().info(
-                            f'[ARM][{tree}] TARGET_REASSOCIATED '
+                            '[ARM] TARGET_REASSOCIATED '
                             f'logical={logical.target_id} observed={current.target_id} '
                             f'distance={logical.distance_to(current):.1f}px')
             session.saw_disease = bool(session.known_targets)
@@ -158,7 +156,7 @@ class SpraySequenceMixin:
                             session.known_targets, logical, candidate)
 
             self.get_logger().info(
-                f'[ARM][{tree}] DETECT_QUEUE candidates={len(candidates)} '
+                f'[ARM] DETECT_QUEUE candidates={len(candidates)} '
                 f'ids=({",".join(c.target_id for c in candidates[:8])})'
                 f'{"..." if len(candidates) > 8 else ""} '
                 f'processed={len(session.processed)} '
@@ -202,7 +200,7 @@ class SpraySequenceMixin:
                         f'[ARM][QUEUE] target={target.target_id} disappeared '
                         'after exhausting safe observation views; marked unresolved')
                 self.get_logger().info(
-                    f'[ARM][{tree}] DETECT queue empty '
+                    f'[ARM] DETECT queue empty '
                     f'(processed={len(session.processed)} '
                     f'exhausted={len(session.exhausted)}) → breaking loop')
                 break
@@ -299,7 +297,7 @@ class SpraySequenceMixin:
                     f'timeout={self._vision_timeout:.1f}s '
                     f'observation_mode={self._observation_mode}')
                 ok, canceled, align_code, message = self._align_target(
-                    request.mission_id, request.tree_id, target.target_id,
+                    request.mission_id, target.target_id,
                     self._active_aim, cancel_requested,
                     feedback_callback=relay_alignment_feedback)
 
@@ -392,10 +390,10 @@ class SpraySequenceMixin:
             self._set_inference_mode('idle')
             feedback(ExecuteSpray.Feedback.SPRAYING, 0.60, 'SPRAYING')
             self.get_logger().info(
-                f'[ARM][{tree}] SPRAY target={target.target_id} '
+                f'[ARM] SPRAY target={target.target_id} '
                 f'duration={request.spray_duration:.1f}s')
             ok, canceled, message = self._spray_target(
-                request.mission_id, request.tree_id, request.spray_duration,
+                request.mission_id, request.spray_duration,
                 cancel_requested)
             if not ok:
                 if canceled:
@@ -403,7 +401,7 @@ class SpraySequenceMixin:
                 return self._recover_failure(
                     ExecuteSpray.Result.SPRAY_FAILED, message, cancel_requested)
             self.get_logger().info(
-                f'[ARM][{tree}] SPRAY target={target.target_id} done → TREATED '
+                f'[ARM] SPRAY target={target.target_id} done → TREATED '
                 f'({session.sprayed + 1} sprayed so far)')
             session.sprayed += 1
             session.processed.append(target)
@@ -411,7 +409,7 @@ class SpraySequenceMixin:
 
             if endpoint_spray:
                 self.get_logger().info(
-                    f'[ARM][{tree}] endpoint fallback sprayed; '
+                    '[ARM] endpoint fallback sprayed; '
                     'returning to observation for remaining targets')
                 # Fall through to RETURNING_TO_OBSERVE below
                 # instead of breaking the while loop, so remaining
@@ -421,7 +419,7 @@ class SpraySequenceMixin:
             feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.75,
                      'RETURNING_TO_OBSERVE')
             self.get_logger().info(
-                f'[ARM][{tree}] RETURN_TO_OBSERVE distance={self._observation_distance}m')
+                f'[ARM] RETURN_TO_OBSERVE distance={self._observation_distance}m')
             if not self._return_to_observation():
                 return ExecuteSpray.Result.HOME_FAILED, 'observation return failed'
             self._reset_fruit_tracking()
@@ -435,7 +433,7 @@ class SpraySequenceMixin:
             session.accounting(self._same_target))
         if len(session.known_targets) != detected:
             self.get_logger().info(
-                f'[ARM][{tree}] target accounting reconciled '
+                f'[ARM] target accounting reconciled '
                 f'raw_detected={len(session.known_targets)} '
                 f'logical_detected={detected}')
         if (session.sprayed != len(session.processed) or
@@ -447,7 +445,7 @@ class SpraySequenceMixin:
                 f'detected={detected} sprayed={accounted_sprayed} '
                 f'unresolved={unresolved} '
                 f'treated={len(session.processed)}')
-            self.get_logger().error(f'[ARM][{tree}] {message}')
+            self.get_logger().error(f'[ARM] {message}')
             return self._recover_failure(
                 ExecuteSpray.Result.VISION_FAILED, message, cancel_requested)
 
@@ -457,17 +455,17 @@ class SpraySequenceMixin:
 
         # 阶段尾: RETURNING_HOME
         feedback(ExecuteSpray.Feedback.RETURNING_HOME, 0.90, 'RETURNING_HOME')
-        self.get_logger().info(f'[ARM][{tree}] HOME returning to home_pose...')
+        self.get_logger().info('[ARM] HOME returning to home_pose...')
         if not self._return_home(cancel_requested):
             return (ExecuteSpray.Result.CANCELED, 'spray goal canceled') if self._aborted(
                 cancel_requested) else (ExecuteSpray.Result.HOME_FAILED, 'HOME motion failed')
-        self.get_logger().info(f'[ARM][{tree}] HOME reached')
+        self.get_logger().info('[ARM] HOME reached')
 
         # 生成任务摘要与结果
         summary = session.result_summary(
             detected, accounted_sprayed, unresolved)
         self.get_logger().info(
-            f'[ARM][{tree}] ═══ SUMMARY ═══ '
+            '[ARM] ═══ SUMMARY ═══ '
             f'distance={self._observation_distance}m '
             f'{summary}')
         code, message = final_spray_outcome(
@@ -493,7 +491,7 @@ class SpraySequenceMixin:
             return not self._aborted(cancel_requested)
         feedback(ExecuteSpray.Feedback.RETURNING_HOME, 0.88, 'POST_SPRAY_WAIT')
         self.get_logger().info(
-            f'[ARM][{self._active_tree}] POST_SPRAY_WAIT delay={delay:.1f}s')
+            f'[ARM] POST_SPRAY_WAIT delay={delay:.1f}s')
         deadline = time.monotonic() + delay
         while time.monotonic() < deadline:
             if self._aborted(cancel_requested):

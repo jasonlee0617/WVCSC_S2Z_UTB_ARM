@@ -50,7 +50,7 @@ class SprayInterlock:
         with self._lock:
             return self._motion_locked
 
-    def validate(self, mission_id, tree_id, duration, mode):
+    def validate(self, mission_id, duration, mode):
         """
         喷洒动作合法性校验。
 
@@ -59,15 +59,14 @@ class SprayInterlock:
 
         Args:
             mission_id (str): 任务 ID。
-            tree_id (str): 树 ID。
             duration (float): 喷洒请求的持续时间。
             mode (str): 喷洒模式（当前仅支持 "continuous"）。
 
         Returns:
             str: 如果校验通过，返回空字符串 ''；如果失败，返回具体的错误原因。
         """
-        if not str(mission_id).strip() or not str(tree_id).strip():
-            return 'mission_id and tree_id are required'
+        if not str(mission_id).strip():
+            return 'mission_id is required'
         if not math.isfinite(duration):
             return 'duration must be finite'
         if not self.min_duration <= duration <= self.max_duration:

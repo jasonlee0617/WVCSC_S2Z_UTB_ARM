@@ -45,7 +45,7 @@ wvcsc_perception_pipeline:
     disease_model_path: yolov8s_seg_sim.pt
     target_class_id: 0
     target_class_name: diseased_target
-    target_id_prefix: target
+    model_target_class_name: diseased_fruit
     # 仿真权重原生为 segment:{0: diseased_fruit}，ROS 输出统一为 diseased_target。
     strict_model_classes: true
 
@@ -61,7 +61,7 @@ wvcsc_perception_pipeline:
     # ----------------------------------------------------------------------
     # 4. 短期目标跟踪 (Tracking) 配置
     # ----------------------------------------------------------------------
-    # 连续两帧间如果 IoU > 0.20，判定为同一个目标，赋予相同的 `target_id`。
+    # 连续两帧间如果 IoU > 0.20，判定为同一个目标，保留同一个 UUIDv4 `target_id`。
     track_iou_threshold: 0.20
     # 如果由于相机镜头畸变导致 IoU 不再重叠，但中心距离 < 50px，也判定为同一目标。
     track_center_distance_px: 50.0

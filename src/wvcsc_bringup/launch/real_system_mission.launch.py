@@ -332,6 +332,7 @@ def _resolve_calibrations(context, *, launch_dir):
             'map': LaunchConfiguration('map'),
             'yolo_python_executable': LaunchConfiguration(
                 'yolo_python_executable'),
+            'vision_config_file': LaunchConfiguration('vision_config_file'),
             'use_keyboard': LaunchConfiguration('use_keyboard'),
             'arm_velocity_scaling': LaunchConfiguration(
                 'arm_velocity_scaling'),
@@ -367,6 +368,7 @@ def _resolve_calibrations(context, *, launch_dir):
 def generate_launch_description():
     bringup_share = get_package_share_directory('wvcsc_bringup')
     c10_share = get_package_share_directory('wvcsc_c10_camera')
+    vision_share = get_package_share_directory('wvcsc_rgb_vision')
     controller_share = get_package_share_directory('controller_pkg')
     launch_dir = os.path.join(bringup_share, 'launch')
 
@@ -420,6 +422,13 @@ def generate_launch_description():
             'yolo_python_executable',
             default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
+        DeclareLaunchArgument(
+            'vision_config_file',
+            default_value=os.path.join(
+                vision_share, 'config', 'vision_real.yaml'),
+            description=(
+                'Perception YAML forwarded to real_orchestration. Use a '
+                'separate file for detect experiments.')),
         # Qt route editing needs the navigation RViz for 2D Pose Estimate and
         # 2D Goal.  MoveIt RViz remains opt-in to avoid a second RViz window.
         DeclareLaunchArgument('use_nav_rviz', default_value='true'),

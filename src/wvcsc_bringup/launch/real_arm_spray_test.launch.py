@@ -139,7 +139,7 @@ def _launch(context, *, launch_dir):
                 'YOLO_CONFIG_DIR': '/tmp/wvcsc_ultralytics',
             },
             parameters=[
-                os.path.join(vision_share, 'config', 'vision_real.yaml'),
+                LaunchConfiguration('vision_config_file'),
                 {'use_sim_time': False},
             ],
             output='screen'),
@@ -210,6 +210,7 @@ def generate_launch_description():
     launch_dir = os.path.join(
         get_package_share_directory('wvcsc_bringup'), 'launch')
     controller_share = get_package_share_directory('controller_pkg')
+    vision_share = get_package_share_directory('wvcsc_rgb_vision')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -243,6 +244,13 @@ def generate_launch_description():
             'yolo_python_executable',
             default_value=os.path.expanduser(
                 '~/venvs/wvcsc_yolo_ros/bin/python')),
+        DeclareLaunchArgument(
+            'vision_config_file',
+            default_value=os.path.join(
+                vision_share, 'config', 'vision_real.yaml'),
+            description=(
+                'Perception YAML. Override this to evaluate a detect backend '
+                'without changing the default segment configuration.')),
         DeclareLaunchArgument('use_moveit_rviz', default_value='false'),
         DeclareLaunchArgument('use_qt_gui', default_value='true'),
         OpaqueFunction(function=partial(_launch, launch_dir=launch_dir)),

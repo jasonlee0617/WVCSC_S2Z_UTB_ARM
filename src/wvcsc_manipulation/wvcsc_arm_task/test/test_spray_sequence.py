@@ -339,7 +339,6 @@ class _ClosedLoopSequenceHarness:
                  recenter_ok=True, alignment_code=None, targets=None,
                  failed_target_ids=()):
         self._active_mission = ''
-        self._active_tree = ''
         self._spray_on_alignment_failure = fallback_enabled
         self._observation_mode = 'joint_presets'
         self._observation_candidate_index = 0
@@ -419,7 +418,7 @@ class _ClosedLoopSequenceHarness:
             '' if self._recenter_ok else 'target recenter rejected: joint_limit_margin')
 
     def _align_target(
-            self, _mission, _tree, target_id, _aim, _cancel_requested,
+            self, _mission, target_id, _aim, _cancel_requested,
             feedback_callback=None):
         self.calls.append(f'servo:{target_id}')
         if feedback_callback is not None:
@@ -450,7 +449,7 @@ class _ClosedLoopSequenceHarness:
     def _alignment_retry_allowed(_count):
         return False
 
-    def _spray_target(self, _mission, _tree, _duration, _cancel_requested):
+    def _spray_target(self, _mission, _duration, _cancel_requested):
         self.calls.append('spray')
         return True, False, ''
 
@@ -481,7 +480,7 @@ class _ClosedLoopSequenceHarness:
 def test_joint_preset_sequence_uses_recenter_then_visual_servo_before_spraying():
     task = _ClosedLoopSequenceHarness()
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, _message = task._run_sequence(
@@ -499,7 +498,7 @@ def test_joint_preset_sequence_uses_recenter_then_visual_servo_before_spraying()
 def test_completed_queue_returns_home_without_an_extra_observation_scan():
     task = _ClosedLoopSequenceHarness()
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, _message = task._run_sequence(
@@ -523,7 +522,7 @@ def test_completed_tree_waits_once_before_final_home():
         _target('target-2', 900.0, 200.0),
     ])
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, _message = task._run_sequence(
@@ -552,7 +551,7 @@ def test_no_disease_scans_all_fan_observations_then_returns_home():
 
     task = NoDiseaseHarness()
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, message = task._run_sequence(
@@ -580,7 +579,7 @@ def test_first_nonempty_detection_locks_the_tree_target_set():
 
     task = InitialSetHarness(targets=[initial])
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, message = task._run_sequence(
@@ -596,7 +595,7 @@ def test_first_nonempty_detection_locks_the_tree_target_set():
 def test_real_alignment_timeout_sprays_from_current_pose_then_rechecks_before_home():
     task = _ClosedLoopSequenceHarness(alignment_ok=False, fallback_enabled=True)
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     feedbacks = []
@@ -638,7 +637,7 @@ def test_servo_singularity_marks_only_that_target_unresolved_then_continues():
         alignment_code=AlignTarget.Result.SERVO_SINGULARITY,
         targets=[first, second], failed_target_ids={'target-1'})
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, _message = task._run_sequence(
@@ -656,7 +655,7 @@ def test_endpoint_fallback_rechecks_and_sprays_the_remaining_target_before_home(
     task = _ClosedLoopSequenceHarness(
         targets=[first, second], failed_target_ids={'target-1'})
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, message = task._run_sequence(
@@ -676,7 +675,7 @@ def test_servo_actuation_stall_sprays_current_pose_then_continues_queue():
         targets=[first, second], failed_target_ids={'target-1'},
         alignment_code=AlignTarget.Result.SERVO_ACTUATION_STALL)
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, message = task._run_sequence(
@@ -694,7 +693,7 @@ def test_servo_safety_stop_locks_without_spraying():
         alignment_ok=False, fallback_enabled=True,
         alignment_code=AlignTarget.Result.SERVO_SAFETY_STOP)
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, _message = task._run_sequence(
@@ -708,7 +707,7 @@ def test_servo_safety_stop_locks_without_spraying():
 def test_real_joint_limit_recenter_rejection_falls_back_to_safe_pose_spray():
     task = _ClosedLoopSequenceHarness(recenter_ok=False, fallback_enabled=True)
     request = SimpleNamespace(
-        mission_id='mission-1', tree_id='tree-1', spray_duration=3.0,
+        mission_id='mission-1', spray_duration=3.0,
         tree_hint=object())
 
     code, _message = task._run_sequence(
@@ -1569,7 +1568,7 @@ class _AlignHarness:
 
 def test_alignment_result_code_and_message_are_not_replaced_by_canceled_text():
     ok, canceled, code, message = _AlignHarness()._align_target(
-        'mission-1', 'tree-1', 'fruit-1',
+        'mission-1', 'fruit-1',
         (640.0, 388.0, 1280, 720, 1.30), lambda: False)
     assert not ok
     assert not canceled
@@ -1589,7 +1588,7 @@ def test_alignment_feedback_callback_is_forwarded_to_the_action_client():
          False, ''))
 
     task._align_target(
-        'mission-1', 'tree-1', 'fruit-1',
+        'mission-1', 'fruit-1',
         (640.0, 388.0, 1280, 720, 1.30), lambda: False,
         feedback_callback=callback)
 
