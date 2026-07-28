@@ -148,7 +148,7 @@ wvcsc_spray_task:
     # ----------------------------------------------------------------------
     # IK 模式才检查树根到 Alicia 基座的平面距离；joint_presets 不使用该门控。
     ik_tree_range_min_m: 0.80
-    ik_tree_range_max_m: 1.50
+    ik_tree_range_max_m: 1.60
 
     # 相机围绕 Alicia 基座的径向观察网格。它不再硬编码相机到树的喷洒距离。
     observation_camera_reach_min_m: 0.20

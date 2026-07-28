@@ -8,7 +8,7 @@ float32 spray_duration                 # 遗留的每目标喷嘴时长回退值
 # POINT_INSPECT 刻意保持为零：在点类型引入前构建的调用方依赖于默认初始化的消息，
 # 其含义为“导航至目标点，然后执行机械臂喷洒”。
 uint8 POINT_INSPECT=0                  # 到达、停稳，并可能发送 ExecuteSpray。
-uint8 POINT_TRANSIT=1                  # 纯导航点；不发送机械臂 Goal。
+uint8 POINT_TRANSIT=1                  # 广域；不发送机械臂 Goal。
 uint8 POINT_FINISH=2                   # 终端路点；强制关闭广域喷洒。
 uint8 point_type                       # 上述点类型常量之一。
 # 传入的导航段属性。仅当 Nav2 接受此点且新的里程计确认车辆开始运动后，
