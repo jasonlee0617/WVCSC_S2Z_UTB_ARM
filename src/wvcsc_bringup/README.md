@@ -7,6 +7,199 @@ source /opt/ros/humble/setup.bash
 source ~/WVCSC_S2Z_UTB_ARM/install/setup.bash
 ```
 
+## 实机启动前硬件检查命令
+
+下面的检查应在启动完整任务前单独执行。除特别标注的继电器“断开”请求外，命令均为
+只读检查。完整任务启动时也会自动运行 `preflight_check.py`；终端出现 `[FAIL]` 时不会
+启动机械臂、底盘或继电器链路。
+
+### 1. 先查看 USB、视频和串口设备
+
+```bash
+# 查看 USB 设备以及内核最近识别结果
+lsusb
+sudo dmesg --ctime | tail -n 80
+
+# C10 是 USB/V4L2 视频设备，不是串口；机械臂和 Yesense 才是串口设备
+ls -l /dev/video* /dev/ttyACM* /dev/ttyUSB* \
+  /dev/serial/by-id /dev/serial/by-path 2>/dev/null || true
+```
+
+不要只凭 `/dev/ttyACM0` 的编号判断设备身份；设备重新插拔后编号可能变化。应结合
+`udevadm info`、`/dev/serial/by-id` 或 `/dev/serial/by-path` 确认。
+
+### 2. C10 相机（视频设备）
+
+当前实机默认设备是 `/dev/video2`，默认话题是 `/camera/color/image_raw`：
+
+```bash
+CAMERA_DEVICE=/dev/video2
+test -e "$CAMERA_DEVICE" && echo "camera device exists" || echo "camera device missing"
+v4l2-ctl --list-devices
+v4l2-ctl --device="$CAMERA_DEVICE" --all
+v4l2-ctl --device="$CAMERA_DEVICE" --list-formats-ext
+udevadm info --query=all --name="$CAMERA_DEVICE" | rg 'ID_VENDOR|ID_MODEL|ID_SERIAL|DEVNAME'
+fuser -v "$CAMERA_DEVICE" || true
+```
+
+确认设备节点后，单独启动相机并检查 ROS 输出。该命令会启动相机驱动和看门狗，结束
+检查时按 `Ctrl-C`：
+
+```bash
+ros2 launch wvcsc_c10_camera c10_camera.launch.py \
+  video_device:="$CAMERA_DEVICE"
+
+ros2 topic info /camera/color/image_raw --verbose
+ros2 topic hz /camera/color/image_raw
+ros2 topic echo /camera/color/camera_info --once
+```
+
+期望看到 `sensor_msgs/msg/Image`、640×480 的 `CameraInfo` 和接近 30 Hz 的图像流。
+如果 `fuser` 显示已有相机驱动占用，应先停止旧的相机节点，避免两个 `usb_cam` 同时打开
+同一个设备。
+
+### 3. Alicia-M 机械臂串口
+
+当前实机默认机械臂串口是 `/dev/ttyACM0`，默认波特率为 `1000000`：
+
+```bash
+ARM_DEVICE=/dev/ttyACM0
+ls -l "$ARM_DEVICE"
+udevadm info --query=all --name="$ARM_DEVICE" | rg 'ID_VENDOR|ID_MODEL|ID_SERIAL|DEVNAME'
+readlink -f "$ARM_DEVICE"
+fuser -v "$ARM_DEVICE" || true
+
+# 只查看启动参数，不连接机械臂
+ros2 launch wvcsc_bringup real_arm.launch.py --show-args
+```
+
+确认没有其它程序占用串口后，再进行一次独立驱动连通性检查：
+
+```bash
+ros2 launch wvcsc_bringup real_arm.launch.py \
+  serial_port:="$ARM_DEVICE" baudrate:=1000000 use_rviz:=false
+
+# 在另一个终端检查控制器和关节状态；此检查不会主动发送喷洒 Goal
+ros2 control list_controllers
+ros2 topic info /joint_states --verbose
+ros2 topic hz /joint_states
+```
+
+不要在完整任务已经运行时重复启动 `real_arm.launch.py`，否则会争抢同一个机械臂串口。
+检查过程中不要直接向串口写入数据；复位和运动应由 Qt 或既有机械臂节点执行。
+
+### 4. 继电器串口和配置
+
+继电器使用 Modbus RTU。完整任务默认读取 `controller_pkg/config/fault.ini`，当前项目
+约定通道 1 为广域喷洒、通道 2 为机械臂喷嘴：
+
+```bash
+RELAY_CONFIG="$HOME/WVCSC_S2Z_UTB_ARM/src/controller_pkg/config/fault.ini"
+sed -n '/^\[serial\]/,/^\[/p' "$RELAY_CONFIG"
+grep -E '^(PortName|BaudRate|Address|Timeout)[[:space:]]*=' "$RELAY_CONFIG"
+
+# 解析配置中的串口后检查设备是否存在（配置中可能是 by-path 或 ttyUSB）
+RELAY_DEVICE=$(awk -F= '/^[[:space:]]*PortName[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' "$RELAY_CONFIG")
+echo "relay device: $RELAY_DEVICE"
+ls -l "$RELAY_DEVICE"
+udevadm info --query=all --name="$RELAY_DEVICE" | rg 'ID_VENDOR|ID_MODEL|ID_SERIAL|DEVNAME' || true
+fuser -v "$RELAY_DEVICE" || true
+```
+
+启动服务并确认服务类型：
+
+```bash
+ros2 launch controller_pkg controller.launch.py \
+  config_file:="$RELAY_CONFIG"
+
+ros2 service list | rg '^/relay/set$'
+ros2 service type /relay/set
+ros2 param get /relay_controller config_file
+ros2 interface show wvcsc_interfaces/srv/SetRelay
+```
+
+确认泵和喷洒装置处于安全状态后，可只发送“断开”请求验证软件命令路径。该请求会改变
+继电器状态，不要在喷洒过程中执行：
+
+```bash
+ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
+  "{channel: 1, enabled: false, duration: 0.0}"
+ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
+  "{channel: 2, enabled: false, duration: 0.0}"
+```
+
+返回 `success: true` 只代表 Modbus 命令收到并通过软件校验，不等价于已经测得继电器
+触点或泵的实际流量。
+
+### 5. Yesense IMU 串口和 `/imu` 话题
+
+当前实机 IMU 驱动是 `yesense_std_ros2`，默认串口别名 `/dev/yesense_IMU`、波特率
+`460800`，标准输出是 `/imu`。不要同时启动已停用的 `fdilink_ahrs`，否则会产生重复
+`/imu` 发布者：
+
+```bash
+IMU_DEVICE=/dev/yesense_IMU
+ls -l "$IMU_DEVICE"
+udevadm info --query=all --name="$IMU_DEVICE" | rg 'ID_VENDOR|ID_MODEL|ID_SERIAL|DEVNAME'
+readlink -f "$IMU_DEVICE"
+fuser -v "$IMU_DEVICE" || true
+
+ros2 launch yesense_std_ros2 yesense_node.launch.py
+```
+
+在另一个终端确认消息、发布者和频率：
+
+```bash
+ros2 topic info /imu --verbose
+ros2 topic echo /imu --once
+ros2 topic hz /imu
+ros2 topic echo /imu_data_extend --once
+```
+
+### 6. CAN 盒和底盘数据链
+
+当前 `can_bridge` 使用厂商 VCI CAN 盒（源码固定 `DevType=4`、设备索引 0、两个通道），
+不是 SocketCAN 接口。因此没有 `/dev/can0` 时不代表故障，`ip link show can0` 不能作为
+本项目 CAN 盒的唯一检查依据：
+
+```bash
+lsusb
+ros2 launch can_bridge can_bridge.launch.py
+```
+
+确认节点和 ROS CAN 话题：
+
+```bash
+ros2 node list | rg 'can_bridge_node'
+ros2 node info /can_bridge_node
+ros2 topic list -t | rg '/can_(rx|tx)_[12]'
+ros2 topic info /can_tx_1 --verbose
+ros2 topic info /can_tx_2 --verbose
+ros2 topic echo /can_tx_1
+```
+
+`/can_tx_1`、`/can_tx_2` 是 CAN 盒接收后发布到 ROS 的话题，`/can_rx_1`、`/can_rx_2` 是
+ROS 发往 CAN 盒的输入话题。只有总线上确实有帧时 `ros2 topic hz /can_tx_1` 才会有输出；
+没有帧不能单独判定 CAN 盒掉线。启动终端应重点检查“打开设备失败”“通道初始化失败”或
+“设备掉线”等日志。
+
+### 7. LiDAR、里程计、EKF 和 TF
+
+底盘导航至少需要点云、轮速里程计、IMU 和 EKF 输出：
+
+```bash
+ros2 node list | rg 'lslidar|wtb_car|ekf_filter_node|pointcloud_to_laserscan|yesense'
+ros2 topic info /point_cloud_raw --verbose
+ros2 topic hz /point_cloud_raw
+ros2 topic echo /car_odom --once
+ros2 topic echo /ekf_odom --once
+ros2 topic hz /ekf_odom
+ros2 run tf2_ros tf2_echo odom base_footprint
+```
+
+如果 `/imu`、`/car_odom` 或 `/point_cloud_raw` 没有数据，先修复对应硬件链路，再启动
+Nav2；不要只根据 RViz 窗口已经打开就判断导航输入正常。
+
 ## 完整任务：Qt 选点、导航、喷洒
 
 ```bash
