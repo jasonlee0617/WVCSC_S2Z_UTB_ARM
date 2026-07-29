@@ -33,99 +33,44 @@ def transform_point(point, translation, quat_xyzw):
     )
 
 
-def camera_look_at_pose(
-        tree_root, aim_height, camera_height, observation_distance,
+def camera_pose_look_at_tree_center(
+        tree_root, camera_reach, camera_height, center_height_m,
         azimuth_offset_degrees=0.0):
-    """生成 optical ``+Z`` 指向树冠中心的相机位姿。
+    """Place one C10 candidate on the arm radial grid and look at tree centre.
 
-    ``tree_root`` 是病树根部在机械臂 base 下的位置。``camera_height`` 是相机
-    光心相对机械臂 base 的 Z 高度；相机位于树与机械臂之间，``observation_distance``
-    为水平离树距离。树过近时直接拒绝，防止生成穿过树干或机械臂自身不可达的候选位姿。
-
-    **工程意义**：机械臂末端相机不是末端工具点（tool0），而是挂载的深度相机。此函数
-    计算的是相机坐标系在机械臂基座下的绝对坐标和旋转，随后需要经过工具外参逆变换，
-    才能得到真正的 `tool0` 期望位置。
+    ``center_height_m`` is measured upward from the recorded tree root.  The
+    resulting optical ``+Z`` points at that centre, so the primary candidate
+    places it at the calibrated camera principal point without any tree-range
+    admission gate or empirical pitch interpolation.
     """
-    tx, ty, tz = (float(value) for value in tree_root)
-    aim_height = float(aim_height)
-    camera_height = float(camera_height)
-    observation_distance = float(observation_distance)
-    azimuth_offset_degrees = float(azimuth_offset_degrees)
-    if not all(math.isfinite(value) for value in (
-            tx, ty, tz, aim_height, camera_height, observation_distance,
-            azimuth_offset_degrees)):
-        raise ValueError('observation values must be finite')
-    if aim_height <= 0.0 or camera_height <= 0.0 or observation_distance <= 0.0:
-        raise ValueError('observation heights and distance must be positive')
-    horizontal_distance = math.hypot(tx, ty)
-    if horizontal_distance <= observation_distance + 0.05:
-        raise ValueError('tree hint is too close for the requested observation distance')
-
-    # 计算方位角，并叠加扇扫偏置
-    bearing = math.atan2(ty, tx) + math.radians(azimuth_offset_degrees)
-    forward_x = math.cos(bearing)
-    forward_y = math.sin(bearing)
-
-    # 相机位于树与机械臂连线之间，保持固定作业距离
-    camera = (
-        tx - observation_distance * forward_x,
-        ty - observation_distance * forward_y,
-        camera_height,
-    )
-    target_delta = (
-        tx - camera[0],
-        ty - camera[1],
-        tz + aim_height - camera[2],
-    )
-    target_distance = math.sqrt(sum(value * value for value in target_delta))
-
-    # 构造相机的 Optical 姿态（+Z 指向目标）
-    optical_z = tuple(value / target_distance for value in target_delta)
-    optical_x = (forward_y, -forward_x, 0.0)
-    optical_y = (
-        optical_z[1] * optical_x[2] - optical_z[2] * optical_x[1],
-        optical_z[2] * optical_x[0] - optical_z[0] * optical_x[2],
-        optical_z[0] * optical_x[1] - optical_z[1] * optical_x[0],
-    )
-    # 旋转矩阵的三列分别是 optical X/Y/Z 轴在机械臂 base 坐标系中的表达。
-    matrix = (
-        (optical_x[0], optical_y[0], optical_z[0]),
-        (optical_x[1], optical_y[1], optical_z[1]),
-        (optical_x[2], optical_y[2], optical_z[2]),
-    )
-    return camera, quaternion_from_matrix(matrix)
-
-
-def camera_pose_from_bearing(
-        tree_root, camera_reach, camera_height, pitch_degrees,
-        yaw_offset_degrees=0.0):
-    """Create an IK observation pose without classifying tree/leaf height.
-
-    The camera is placed on a short radial grid around ``alicia_base_link``.
-    Its optical +Z points along the tree bearing with a distance-adaptive
-    downward pitch.  Unlike the retired fruit-zone envelope this contains no
-    target-height or fixed camera-to-tree acceptance gate.
-    """
-    tree_x, tree_y, _tree_z = (float(value) for value in tree_root)
+    tree_x, tree_y, tree_z = (float(value) for value in tree_root)
     camera_reach = float(camera_reach)
     camera_height = float(camera_height)
-    pitch = math.radians(float(pitch_degrees))
-    yaw = math.atan2(tree_y, tree_x) + math.radians(float(yaw_offset_degrees))
-    values = (tree_x, tree_y, camera_reach, camera_height, pitch, yaw)
+    center_height_m = float(center_height_m)
+    yaw = math.atan2(tree_y, tree_x) + math.radians(
+        float(azimuth_offset_degrees))
+    values = (
+        tree_x, tree_y, tree_z, camera_reach, camera_height,
+        center_height_m, yaw)
     if (not all(math.isfinite(value) for value in values) or
-            math.hypot(tree_x, tree_y) <= 0.0 or camera_reach <= 0.0):
-        raise ValueError('bearing observation inputs are invalid')
+            math.hypot(tree_x, tree_y) <= 0.0 or camera_reach <= 0.0 or
+            camera_height <= 0.0 or center_height_m <= 0.0):
+        raise ValueError('tree-centre observation inputs are invalid')
     camera = (
         camera_reach * math.cos(yaw),
         camera_reach * math.sin(yaw),
         camera_height,
     )
-    optical_z = (
-        math.cos(pitch) * math.cos(yaw),
-        math.cos(pitch) * math.sin(yaw),
-        math.sin(pitch),
-    )
-    optical_x = (math.sin(yaw), -math.cos(yaw), 0.0)
+    optical_z = _unit_vector((
+        tree_x - camera[0],
+        tree_y - camera[1],
+        tree_z + center_height_m - camera[2],
+    ))
+    horizontal = math.hypot(optical_z[0], optical_z[1])
+    if horizontal <= 1e-9:
+        raise ValueError('tree-centre look-at direction is vertical')
+    # Keep the optical roll stable while maintaining an orthonormal camera frame.
+    optical_x = (optical_z[1] / horizontal, -optical_z[0] / horizontal, 0.0)
     optical_y = (
         optical_z[1] * optical_x[2] - optical_z[2] * optical_x[1],
         optical_z[2] * optical_x[0] - optical_z[0] * optical_x[2],
@@ -137,6 +82,43 @@ def camera_pose_from_bearing(
         (optical_x[2], optical_y[2], optical_z[2]),
     )
     return camera, quaternion_from_matrix(matrix)
+
+
+def nozzle_pose_from_tool_pose(
+        tool_position, tool_quat_xyzw,
+        tool_to_nozzle_translation, tool_to_nozzle_quat_xyzw):
+    """Compose a planned ``tool0`` pose with its fixed spray-nozzle mount."""
+    tool_position = tuple(float(value) for value in tool_position)
+    tool_quat_xyzw = normalize_quaternion(tool_quat_xyzw)
+    nozzle_offset = rotate_vector(tool_to_nozzle_translation, tool_quat_xyzw)
+    return (
+        tuple(tool_position[index] + nozzle_offset[index] for index in range(3)),
+        quaternion_multiply(tool_quat_xyzw, tool_to_nozzle_quat_xyzw),
+    )
+
+
+def nozzle_tree_plane_metrics(tree_root, nozzle_position, nozzle_quat_xyzw):
+    """Return perpendicular nozzle standoff and forward ray to tree plane."""
+    tree_x, tree_y, _tree_z = (float(value) for value in tree_root)
+    planar_range = math.hypot(tree_x, tree_y)
+    if not math.isfinite(planar_range) or planar_range <= 1e-9:
+        raise ValueError('tree planar range is invalid')
+    normal = (tree_x / planar_range, tree_y / planar_range, 0.0)
+    nozzle_position = tuple(float(value) for value in nozzle_position)
+    if not all(math.isfinite(value) for value in nozzle_position):
+        raise ValueError('nozzle position is invalid')
+    distance_m = planar_range - sum(
+        normal[index] * nozzle_position[index] for index in range(3))
+    axis = rotate_vector((0.0, 0.0, 1.0), nozzle_quat_xyzw)
+    forward = sum(normal[index] * axis[index] for index in range(3))
+    if not math.isfinite(distance_m) or not math.isfinite(forward):
+        raise ValueError('nozzle plane geometry is invalid')
+    if forward <= 0.2:
+        raise ValueError('nozzle axis does not face the tree plane')
+    intersection_m = distance_m / forward
+    if distance_m <= 0.0 or intersection_m <= 0.0:
+        raise ValueError('tree plane is not in front of the nozzle')
+    return distance_m, intersection_m
 
 
 def camera_orientation_for_pixel(
@@ -434,17 +416,12 @@ class ObservationOptimizer:
             raise ValueError('URDF does not provide limits for every arm joint')
 
     def generate(self, tree_in_base, camera_mount, camera):
-        """Enumerate the radial IK grid without height-zone filtering."""
+        """Enumerate radial candidates whose optical axis looks at tree centre."""
         tree_x, tree_y, _tree_z = (float(value) for value in tree_in_base)
-        horizontal_distance = math.hypot(tree_x, tree_y)
-        near_range = float(self._config['tree_range_min_m'])
-        far_range = float(self._config['tree_range_max_m'])
-        progress = min(1.0, max(
-            0.0, (horizontal_distance - near_range) / (far_range - near_range)))
-        pitch = (
-            float(self._config['pitch_near_deg']) + progress * (
-                float(self._config['pitch_far_deg']) -
-                float(self._config['pitch_near_deg'])))
+        planar_range = math.hypot(tree_x, tree_y)
+        if not math.isfinite(planar_range) or planar_range <= 1e-9:
+            raise ValueError('tree planar range is invalid')
+        normal = (tree_x / planar_range, tree_y / planar_range, 0.0)
         candidates = []
         for reach in _values(
                 self._config['camera_reach_min_m'],
@@ -455,13 +432,19 @@ class ObservationOptimizer:
                     self._config['camera_height_max_m'],
                     self._config['camera_height_step_m']):
                 for azimuth in self._config['azimuth_offsets_deg']:
-                    camera_position, camera_quat = camera_pose_from_bearing(
-                        tree_in_base, reach, height, pitch, azimuth)
+                    camera_position, camera_quat = camera_pose_look_at_tree_center(
+                        tree_in_base, reach, height,
+                        self._config['center_height_m'], azimuth)
                     tool_position, tool_quat = tool_pose_from_camera_pose(
                         camera_position, camera_quat, camera_mount[0], camera_mount[1])
-                    optical_depth = (
-                        (horizontal_distance - reach) /
-                        max(1e-6, math.cos(math.radians(pitch))))
+                    optical_axis = rotate_vector((0.0, 0.0, 1.0), camera_quat)
+                    denominator = sum(
+                        normal[index] * optical_axis[index] for index in range(3))
+                    numerator = planar_range - sum(
+                        normal[index] * camera_position[index] for index in range(3))
+                    if denominator <= 1e-6 or numerator <= 0.0:
+                        continue
+                    optical_depth = numerator / denominator
                     candidates.append(build_candidate(
                         candidate_id=(
                             f'r{reach:.2f}_h{height:.2f}_a{float(azimuth):+.0f}'),
@@ -476,9 +459,10 @@ class ObservationOptimizer:
                         visible_margin_px=math.inf,
                         visible_fraction=1.0,
                         projected_bbox=(0.0, 0.0, 0.0, 0.0),
-                        target_u_px=float(camera[4]) / 2.0,
-                        target_v_px=float(camera[5]) / 2.0,
+                        target_u_px=float(camera[2]),
+                        target_v_px=float(camera[3]),
                         rejection_reason='',
+                        camera_reach_m=reach,
                     ))
         return candidates
 
@@ -512,6 +496,9 @@ class ObservationOptimizer:
              if candidate.visible and not candidate.rejection_reason),
             key=lambda candidate: (
                 candidate.min_joint_margin_rad < preferred_margin,
+                candidate.nozzle_plane_error_m > float(
+                    self._config['nozzle_plane_tolerance_m']),
+                candidate.nozzle_plane_error_m,
                 candidate.condition_number,
                 -candidate.min_joint_margin_rad,
                 candidate.joint_motion_norm,
@@ -532,7 +519,8 @@ class ObservationOptimizer:
         center.selection_phase = 'center_initial'
         same_view_sides = [
             candidate for candidate in sides
-            if math.isclose(candidate.distance_m, center.distance_m, abs_tol=1e-6)
+            if math.isclose(candidate.camera_reach_m, center.camera_reach_m,
+                            abs_tol=1e-6)
             and math.isclose(candidate.camera_height_m, center.camera_height_m,
                              abs_tol=1e-6)
         ]
@@ -609,10 +597,11 @@ class ObservationOptimizer:
 
 __all__ = (
     'ObservationOptimizer',
-    'camera_look_at_pose',
     'camera_orientation_for_pixel',
-    'camera_pose_from_bearing',
+    'camera_pose_look_at_tree_center',
     'normalize_quaternion',
+    'nozzle_pose_from_tool_pose',
+    'nozzle_tree_plane_metrics',
     'quaternion_conjugate',
     'quaternion_from_matrix',
     'quaternion_multiply',

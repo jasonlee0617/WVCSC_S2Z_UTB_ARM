@@ -146,9 +146,8 @@ wvcsc_spray_task:
     # ----------------------------------------------------------------------
     # 11. 观察位姿参数 (Observation Optimizer)
     # ----------------------------------------------------------------------
-    # IK 模式才检查树根到 Alicia 基座的平面距离；joint_presets 不使用该门控。
-    ik_tree_range_min_m: 0.80
-    ik_tree_range_max_m: 1.60
+    # 树叶主要分布在树根以上 0.80--1.80 m；首个 Look-at 观察位对准中点。
+    observation_center_height_m: 1.30
 
     # 相机围绕 Alicia 基座的径向观察网格。它不再硬编码相机到树的喷洒距离。
     observation_camera_reach_min_m: 0.20
@@ -159,9 +158,12 @@ wvcsc_spray_task:
     camera_height_max_m: 0.40
     camera_height_step_m: 0.10
     observation_azimuth_offsets_deg: [0.0, -12.0, 12.0]
-    # 树距 0.8m 时向下 -35°，1.5m 时向下 -20°，中间线性插值。
-    observation_pitch_near_deg: -35.0
-    observation_pitch_far_deg: -20.0
+    # 喷嘴到树的垂直目标平面距离仅用于候选优先级；碰撞、限位和奇异性仍是硬门控。
+    spray_nozzle_frame: spray_nozzle_link
+    observation_nozzle_plane_min_m: 0.20
+    observation_nozzle_plane_max_m: 2.00
+    observation_preferred_nozzle_plane_distance_m: 1.00
+    observation_nozzle_plane_tolerance_m: 0.05
 
     # 系统输入的等待与搜索超时限制。
     observation_input_timeout_sec: 2.0

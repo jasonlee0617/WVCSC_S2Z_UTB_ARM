@@ -230,31 +230,6 @@ def valid_work_side(point):
     return None
 
 
-def ik_recording_range_error(point, observation_mode, minimum_m=0.85,
-                             maximum_m=1.45):
-    """Return a recording-time IK safety error for an inspection point.
-
-    RViz records the arm-base anchor and the tree centre independently.  The
-    arm keeps its wider runtime interlock (0.80--1.50 m), while this editor
-    leaves a 5 cm margin on both sides so an operator cannot submit a task
-    which is already on the hard limit before Nav2 docking variation.
-    """
-    if (str(observation_mode).strip().lower() != 'ik' or
-            point.point_type != POINT_INSPECT):
-        return None
-    distance = math.hypot(float(point.tree_x_m), float(point.tree_y_m))
-    if not math.isfinite(distance):
-        return 'IK模式病株相对机械臂基座距离无效'
-    minimum_m = float(minimum_m)
-    maximum_m = float(maximum_m)
-    if minimum_m <= distance <= maximum_m:
-        return None
-    return (
-        f'IK模式病株距离 {distance:.2f} m 超出录入范围 '
-        f'{minimum_m:.2f}–{maximum_m:.2f} m；'
-        '请重新设置机械臂基座停靠位与树中心')
-
-
 def simulation_parking_clearance_m(arm_anchor_pose, tree_pose):
     """Return clearance from the padded vehicle footprint to one tree's map cost.
 
@@ -475,11 +450,7 @@ class Nav2QtNode(Node):
         self.declare_parameter(
             'default_arm_spray_duration_sec',
             DEFAULT_ARM_SPRAY_DURATION_SEC)
-        # IK mode has a stricter recording envelope than the arm's runtime
-        # interlock.  Joint presets deliberately bypass this radial check.
         self.declare_parameter('observation_mode', 'joint_presets')
-        self.declare_parameter('ik_recording_range_min_m', 0.85)
-        self.declare_parameter('ik_recording_range_max_m', 1.45)
         self.map_frame = str(self.get_parameter('map_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.require_global_relocalization_service = bool(
@@ -490,15 +461,8 @@ class Nav2QtNode(Node):
             self.get_parameter('default_arm_spray_duration_sec').value)
         self.observation_mode = str(
             self.get_parameter('observation_mode').value).strip().lower()
-        self.ik_recording_range_min_m = float(
-            self.get_parameter('ik_recording_range_min_m').value)
-        self.ik_recording_range_max_m = float(
-            self.get_parameter('ik_recording_range_max_m').value)
         if self.observation_mode not in {'ik', 'joint_presets'}:
             raise ValueError('observation_mode must be ik or joint_presets')
-        if not (0.0 < self.ik_recording_range_min_m <
-                self.ik_recording_range_max_m):
-            raise ValueError('invalid IK recording range')
         if not (MIN_ARM_SPRAY_DURATION_SEC <=
                 self.default_arm_spray_duration_sec <=
                 MAX_ARM_SPRAY_DURATION_SEC):
@@ -607,11 +571,6 @@ class Nav2QtNode(Node):
         request.return_home_after_mission = return_home_after_mission
         for index, point in enumerate(points, start=1):
             error = valid_work_side(point)
-            if error is None:
-                error = ik_recording_range_error(
-                    point, getattr(self, 'observation_mode', 'joint_presets'),
-                    getattr(self, 'ik_recording_range_min_m', 0.85),
-                    getattr(self, 'ik_recording_range_max_m', 1.45))
             if error is None:
                 error = simulation_parking_clearance_error(
                     point,
@@ -1266,24 +1225,17 @@ class Nav2Gui(QWidget):
             arm_spray_duration_sec=self.editor.spray_duration,
             tree_pose=copy_pose(self.candidate),
         )
-        error = ik_recording_range_error(
-            prospective, self.node.observation_mode,
-            self.node.ik_recording_range_min_m,
-            self.node.ik_recording_range_max_m)
-        if error is None:
-            error = simulation_parking_clearance_error(
-                prospective,
-                getattr(self.node, 'simulation_parking_clearance_check', False))
+        error = simulation_parking_clearance_error(
+            prospective,
+            getattr(self.node, 'simulation_parking_clearance_check', False))
         if error is not None:
             # Do not leave a stale pending docking point that could later be
             # paired with an unrelated tree click.
             self.pending_dock_pose = None
             self.pending_dock_sequence = 0
-            title = ('仿真停车位不合格'
-                     if error.startswith('仿真停车位过近')
-                     else 'IK 作业距离不合格')
+            title = '仿真停车位不合格'
             self.capture_label.setText(
-                '采集状态: 停车位或IK作业距离不合格；请重新记录停靠位')
+                '采集状态: 停车位不合格；请重新记录停靠位')
             self._log(f'拒绝病株点: {error}')
             QMessageBox.warning(self, title, error)
             self._publish_markers()
@@ -1402,14 +1354,9 @@ class Nav2Gui(QWidget):
     def _update_table(self):
         self.table.setRowCount(len(self.editor.points))
         for row, point in enumerate(self.editor.points):
-            range_error = ik_recording_range_error(
-                point, getattr(self.node, 'observation_mode', 'joint_presets'),
-                getattr(self.node, 'ik_recording_range_min_m', 0.85),
-                getattr(self.node, 'ik_recording_range_max_m', 1.45))
-            if range_error is None:
-                range_error = simulation_parking_clearance_error(
-                    point,
-                    getattr(self.node, 'simulation_parking_clearance_check', False))
+            range_error = simulation_parking_clearance_error(
+                point,
+                getattr(self.node, 'simulation_parking_clearance_check', False))
             point_type = self._point_type_label(point.point_type)
             static_cells = (
                 (0, QTableWidgetItem(str(row + 1))),

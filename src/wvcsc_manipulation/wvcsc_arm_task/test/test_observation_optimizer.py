@@ -2,7 +2,10 @@ import math
 
 import pytest
 
-from wvcsc_arm_task.observation.ik_observation import ObservationOptimizer
+from wvcsc_arm_task.observation.ik_observation import (
+    ObservationOptimizer,
+    rotation_matrix_from_quaternion,
+)
 
 
 ROBOT = '''
@@ -21,8 +24,6 @@ ROBOT = '''
 
 def _optimizer(**overrides):
     config = {
-        'tree_range_min_m': 0.8,
-        'tree_range_max_m': 1.5,
         'camera_reach_min_m': 0.2,
         'camera_reach_max_m': 0.4,
         'camera_reach_step_m': 0.1,
@@ -30,8 +31,8 @@ def _optimizer(**overrides):
         'camera_height_max_m': 0.4,
         'camera_height_step_m': 0.1,
         'azimuth_offsets_deg': (0.0,),
-        'pitch_near_deg': -35.0,
-        'pitch_far_deg': -20.0,
+        'center_height_m': 1.3,
+        'nozzle_plane_tolerance_m': 0.05,
         'max_condition_number': 12.0,
         'min_joint_margin_rad': 0.15,
         'preferred_joint_margin_rad': 0.35,
@@ -48,7 +49,7 @@ def _candidates(optimizer):
         (600.0, 600.0, 640.0, 360.0, 1280, 720))
 
 
-def test_candidates_use_the_radial_grid_without_target_height_filtering():
+def test_candidates_use_the_radial_grid_and_look_at_tree_centre():
     candidates = _candidates(_optimizer())
 
     assert candidates
@@ -57,6 +58,15 @@ def test_candidates_use_the_radial_grid_without_target_height_filtering():
     assert all(isinstance(candidate.visible, bool) for candidate in candidates)
     assert all(candidate.visible_fraction == pytest.approx(1.0)
                for candidate in visible)
+    for candidate in visible:
+        optical_z = tuple(row[2] for row in
+                          rotation_matrix_from_quaternion(candidate.camera_quat))
+        direction = (2.0 - candidate.camera_position[0],
+                     -candidate.camera_position[1],
+                     1.3 - candidate.camera_position[2])
+        length = math.sqrt(sum(value * value for value in direction))
+        assert optical_z == pytest.approx(
+            tuple(value / length for value in direction))
 
 
 def test_off_center_c10_intrinsics_keep_runtime_observation_candidates():
@@ -79,8 +89,8 @@ def test_off_center_c10_intrinsics_keep_runtime_observation_candidates():
                for candidate in candidates)
     assert all(0.20 <= candidate.camera_position[2] <= 0.40
                for candidate in visible)
-    assert all(candidate.target_u_px == pytest.approx(640.0) for candidate in visible)
-    assert all(candidate.target_v_px == pytest.approx(360.0) for candidate in visible)
+    assert all(candidate.target_u_px == pytest.approx(656.42746) for candidate in visible)
+    assert all(candidate.target_v_px == pytest.approx(525.74486) for candidate in visible)
 
 
 def test_camera_height_is_measured_from_the_arm_base():
@@ -155,7 +165,7 @@ def test_tree_scan_marks_lateral_fallback_when_no_center_is_safe():
     assert ordered[0].azimuth_deg == -12.0
 
 
-def test_tree_height_does_not_change_candidate_count():
+def test_tree_height_changes_look_at_orientation_without_changing_grid_size():
     optimizer = _optimizer(azimuth_offsets_deg=(0.0, -12.0, 12.0))
     mount = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0))
     camera = (600.0, 600.0, 640.0, 360.0, 1280, 720)
@@ -165,6 +175,7 @@ def test_tree_height_does_not_change_candidate_count():
 
     assert len(low) == len(high)
     assert all(candidate.visible for candidate in low + high)
+    assert low[0].camera_quat != pytest.approx(high[0].camera_quat)
 
 
 def test_joint_margin_rejects_a_near_limit_ik_solution():

@@ -13,16 +13,10 @@ from tf2_ros import TransformException
 
 from .ik_observation import (
     ObservationOptimizer,
-    camera_look_at_pose,
     camera_orientation_for_pixel,
-    camera_pose_from_bearing,
-    normalize_quaternion,
-    quaternion_conjugate,
-    quaternion_from_matrix,
-    quaternion_multiply,
+    nozzle_pose_from_tool_pose,
+    nozzle_tree_plane_metrics,
     recenter_camera_pose,
-    rotate_vector,
-    rotation_matrix_from_quaternion,
     tool_pose_from_camera_pose,
     transform_point,
 )
@@ -443,15 +437,6 @@ class ObservationFlowMixin:
         if self._observation_mode == 'joint_presets':
             if not self._select_joint_preset_side(tree_in_base):
                 return False
-        else:
-            range_m = math.hypot(tree_in_base[0], tree_in_base[1])
-            minimum = float(self._observation_config['tree_range_min_m'])
-            maximum = float(self._observation_config['tree_range_max_m'])
-            if not minimum <= range_m <= maximum:
-                self._observation_failure_reason = (
-                    'ik_tree_range_out_of_range '
-                    f'(range={range_m:.3f}m, allowed={minimum:.3f}-{maximum:.3f}m)')
-                return False
 
         try:
             # 粗对准仍需已加载的 tool0 -> camera 外参；预设扫描本身不使用它求 IK。
@@ -472,6 +457,21 @@ class ObservationFlowMixin:
             if not self._prepare_joint_preset_observation_candidates():
                 return False
             return self._move_to_next_observation()
+        try:
+            nozzle_transform = self._tf_buffer.lookup_transform(
+                'tool0', self._observation_config['nozzle_frame'],
+                rclpy.time.Time())
+        except TransformException as error:
+            self._observation_failure_reason = f'observation_tf_failed: {error}'
+            self.get_logger().error(f'[ARM] cannot load nozzle mount: {error}')
+            return False
+        nozzle_translation = nozzle_transform.transform.translation
+        nozzle_rotation = nozzle_transform.transform.rotation
+        self._nozzle_mount = (
+            (nozzle_translation.x, nozzle_translation.y, nozzle_translation.z),
+            (nozzle_rotation.x, nozzle_rotation.y,
+             nozzle_rotation.z, nozzle_rotation.w),
+        )
         if not self._prepare_observation_candidates():
             return False
         return self._move_to_next_observation()
@@ -503,6 +503,8 @@ class ObservationFlowMixin:
                     candidate, dict(zip(ik.name, ik.position)), current_joints)
             except (KeyError, TypeError, ValueError):
                 candidate.rejection_reason = 'incomplete_ik_state'
+            if not candidate.rejection_reason:
+                self._evaluate_nozzle_plane_candidate(candidate)
         self._observation_candidates = self._observation_optimizer.order_for_tree_scan(
             candidates)[:self.config.observation_max_plans]
         ik_count = sum(candidate.ik_joints is not None for candidate in candidates)
@@ -534,6 +536,43 @@ class ObservationFlowMixin:
                 '[ARM][OBSERVE] no safe center observation candidate; '
                 f'falling back to azimuth={candidate.azimuth_deg:+.0f} deg')
         return True
+
+    def _evaluate_nozzle_plane_candidate(self, candidate):
+        """Keep only candidates whose planned nozzle faces the tree plane."""
+        try:
+            nozzle_position, nozzle_quat = nozzle_pose_from_tool_pose(
+                candidate.tool_position, candidate.tool_quat,
+                self._nozzle_mount[0], self._nozzle_mount[1])
+            distance_m, intersection_m = nozzle_tree_plane_metrics(
+                self._tree_in_base, nozzle_position, nozzle_quat)
+        except (TypeError, ValueError) as error:
+            candidate.rejection_reason = f'nozzle_plane_invalid:{error}'
+            return
+        minimum = self._observation_config['nozzle_plane_min_m']
+        maximum = self._observation_config['nozzle_plane_max_m']
+        if not minimum <= distance_m <= maximum:
+            candidate.rejection_reason = 'nozzle_plane_distance_out_of_bounds'
+            return
+        candidate.nozzle_plane_distance_m = distance_m
+        candidate.nozzle_axis_plane_intersection_m = intersection_m
+        candidate.nozzle_plane_error_m = abs(
+            distance_m -
+            self._observation_config['preferred_nozzle_plane_distance_m'])
+
+    def _actual_nozzle_plane_metrics(self):
+        """Read the executed nozzle pose for diagnostics after MoveIt motion."""
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self._base_frame, self._observation_config['nozzle_frame'],
+                rclpy.time.Time()).transform
+            return nozzle_tree_plane_metrics(
+                self._tree_in_base,
+                (transform.translation.x, transform.translation.y,
+                 transform.translation.z),
+                (transform.rotation.x, transform.rotation.y,
+                 transform.rotation.z, transform.rotation.w)), ''
+        except (TransformException, ValueError) as error:
+            return None, str(error)
 
     def _move_to_next_observation(self, excluded_indices=None):
         excluded = set(excluded_indices or ())
@@ -576,6 +615,20 @@ class ObservationFlowMixin:
                         'orientation_tolerance_rad']):
                 self._observation_distance = candidate.distance_m
                 self._observation_pose = (candidate.tool_position, candidate.tool_quat)
+                actual_nozzle, nozzle_error = (None, 'not sampled')
+                actual_metrics = getattr(
+                    self, '_actual_nozzle_plane_metrics', None)
+                if actual_metrics is not None:
+                    actual_nozzle, nozzle_error = actual_metrics()
+                nozzle_text = (
+                    f' nozzle_plane={actual_nozzle[0]:.2f}m'
+                    f' ray={actual_nozzle[1]:.2f}m'
+                    if actual_nozzle is not None else
+                    f' nozzle_plane=unavailable({nozzle_error})')
+                planned_nozzle_distance = getattr(
+                    candidate, 'nozzle_plane_distance_m', math.nan)
+                planned_nozzle_error = getattr(
+                    candidate, 'nozzle_plane_error_m', math.nan)
                 self.get_logger().info(
                     f'[ARM][ALIGN] selected observation candidate '
                     f'index={self._observation_candidate_index} '
@@ -583,8 +636,11 @@ class ObservationFlowMixin:
                     f'phase={getattr(candidate, "selection_phase", "recovery")} '
                     f'camera_height_in_base={candidate.camera_height_m:.2f} m '
                     f'camera_z_in_base={candidate.camera_position[2]:.2f} m '
+                    f'planned_nozzle_plane={planned_nozzle_distance:.2f} m '
+                    f'nozzle_error={planned_nozzle_error:.2f} m '
                     f'condition={candidate.condition_number:.2f} '
-                    f'joint_margin={candidate.min_joint_margin_rad:.2f}')
+                    f'joint_margin={candidate.min_joint_margin_rad:.2f}'
+                    f'{nozzle_text}')
                 return True
             if candidate.rejection_reason == 'moveit_execution_failed':
                 self.get_logger().warn(

@@ -131,12 +131,11 @@ def test_manual_existing_save_path_gets_a_numbered_sibling(tmp_path):
         tmp_path / 'navigation_points_01.json')
 
 
-def test_qt_launch_exposes_the_ik_recording_admission_policy():
+def test_qt_launch_has_no_ik_recording_distance_admission_policy():
     source = LAUNCH.read_text(encoding='utf-8')
 
     assert "DeclareLaunchArgument('observation_mode', default_value='joint_presets')" in source
-    assert "DeclareLaunchArgument('ik_recording_range_min_m', default_value='0.85')" in source
-    assert "DeclareLaunchArgument('ik_recording_range_max_m', default_value='1.45')" in source
+    assert 'ik_recording_range' not in source
     assert "'simulation_parking_clearance_check', default_value='false'" in source
     assert "'default_arm_spray_duration_sec', default_value='3.0'" in source
     assert 'show_sim_spray_status' not in source
@@ -263,8 +262,6 @@ def test_all_operator_point_types_submit_vehicle_base_goals():
     class _RequestBuilder:
         map_frame = 'map'
         observation_mode = 'joint_presets'
-        ik_recording_range_min_m = 0.85
-        ik_recording_range_max_m = 1.45
         get_clock = staticmethod(_Clock)
         _point_constant = staticmethod(nav2_qt.Nav2QtNode._point_constant)
 
@@ -360,20 +357,7 @@ def test_inspect_side_mismatch_is_rejected_before_mission_submission():
     assert '不一致' in nav2_qt.valid_work_side(point)
 
 
-def test_ik_recording_range_has_a_margin_but_joint_presets_bypass_it():
-    point = nav2_qt.WorkPoint(
-        _pose(0.0, 0.0), tree_x_m=0.0, tree_y_m=-1.50,
-        point_type=nav2_qt.POINT_INSPECT,
-        work_side=nav2_qt.WORK_SIDE_RIGHT)
-
-    error = nav2_qt.ik_recording_range_error(point, 'ik', 0.85, 1.45)
-    assert error is not None
-    assert '1.50' in error
-    assert nav2_qt.ik_recording_range_error(
-        point, 'joint_presets', 0.85, 1.45) is None
-
-
-def test_ik_request_rejects_an_out_of_range_inspection_point():
+def test_ik_request_accepts_an_out_of_range_inspection_point_for_motion_planning():
     class _Clock:
         @staticmethod
         def now():
@@ -382,8 +366,6 @@ def test_ik_request_rejects_an_out_of_range_inspection_point():
     class _RequestBuilder:
         map_frame = 'map'
         observation_mode = 'ik'
-        ik_recording_range_min_m = 0.85
-        ik_recording_range_max_m = 1.45
         get_clock = staticmethod(_Clock)
         _point_constant = staticmethod(nav2_qt.Nav2QtNode._point_constant)
 
@@ -391,10 +373,9 @@ def test_ik_request_rejects_an_out_of_range_inspection_point():
         _pose(3.0, 0.5), tree_x_m=0.0, tree_y_m=-1.50,
         point_type=nav2_qt.POINT_INSPECT,
         work_side=nav2_qt.WORK_SIDE_RIGHT)
-    with pytest.raises(ValueError, match='超出录入范围'):
-        nav2_qt.Nav2QtNode.build_manual_request(
-            _RequestBuilder(), _pose(0.0, 0.0), [point],
-            False, 'ik_range')
+    request = nav2_qt.Nav2QtNode.build_manual_request(
+        _RequestBuilder(), _pose(0.0, 0.0), [point], False, 'ik_range')
+    assert len(request.points) == 1
 
 
 def test_vehicle_route_marker_connects_converted_vehicle_goals():

@@ -45,10 +45,8 @@ wvcsc_spray_task:
     spray_action_name: /spray/execute
     vision_action_name: /vision/align_target
 
-    # Preset mode does not gate on tree range; keep valid IK defaults for
-    # an explicit future IK launch without encoding crop/leaf height.
-    ik_tree_range_min_m: 0.80
-    ik_tree_range_max_m: 1.50
+    # 树叶主要分布在树根以上 0.80--1.80 m；首个 Look-at 观察位对准中点。
+    observation_center_height_m: 1.30
     observation_camera_reach_min_m: 0.20
     observation_camera_reach_max_m: 0.40
     observation_camera_reach_step_m: 0.10
@@ -57,8 +55,12 @@ wvcsc_spray_task:
     camera_height_max_m: 0.30
     camera_height_step_m: 0.10
     observation_azimuth_offsets_deg: [0.0, -12.0, 12.0]
-    observation_pitch_near_deg: -35.0
-    observation_pitch_far_deg: -20.0
+    spray_nozzle_frame: spray_nozzle_link
+    observation_nozzle_plane_min_m: 0.20
+    observation_nozzle_plane_max_m: 2.00
+    # 完整任务会用实测喷嘴标定覆盖这两个参数。
+    observation_preferred_nozzle_plane_distance_m: 1.00
+    observation_nozzle_plane_tolerance_m: 0.05
     observation_max_condition_number: 16.0
 
     # Keep automatic execution conservative until measured calibration exists.

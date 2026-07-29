@@ -77,8 +77,6 @@ class ArmSprayTestNode(Node):
         super().__init__('wvcsc_arm_spray_test_qt')
         self.declare_parameter('base_frame', 'alicia_base_link')
         self.declare_parameter('default_observation_mode', 'joint_presets')
-        self.declare_parameter('tree_distance_min_m', 0.80)
-        self.declare_parameter('tree_distance_max_m', 1.50)
         self.declare_parameter('working_range_min_m', 0.20)
         self.declare_parameter('working_range_max_m', 2.00)
         self.declare_parameter('default_working_range_m', 1.00)
@@ -86,10 +84,6 @@ class ArmSprayTestNode(Node):
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.default_observation_mode = normalize_observation_mode(
             self.get_parameter('default_observation_mode').value)
-        self.tree_distance_min = float(
-            self.get_parameter('tree_distance_min_m').value)
-        self.tree_distance_max = float(
-            self.get_parameter('tree_distance_max_m').value)
         self.working_range_min = float(
             self.get_parameter('working_range_min_m').value)
         self.working_range_max = float(
@@ -98,11 +92,6 @@ class ArmSprayTestNode(Node):
             self.get_parameter('default_working_range_m').value)
         self.joint_preset_hint_distance = float(
             self.get_parameter('joint_preset_hint_distance_m').value)
-        if (not math.isfinite(self.tree_distance_min) or
-                not math.isfinite(self.tree_distance_max) or
-                self.tree_distance_min <= 0.0 or
-                self.tree_distance_min > self.tree_distance_max):
-            raise ValueError('tree distance range is invalid')
         if (not math.isfinite(self.working_range_min) or
                 not math.isfinite(self.working_range_max) or
                 self.working_range_min <= 0.0 or
@@ -155,12 +144,9 @@ class ArmSprayTestNode(Node):
         base_distance_m = (
             float(base_distance_m) if observation_mode == 'ik'
             else self.joint_preset_hint_distance)
-        if (observation_mode == 'ik' and not
-                self.tree_distance_min <= base_distance_m <=
-                self.tree_distance_max):
-            raise ValueError(
-                f'IK plant distance must be within '
-                f'{self.tree_distance_min:.2f}-{self.tree_distance_max:.2f} m')
+        if (observation_mode == 'ik' and
+                (not math.isfinite(base_distance_m) or base_distance_m <= 0.0)):
+            raise ValueError('IK plant distance must be a positive finite value')
         working_range_m = float(working_range_m)
         if (not math.isfinite(working_range_m) or not
                 self.working_range_min <= working_range_m <=
@@ -296,8 +282,7 @@ class ArmSprayTestGui(QWidget):
         self.side_combo.addItem('右侧 (-Y)', 'right')
         form.addRow('病株侧位:', self.side_combo)
         self.base_distance_label = QLabel('基座到病株距离 (m):')
-        self.base_distance_spin = self._spin(
-            self.node.tree_distance_min, self.node.tree_distance_max, 1.50)
+        self.base_distance_spin = self._spin(0.01, 10.0, 1.50)
         form.addRow(self.base_distance_label, self.base_distance_spin)
         self.working_range_spin = self._spin(
             self.node.working_range_min, self.node.working_range_max,

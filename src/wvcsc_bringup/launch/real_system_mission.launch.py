@@ -218,7 +218,7 @@ def _resolve_calibrations(context, *, launch_dir):
     if not os.path.isfile(nozzle_path):
         raise RuntimeError(
             f'nozzle calibration is required but not found: {nozzle_path}')
-    nozzle_xyz, nozzle_rpy, _aim_range, _aim_tolerance, trim_uv = (
+    nozzle_xyz, nozzle_rpy, nozzle_plane_distance, nozzle_plane_tolerance, trim_uv = (
         _load_nozzle_calibration(nozzle_path))
     initial_actions.extend([
         LogInfo(msg=f'[BRINGUP] nozzle calibration loaded: {nozzle_path}'),
@@ -230,6 +230,12 @@ def _resolve_calibrations(context, *, launch_dir):
             ' '.join(f'{value:.12g}' for value in nozzle_rpy)),
         SetLaunchConfiguration('aim_trim_u_px', str(trim_uv[0])),
         SetLaunchConfiguration('aim_trim_v_px', str(trim_uv[1])),
+        SetLaunchConfiguration(
+            'observation_preferred_nozzle_plane_distance_m',
+            str(nozzle_plane_distance)),
+        SetLaunchConfiguration(
+            'observation_nozzle_plane_tolerance_m',
+            str(nozzle_plane_tolerance)),
     ])
     if Path(nozzle_path).name == 'nozzle.example.yaml':
         initial_actions.append(LogInfo(
@@ -341,6 +347,10 @@ def _resolve_calibrations(context, *, launch_dir):
             'observation_mode': LaunchConfiguration('observation_mode'),
             'aim_trim_u_px': LaunchConfiguration('aim_trim_u_px'),
             'aim_trim_v_px': LaunchConfiguration('aim_trim_v_px'),
+            'observation_preferred_nozzle_plane_distance_m': LaunchConfiguration(
+                'observation_preferred_nozzle_plane_distance_m'),
+            'observation_nozzle_plane_tolerance_m': LaunchConfiguration(
+                'observation_nozzle_plane_tolerance_m'),
             'relay_config_file': LaunchConfiguration('relay_config_file'),
         }),
         qt_editor,
@@ -404,6 +414,11 @@ def generate_launch_description():
                 controller_share, 'config', 'fault.ini')),
         DeclareLaunchArgument('aim_trim_u_px', default_value='0.0'),
         DeclareLaunchArgument('aim_trim_v_px', default_value='0.0'),
+        DeclareLaunchArgument(
+            'observation_preferred_nozzle_plane_distance_m',
+            default_value='1.0'),
+        DeclareLaunchArgument('observation_nozzle_plane_tolerance_m',
+                              default_value='0.05'),
         DeclareLaunchArgument(
             'camera_info_file',
             default_value=os.path.join(

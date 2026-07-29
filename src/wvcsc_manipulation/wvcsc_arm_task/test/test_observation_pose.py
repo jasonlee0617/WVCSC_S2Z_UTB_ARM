@@ -3,7 +3,9 @@ import math
 import pytest
 
 from wvcsc_arm_task.observation.ik_observation import (
-    camera_look_at_pose,
+    camera_pose_look_at_tree_center,
+    nozzle_pose_from_tool_pose,
+    nozzle_tree_plane_metrics,
     recenter_camera_pose,
     rotation_matrix_from_quaternion,
     rotate_vector,
@@ -25,10 +27,10 @@ def _forward_from_quaternion(quat):
     ('tree_y', 'camera_y', 'forward_y'),
     ((1.5, 0.4, 1.0), (-1.5, -0.4, -1.0)),
 )
-def test_camera_look_at_pose_keeps_distance_and_aims_optical_z_at_tree(
+def test_tree_center_look_at_aims_optical_z_at_the_configured_leaf_centre(
         tree_y, camera_y, forward_y):
-    position, quat = camera_look_at_pose(
-        (0.0, tree_y, -1.32), 1.20, 0.30, 1.10)
+    position, quat = camera_pose_look_at_tree_center(
+        (0.0, tree_y, -1.32), 0.40, 0.30, 1.20)
     assert position == pytest.approx((0.0, camera_y, 0.30))
     direction = (0.0, forward_y * 1.10, -0.42)
     norm = math.sqrt(sum(value * value for value in direction))
@@ -36,9 +38,22 @@ def test_camera_look_at_pose_keeps_distance_and_aims_optical_z_at_tree(
         tuple(value / norm for value in direction))
 
 
-def test_camera_look_at_pose_rejects_tree_inside_observation_clearance():
-    with pytest.raises(ValueError, match='too close'):
-        camera_look_at_pose((0.0, 1.10, 0.0), 1.20, 0.30, 1.10)
+def test_tree_center_look_at_has_no_tree_distance_admission_gate():
+    position, quat = camera_pose_look_at_tree_center(
+        (0.0, 0.10, -0.68), 0.20, 0.30, 1.30)
+    assert position == pytest.approx((0.0, 0.20, 0.30))
+    assert all(math.isfinite(value) for value in quat)
+
+
+def test_nozzle_plane_metrics_use_perpendicular_standoff_and_forward_ray():
+    position, quat = nozzle_pose_from_tool_pose(
+        (0.0, 0.20, 0.30), (0.0, 0.0, 0.0, 1.0),
+        (0.0, 0.10, 0.0), (0.0, 0.0, 0.0, 1.0))
+    distance, intersection = nozzle_tree_plane_metrics(
+        (0.0, 1.50, -0.68), position,
+        (-math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)))
+    assert distance == pytest.approx(1.20)
+    assert intersection == pytest.approx(1.20)
 
 
 def test_transform_point_applies_translation_and_rotation():

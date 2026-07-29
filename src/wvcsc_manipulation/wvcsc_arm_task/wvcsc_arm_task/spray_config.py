@@ -85,8 +85,6 @@ def parameter_defaults():
         'observation_input_timeout_sec': 2.0,
         'observation_search_timeout_sec': 8.0,
         'observation_max_plans': 8,
-        'ik_tree_range_min_m': 0.80,
-        'ik_tree_range_max_m': 1.50,
         'observation_camera_reach_min_m': 0.20,
         'observation_camera_reach_max_m': 0.40,
         'observation_camera_reach_step_m': 0.10,
@@ -94,8 +92,12 @@ def parameter_defaults():
         'camera_height_max_m': 0.40,
         'camera_height_step_m': 0.10,
         'observation_azimuth_offsets_deg': [0.0, -12.0, 12.0],
-        'observation_pitch_near_deg': -35.0,
-        'observation_pitch_far_deg': -20.0,
+        'observation_center_height_m': 1.30,
+        'spray_nozzle_frame': 'spray_nozzle_link',
+        'observation_nozzle_plane_min_m': 0.20,
+        'observation_nozzle_plane_max_m': 2.00,
+        'observation_preferred_nozzle_plane_distance_m': 1.00,
+        'observation_nozzle_plane_tolerance_m': 0.05,
         'observation_max_condition_number': 16.5,
         'observation_min_joint_margin_rad': 0.22,
         'observation_preferred_joint_margin_rad': 0.35,
@@ -122,8 +124,6 @@ def joint_parameter(node, name):
 
 def observation_parameters(node):
     values = {
-        'tree_range_min_m': float(_value(node, 'ik_tree_range_min_m')),
-        'tree_range_max_m': float(_value(node, 'ik_tree_range_max_m')),
         'camera_reach_min_m': float(
             _value(node, 'observation_camera_reach_min_m')),
         'camera_reach_max_m': float(
@@ -136,8 +136,17 @@ def observation_parameters(node):
         'azimuth_offsets_deg': tuple(
             float(value)
             for value in _value(node, 'observation_azimuth_offsets_deg')),
-        'pitch_near_deg': float(_value(node, 'observation_pitch_near_deg')),
-        'pitch_far_deg': float(_value(node, 'observation_pitch_far_deg')),
+        'center_height_m': float(
+            _value(node, 'observation_center_height_m')),
+        'nozzle_frame': str(_value(node, 'spray_nozzle_frame')).strip(),
+        'nozzle_plane_min_m': float(
+            _value(node, 'observation_nozzle_plane_min_m')),
+        'nozzle_plane_max_m': float(
+            _value(node, 'observation_nozzle_plane_max_m')),
+        'preferred_nozzle_plane_distance_m': float(_value(
+            node, 'observation_preferred_nozzle_plane_distance_m')),
+        'nozzle_plane_tolerance_m': float(_value(
+            node, 'observation_nozzle_plane_tolerance_m')),
         'max_condition_number': float(
             _value(node, 'observation_max_condition_number')),
         'min_joint_margin_rad': float(
@@ -150,22 +159,27 @@ def observation_parameters(node):
             _value(node, 'observation_orientation_tolerance_rad')),
     }
     positive = (
-        'tree_range_min_m', 'tree_range_max_m', 'camera_reach_min_m',
-        'camera_reach_max_m', 'camera_reach_step_m',
+        'camera_reach_min_m', 'camera_reach_max_m', 'camera_reach_step_m',
         'camera_height_min_m', 'camera_height_max_m',
-        'camera_height_step_m', 'max_condition_number',
+        'camera_height_step_m', 'center_height_m', 'nozzle_plane_min_m',
+        'nozzle_plane_max_m', 'preferred_nozzle_plane_distance_m',
+        'nozzle_plane_tolerance_m', 'max_condition_number',
         'min_joint_margin_rad', 'preferred_joint_margin_rad',
         'position_tolerance_m', 'orientation_tolerance_rad')
     if (not all(math.isfinite(values[name]) and values[name] > 0.0
                 for name in positive) or
-            values['tree_range_min_m'] >= values['tree_range_max_m'] or
             values['camera_reach_min_m'] > values['camera_reach_max_m'] or
             values['camera_height_min_m'] > values['camera_height_max_m'] or
+            values['nozzle_plane_min_m'] > values['nozzle_plane_max_m'] or
+            not values['nozzle_plane_min_m'] <=
+            values['preferred_nozzle_plane_distance_m'] <=
+            values['nozzle_plane_max_m'] or
             values['preferred_joint_margin_rad'] <
             values['min_joint_margin_rad'] or
+            not values['nozzle_frame'] or
             not values['azimuth_offsets_deg'] or
-            not all(math.isfinite(values[name]) for name in (
-                'pitch_near_deg', 'pitch_far_deg'))):
+            not all(math.isfinite(value) for value in values[
+                'azimuth_offsets_deg'])):
         raise ValueError('observation search parameters are invalid')
     return values
 

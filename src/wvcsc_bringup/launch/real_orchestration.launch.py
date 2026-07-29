@@ -104,6 +104,13 @@ def generate_launch_description():
             arm_motion_parameters,
             {
                 'observation_mode': LaunchConfiguration('observation_mode'),
+                'observation_preferred_nozzle_plane_distance_m': ParameterValue(
+                    LaunchConfiguration(
+                        'observation_preferred_nozzle_plane_distance_m'),
+                    value_type=float),
+                'observation_nozzle_plane_tolerance_m': ParameterValue(
+                    LaunchConfiguration('observation_nozzle_plane_tolerance_m'),
+                    value_type=float),
             },
             robot_description,
         ],
@@ -170,6 +177,11 @@ def generate_launch_description():
         DeclareLaunchArgument('nozzle_mount_rpy', default_value='0 0 0'),
         DeclareLaunchArgument('aim_trim_u_px', default_value='0.0'),
         DeclareLaunchArgument('aim_trim_v_px', default_value='0.0'),
+        DeclareLaunchArgument(
+            'observation_preferred_nozzle_plane_distance_m',
+            default_value='1.0'),
+        DeclareLaunchArgument('observation_nozzle_plane_tolerance_m',
+                              default_value='0.05'),
         DeclareLaunchArgument(
             'relay_config_file',
             default_value=os.path.join(

@@ -322,18 +322,16 @@ def test_simulation_observation_keeps_camera_above_the_vehicle_roof():
     assert parameters['camera_height_min_m'] == pytest.approx(0.15)
     assert parameters['camera_height_max_m'] == pytest.approx(0.40)
     assert parameters['camera_height_step_m'] == pytest.approx(0.10)
-    assert parameters['ik_tree_range_min_m'] == pytest.approx(0.8)
-    assert parameters['ik_tree_range_max_m'] == pytest.approx(1.5)
     assert parameters['observation_camera_reach_min_m'] == pytest.approx(0.2)
     assert parameters['observation_camera_reach_max_m'] == pytest.approx(0.4)
-    assert parameters['observation_pitch_near_deg'] == pytest.approx(-35.0)
-    assert parameters['observation_pitch_far_deg'] == pytest.approx(-20.0)
+    assert parameters['observation_center_height_m'] == pytest.approx(1.3)
+    assert parameters['observation_preferred_nozzle_plane_distance_m'] == pytest.approx(1.0)
     assert 'observation_min_camera_z_in_base_m' not in parameters
     assert parameters['target_recenter_trigger_px'] == pytest.approx(16.0)
     assert parameters['cross_view_reassociation_max_distance_px'] == pytest.approx(320.0)
     assert parameters['visual_servo_entry_max_error_px'] == pytest.approx(16.0)
     assert parameters['target_recenter_max_total_angle_deg'] == pytest.approx(45.0)
     assert parameters['target_recenter_max_iterations'] == 8
-    assert parameters['max_alignment_attempts'] == 3
+    assert parameters['max_alignment_attempts'] == 2
     assert parameters['target_post_recenter_stable_sec'] == pytest.approx(0.50)
     assert parameters['target_post_recenter_min_confidence'] == pytest.approx(0.30)

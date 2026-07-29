@@ -20,30 +20,6 @@
     {
       "pose": {
         "position": {
-          "x": 0.937696099281311,
-          "y": -0.9605681300163269,
-          "z": 0.0
-        },
-        "orientation": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0,
-          "w": 1.0
-        }
-      },
-      "point_type": "TRANSIT",
-      "tree_x_m": 0.0,
-      "tree_y_m": 0.0,
-      "tree_base_z_m": 0.0,
-      "tree_pose": null,
-      "work_side": "UNSPECIFIED",
-      "wide_spray_on_approach": false,
-      "arm_spray_duration_sec": 3.0,
-      "dwell_time_sec": 0.0
-    },
-    {
-      "pose": {
-        "position": {
           "x": 4.727978229522705,
           "y": -0.4695852994918823,
           "z": 0.0
