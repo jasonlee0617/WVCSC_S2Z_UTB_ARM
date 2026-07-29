@@ -1,4 +1,7 @@
-from wvcsc_arm_task.target_flow import FruitTarget, associate_known_targets
+import pytest
+
+from wvcsc_arm_task.target_flow import (
+    FruitTarget, associate_known_targets, target_on_tree_plane)
 
 
 def _target(target_id, u, v, confidence=0.8):
@@ -35,3 +38,30 @@ def test_cross_view_association_is_one_to_one_and_respects_its_gate():
             ]
     assert associate_known_targets(
         logical, [_target('far', 1000.0, 360.0)], _same_target, 180.0) == []
+
+
+def test_tree_plane_anchor_is_stable_when_camera_changes_viewpoint():
+    camera = (500.0, 500.0, 320.0, 240.0, 640, 480)
+    tree = (0.0, 1.5, 0.0)
+    look_at_tree = (-2.0 ** -0.5, 0.0, 0.0, 2.0 ** -0.5)
+    left = target_on_tree_plane(
+        _target('left', 386.6666667, 240.0),
+        ((-0.2, 0.0, 0.3), look_at_tree),
+        camera, tree, 1)
+    right = target_on_tree_plane(
+        _target('right', 253.3333333, 240.0),
+        ((0.2, 0.0, 0.3), look_at_tree),
+        camera, tree, 2)
+
+    assert left.tree_plane_distance_to(right) == pytest.approx(0.0, abs=1e-6)
+    assert (left.observation_index, right.observation_index) == (1, 2)
+
+
+def test_spatially_anchored_targets_are_not_rescued_by_wide_pixel_fallback():
+    known = FruitTarget('treated', 0.9, 100.0, 100.0, 20.0, 20.0,
+                        0.0, 1.0, 0)
+    other = FruitTarget('other', 0.9, 260.0, 100.0, 20.0, 20.0,
+                        0.30, 1.0, 1)
+
+    assert associate_known_targets(
+        [known], [other], lambda left, right: False, 320.0) == []

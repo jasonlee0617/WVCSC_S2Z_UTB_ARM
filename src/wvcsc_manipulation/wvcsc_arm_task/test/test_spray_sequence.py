@@ -42,6 +42,47 @@ class _QueueHarness:
         }[name])
 
 
+class _IkDiscoveryHarness:
+    _discover_ik_targets = SprayTask._discover_ik_targets
+    _merge_discovered_targets = SprayTask._merge_discovered_targets
+    _same_target = SprayTask._same_target
+
+    def __init__(self, views):
+        self._views = list(views)
+        self._view_index = 0
+        self._observation_candidate_index = 0
+        self.config = SimpleNamespace(max_targets_per_tree=2)
+
+    def get_parameter(self, name):
+        return SimpleNamespace(value={
+            'processed_iou_threshold': 0.30,
+            'processed_center_distance_px': 18.0,
+            'cross_view_target_distance_m': 0.08,
+        }[name])
+
+    @staticmethod
+    def get_logger():
+        return SimpleNamespace(info=lambda *_args: None)
+
+    @staticmethod
+    def _set_inference_mode(_mode):
+        pass
+
+    def _wait_for_fruits(self, _cancel_requested):
+        return self._views[self._view_index]
+
+    def _move_to_next_fan_observation(self):
+        if self._view_index + 1 >= len(self._views):
+            return False
+        self._view_index += 1
+        self._observation_candidate_index += 1
+        return True
+
+    @staticmethod
+    def _reset_fruit_tracking():
+        pass
+
+
 def test_queue_excludes_processed_target_by_geometry_not_only_tracker_id():
     task = _QueueHarness()
     processed = _target('old-id', 640.0, 360.0)
@@ -49,6 +90,20 @@ def test_queue_excludes_processed_target_by_geometry_not_only_tracker_id():
     other = _target('other', 800.0, 360.0)
     queue = task._queue([same_fruit_new_id, other], [processed])
     assert queue == [other]
+
+
+def test_ik_discovery_unions_center_and_fan_views_before_any_spray():
+    left = FruitTarget('left-a', 0.8, 200.0, 240.0, 40.0, 40.0,
+                       0.00, 1.10, 1)
+    right_same_a = FruitTarget('right-a', 0.9, 500.0, 240.0, 40.0, 40.0,
+                                0.02, 1.10, 2)
+    right_b = FruitTarget('right-b', 0.85, 580.0, 250.0, 40.0, 40.0,
+                          0.25, 1.15, 2)
+    task = _IkDiscoveryHarness([[], [left], [right_same_a, right_b]])
+
+    discovered = task._discover_ik_targets(lambda: False, lambda *_args: None)
+
+    assert [target.target_id for target in discovered] == ['right-a', 'right-b']
 
 
 def test_queue_does_not_merge_a_nearby_second_physical_fruit():
@@ -175,6 +230,10 @@ def test_diseased_target_below_point_one_never_enters_the_queue():
 
 class _FruitCollectionHarness:
     _wait_for_fruits = SprayTask._wait_for_fruits
+
+    @staticmethod
+    def _anchor_targets_to_tree_plane(candidates):
+        return candidates
 
     def __init__(self):
         first = _target('fruit-1', 640.0, 360.0)
@@ -590,6 +649,46 @@ def test_first_nonempty_detection_locks_the_tree_target_set():
     assert 'lock:target-1' in task.calls
     assert 'lock:target-late' not in task.calls
     assert task.calls.count('spray') == 1
+
+
+def test_frozen_ledger_blocks_reidentified_targets_after_each_spray():
+    initial = [
+        _target('initial-1', 620.0, 360.0),
+        _target('initial-2', 900.0, 200.0),
+    ]
+    after_first_spray = [
+        _target('new-1', 620.0, 360.0),
+        _target('new-2', 900.0, 200.0),
+    ]
+    after_second_spray = [
+        _target('newer-1', 620.0, 360.0),
+        _target('newer-2', 900.0, 200.0),
+    ]
+
+    class TrackerChurnHarness(_ClosedLoopSequenceHarness):
+        def _wait_for_fruits(self, _cancel_requested):
+            self._fruit_calls += 1
+            frames = [initial, after_first_spray, after_second_spray]
+            self._visible_targets = frames[min(self._fruit_calls - 1, 2)]
+            return self._visible_targets
+
+        def _lock_target(self, target_id, _cancel_requested):
+            self.calls.append(f'lock:{target_id}')
+            return next(target for target in self._visible_targets
+                        if target.target_id == target_id)
+
+    task = TrackerChurnHarness(targets=initial)
+    request = SimpleNamespace(
+        mission_id='mission-1', spray_duration=3.0, tree_hint=object())
+
+    code, message = task._run_sequence(
+        request, lambda: False, lambda *_args: None)
+
+    assert code == ExecuteSpray.Result.OK
+    assert 'detected=2 sprayed=2 unresolved=0' in message
+    assert task.calls.count('spray') == 2
+    assert 'lock:new-2' in task.calls
+    assert not any(call.startswith('lock:newer-') for call in task.calls)
 
 
 def test_real_alignment_timeout_sprays_from_current_pose_then_rechecks_before_home():

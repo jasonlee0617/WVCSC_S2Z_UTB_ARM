@@ -62,8 +62,28 @@ class SpraySequenceMixin:
                 f'phase={downstream.phase} '
                 f'error_px=({downstream.error_u:.1f},{downstream.error_v:.1f})')
 
+        discovery_complete = False
+        if self._observation_mode == 'ik':
+            feedback(ExecuteSpray.Feedback.DETECTING_TARGETS, 0.20,
+                     'DISCOVERING_ALL_VIEWS')
+            discovered = self._discover_ik_targets(cancel_requested, feedback)
+            if discovered is None:
+                return self._recover_failure(
+                    ExecuteSpray.Result.VISION_FAILED,
+                    'disease detector did not provide frames during IK discovery',
+                    cancel_requested)
+            session.known_targets = discovered
+            session.saw_disease = bool(discovered)
+            discovery_complete = True
+            self.get_logger().info(
+                '[ARM] IK_TARGET_LEDGER stable='
+                f'{len(session.known_targets)} '
+                f'ids=({",".join(target.target_id for target in session.known_targets)})')
+
         # 阶段 2/4/5/6/7 循环：检测 - 排队 - 对准 - 喷洒 - 复检
         while True:
+            if discovery_complete and not session.known_targets:
+                break
             self._set_inference_mode('disease')
             feedback(ExecuteSpray.Feedback.DETECTING_TARGETS, 0.25, 'DETECTING_TARGETS')
             self.get_logger().debug(
@@ -121,39 +141,29 @@ class SpraySequenceMixin:
 
             # 阶段 4: QUEUING (基于 IoU 和中心距离去重排序)
             feedback(ExecuteSpray.Feedback.QUEUING, 0.35, 'QUEUING')
-            # ``candidates`` already excludes targets whose logical ledger row
-            # is TREATED/UNRESOLVED.  Reapplying raw image-space exclusion here
-            # would lose the association after a camera view change.
+            # ``candidates`` already excludes targets whose immutable ledger
+            # row is TREATED/UNRESOLVED.  Never overwrite that ledger row with
+            # a new detector UUID: doing so can make a sprayed leaf pending
+            # again after the next observation return.
             queue = self._queue(candidates, ())
             logical_by_current_id = {
                 current.target_id: logical
                 for logical, current, _forced in associations
             }
             if session.pending_attempt is not None and queue:
+                pending_ledger = (
+                    session.pending_attempt.ledger_target or
+                    session.pending_attempt.target)
                 pending_matches = [
                     candidate for candidate in queue
                     if self._same_target(
                         logical_by_current_id.get(candidate.target_id, candidate),
-                        session.pending_attempt.target)
+                        pending_ledger)
                 ]
                 target = min(
                     pending_matches or queue,
                     key=lambda item: item.distance_to(
                         session.pending_attempt.target))
-                self._replace_known_target(
-                    session.known_targets, session.pending_attempt.target, target)
-                self._remember_targets(
-                    session.known_targets,
-                    [candidate for candidate in candidates if candidate is not target])
-            else:
-                # Preserve a current image snapshot for the selected logical
-                # target.  It keeps final accounting exact while avoiding any
-                # new target insertion after the initial stable scan.
-                for candidate in queue:
-                    logical = logical_by_current_id.get(candidate.target_id)
-                    if logical is not None:
-                        self._replace_known_target(
-                            session.known_targets, logical, candidate)
 
             self.get_logger().info(
                 f'[ARM] DETECT_QUEUE candidates={len(candidates)} '
@@ -170,7 +180,8 @@ class SpraySequenceMixin:
                     session.processed,
                     session.exhausted)
                 missing_target = (
-                    session.pending_attempt.target
+                    (session.pending_attempt.ledger_target or
+                     session.pending_attempt.target)
                     if session.pending_attempt is not None
                     else (pending_targets[0] if pending_targets else None))
                 if missing_target is not None:
@@ -184,6 +195,7 @@ class SpraySequenceMixin:
                         continue
                 if session.pending_attempt is not None:
                     self._mark_unresolved(
+                        session.pending_attempt.ledger_target or
                         session.pending_attempt.target, session.exhausted)
                     self.get_logger().warn(
                         f'[ARM][ALIGN] target='
@@ -209,13 +221,20 @@ class SpraySequenceMixin:
             if session.pending_attempt is not None:
                 attempt = session.pending_attempt
                 attempt.target = target
+                if attempt.ledger_target is None:
+                    attempt.ledger_target = logical_by_current_id.get(
+                        target.target_id, target)
                 session.pending_attempt = None
             else:
                 target = queue[0]
-                attempt = self._attempt_for(target, session.attempts)
+                ledger_target = logical_by_current_id.get(target.target_id, target)
+                attempt = self._attempt_for(ledger_target, session.attempts)
                 if attempt is None:
-                    attempt = TargetAttempt(target)
+                    attempt = TargetAttempt(target, ledger_target=ledger_target)
                     session.attempts.append(attempt)
+                else:
+                    attempt.target = target
+                    attempt.ledger_target = ledger_target
 
             feedback(ExecuteSpray.Feedback.ALIGNING, 0.40, 'LOCKING_TARGET')
             session.recenter_attempts += 1
@@ -276,7 +295,7 @@ class SpraySequenceMixin:
                             cancel_requested)
                     session.recenter_failures += 1
                     self._mark_unresolved(
-                        attempt.target, session.exhausted)
+                        attempt.ledger_target or attempt.target, session.exhausted)
                     feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
                              'RETURNING_TO_OBSERVE')
                     if not self._return_to_observation():
@@ -373,7 +392,7 @@ class SpraySequenceMixin:
                                 cancel_requested)
                     session.recenter_failures += 1
                     self._mark_unresolved(
-                        attempt.target, session.exhausted)
+                        attempt.ledger_target or attempt.target, session.exhausted)
                     feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
                              'RETURNING_TO_OBSERVE')
                     if not self._return_to_observation():
@@ -387,6 +406,14 @@ class SpraySequenceMixin:
                     continue
 
             # 阶段 6: SPRAYING (调用下游喷洒 Action)
+            ledger_target = attempt.ledger_target or target
+            if (session.sprayed >= len(session.known_targets) or
+                    any(self._same_target(ledger_target, previous)
+                        for previous in session.processed)):
+                message = 'strict single-spray guard blocked duplicate ledger target'
+                self.get_logger().error(f'[ARM] {message}')
+                return self._recover_failure(
+                    ExecuteSpray.Result.VISION_FAILED, message, cancel_requested)
             self._set_inference_mode('idle')
             feedback(ExecuteSpray.Feedback.SPRAYING, 0.60, 'SPRAYING')
             self.get_logger().info(
@@ -404,7 +431,7 @@ class SpraySequenceMixin:
                 f'[ARM] SPRAY target={target.target_id} done → TREATED '
                 f'({session.sprayed + 1} sprayed so far)')
             session.sprayed += 1
-            session.processed.append(target)
+            session.processed.append(ledger_target)
             self._select_target('')
 
             if endpoint_spray:
@@ -572,13 +599,21 @@ class SpraySequenceMixin:
                                 cancel_requested, feedback):
         attempt = pending_attempt or self._attempt_for(target, attempts)
         if attempt is None:
-            attempt = TargetAttempt(target)
+            attempt = TargetAttempt(target, ledger_target=target)
             attempts.append(attempt)
         current = self._observation_candidate_index
         if current >= 0:
             attempt.recentered_observation_indices.add(current)
         self._select_target('')
         self._set_inference_mode('idle')
+        if (target.observation_index >= 0 and
+                target.observation_index != current and
+                self._move_to_observation_index(target.observation_index)):
+            self._reset_fruit_tracking()
+            self.get_logger().info(
+                f'[ARM][QUEUE] target={target.target_id} returning to '
+                f'discovery observation index={target.observation_index}')
+            return attempt, True, True
         self._rewind_for_untried_observation(attempt)
         recovered, moved = self._recover_to_next_observation(
             cancel_requested, feedback, attempt.recentered_observation_indices)
@@ -589,6 +624,28 @@ class SpraySequenceMixin:
                 f'retrying detection at observation '
                 f'index={self._observation_candidate_index}')
         return attempt, recovered, moved
+
+    def _discover_ik_targets(self, cancel_requested, feedback):
+        """Survey center and fan views before IK starts any physical spraying."""
+        discovered = []
+        while True:
+            self._set_inference_mode('disease')
+            candidates = self._wait_for_fruits(cancel_requested)
+            if candidates is None:
+                return None
+            self._merge_discovered_targets(discovered, candidates)
+            self.get_logger().info(
+                f'[ARM] IK_DISCOVERY index={self._observation_candidate_index} '
+                f'found={len(candidates)} unique={len(discovered)}')
+            if not self._move_to_next_fan_observation():
+                break
+            self._reset_fruit_tracking()
+            feedback(ExecuteSpray.Feedback.DETECTING_TARGETS, 0.22,
+                     'DISCOVERING_NEXT_VIEW')
+        maximum = self.config.max_targets_per_tree
+        ranked = sorted(discovered, key=lambda target: target.confidence,
+                        reverse=True)
+        return ranked if maximum <= 0 else ranked[:maximum]
 
     def _recover_to_next_observation(self, cancel_requested, feedback,
                                      excluded_indices=None):

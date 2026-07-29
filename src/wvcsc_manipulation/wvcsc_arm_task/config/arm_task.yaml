@@ -96,6 +96,9 @@ wvcsc_spray_task:
     # 相机重心或扇形观察切换后，任务账本允许以受限最近邻重新关联同一物理目标。
     # 该门限只用于逻辑关联，不是机械臂运动或视觉伺服准入门限。
     cross_view_reassociation_max_distance_px: 320.0
+    # IK 多观察位扫描优先使用树平面上的米制关联，避免换视角后仅按 320px
+    # 最近邻将两片相近病叶交换身份。无法可靠关联时标记未完成，不重新喷洒。
+    cross_view_target_distance_m: 0.08
 
     # 单步重心的最大旋转角度，防止大角度规划导致机械臂撞击或奇异点。
     target_recenter_max_angle_deg: 20.0

@@ -60,6 +60,10 @@ def parameter_defaults():
         'target_recenter_trigger_px': 48.0,
         'visual_servo_entry_max_error_px': 48.0,
         'cross_view_reassociation_max_distance_px': 320.0,
+        # RGB-only cross-view association uses the recorded tree plane.  Keep
+        # this small so two nearby leaves are never merged merely to avoid a
+        # duplicate spray; ambiguous cases remain unresolved.
+        'cross_view_target_distance_m': 0.08,
         'target_recenter_max_angle_deg': 20.0,
         'target_recenter_max_total_angle_deg': 30.0,
         'target_recenter_refine_goal_px': 8.0,

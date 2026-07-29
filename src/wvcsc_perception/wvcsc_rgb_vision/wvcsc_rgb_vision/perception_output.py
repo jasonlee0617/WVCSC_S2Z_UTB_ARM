@@ -36,9 +36,13 @@ def instances_to_array(image, instances):
 
 
 def instance_label(instance):
-    """Return the existing ID/class/confidence overlay text."""
-    prefix = f'{instance.target_id} ' if instance.target_id else ''
-    return f'{prefix}{instance.class_name} {instance.confidence:.2f}'
+    """Return a compact, operator-readable debug label.
+
+    Full UUIDs remain on ROS messages for machine correlation but are not an
+    operator-facing physical identity and therefore do not belong on the image.
+    """
+    label = 'DISEASE' if instance.class_name == 'diseased_target' else instance.class_name
+    return f'{label} {instance.confidence:.2f}'
 
 
 def annotated_image(
@@ -61,9 +65,12 @@ def annotated_image(
             color,
             thickness,
         )
+        label = instance_label(instance)
+        if selected:
+            label = f'LOCKED {label}'
         cv2.putText(
             annotated,
-            instance_label(instance),
+            label,
             (left, max(16, top - 5)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,

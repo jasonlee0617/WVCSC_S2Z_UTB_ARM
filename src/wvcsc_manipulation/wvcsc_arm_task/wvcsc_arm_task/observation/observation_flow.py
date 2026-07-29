@@ -574,11 +574,21 @@ class ObservationFlowMixin:
         except (TransformException, ValueError) as error:
             return None, str(error)
 
-    def _move_to_next_observation(self, excluded_indices=None):
+    def _move_to_observation_index(self, index):
+        """Move to one known observation view without traversing recovery views."""
+        if not 0 <= int(index) < len(self._observation_candidates):
+            return False
+        self._observation_candidate_index = int(index) - 1
+        return self._move_to_next_observation(stop_index=int(index))
+
+    def _move_to_next_observation(self, excluded_indices=None, stop_index=None):
         excluded = set(excluded_indices or ())
         while self._observation_candidate_index + 1 < len(
                 self._observation_candidates):
             self._observation_candidate_index += 1
+            if (stop_index is not None and
+                    self._observation_candidate_index > int(stop_index)):
+                return False
             if self._observation_candidate_index in excluded:
                 continue
             candidate = self._observation_candidates[self._observation_candidate_index]

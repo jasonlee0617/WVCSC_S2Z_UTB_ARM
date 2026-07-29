@@ -683,12 +683,11 @@ def test_detect_box_center_is_published_unchanged_in_target2d():
         (detected.top + detected.bottom) / 2.0)
 
 
-def test_visualization_labels_include_id_class_and_confidence():
+def test_visualization_labels_hide_machine_id_from_operators():
     instance = Instance(
         'target-7', 'diseased_target', 0.937,
         10.4, 20.6, 30.4, 40.6, 20.0, 30.0)
-    assert instance_label(instance) == (
-        'target-7 diseased_target 0.94')
+    assert instance_label(instance) == 'DISEASE 0.94'
 
 
 def test_fruit_visualization_draws_diseased_box_label_and_aim_point(monkeypatch):
@@ -710,7 +709,7 @@ def test_fruit_visualization_draws_diseased_box_label_and_aim_point(monkeypatch)
     assert [entry[0:2] for entry in calls['rectangles']] == [
         ((20, 21), (40, 41))]
     assert [entry[0] for entry in calls['labels']] == [
-        'target-2 diseased_target 0.80',
+        'DISEASE 0.80',
     ]
     assert [entry[0] for entry in calls['circles']] == [(30, 31)]
 

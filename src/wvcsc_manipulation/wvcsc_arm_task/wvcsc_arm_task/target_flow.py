@@ -11,7 +11,7 @@
 
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from wvcsc_interfaces.action import ExecuteSpray
 
@@ -29,6 +29,13 @@ class FruitTarget:
     center_v: float
     width: float
     height: float
+    # The same leaf moves substantially in image pixels when the arm changes
+    # observation pose.  These optional coordinates anchor it on the vertical
+    # plane through the recorded tree centre, expressed as (lateral, height).
+    # They are task-local geometry, not part of the ROS message contract.
+    tree_lateral_m: float | None = None
+    tree_height_m: float | None = None
+    observation_index: int = -1
 
     def iou(self, other):
         """计算两个矩形框的交并比 (Intersection over Union)。"""
@@ -49,6 +56,92 @@ class FruitTarget:
         return math.hypot(self.center_u - other.center_u,
                           self.center_v - other.center_v)
 
+    def tree_plane_distance_to(self, other):
+        """Return task-local tree-plane distance, or ``inf`` if unavailable."""
+        values = (
+            self.tree_lateral_m, self.tree_height_m,
+            other.tree_lateral_m, other.tree_height_m,
+        )
+        if not all(value is not None and math.isfinite(float(value))
+                   for value in values):
+            return math.inf
+        return math.hypot(
+            float(self.tree_lateral_m) - float(other.tree_lateral_m),
+            float(self.tree_height_m) - float(other.tree_height_m))
+
+
+def target_on_tree_plane(target, camera_pose, camera_model, tree_in_base,
+                         observation_index):
+    """Attach a stable tree-plane anchor to one image-space target.
+
+    C10 is RGB-only, so this is deliberately a conservative geometric proxy:
+    the ray through the safe aim pixel intersects the vertical plane through
+    the recorded tree centre.  If TF or geometry is not usable, the target is
+    retained without an anchor and legacy image-space matching remains active.
+    """
+    anchored = replace(target, observation_index=int(observation_index))
+    if camera_pose is None or camera_model is None or tree_in_base is None:
+        return anchored
+    try:
+        origin, quaternion = camera_pose
+        fx, fy, cx, cy, _width, _height = camera_model
+        tree_x, tree_y, tree_z = (float(value) for value in tree_in_base)
+        origin = tuple(float(value) for value in origin)
+        quaternion = tuple(float(value) for value in quaternion)
+        values = (*origin, *quaternion, fx, fy, cx, cy,
+                  tree_x, tree_y, tree_z, target.center_u, target.center_v)
+        if (not all(math.isfinite(float(value)) for value in values) or
+                fx <= 0.0 or fy <= 0.0):
+            return anchored
+        planar_range = math.hypot(tree_x, tree_y)
+        if planar_range <= 1e-6:
+            return anchored
+        normal = (tree_x / planar_range, tree_y / planar_range, 0.0)
+        local_ray = (
+            (target.center_u - cx) / fx,
+            (target.center_v - cy) / fy,
+            1.0,
+        )
+        ray = _rotate_vector(local_ray, quaternion)
+        denominator = sum(normal[index] * ray[index] for index in range(3))
+        numerator = planar_range - sum(
+            normal[index] * origin[index] for index in range(3))
+        if denominator <= 1e-6 or numerator <= 0.0:
+            return anchored
+        depth = numerator / denominator
+        point = tuple(origin[index] + depth * ray[index] for index in range(3))
+        tangent = (-normal[1], normal[0], 0.0)
+        relative = (
+            point[0] - tree_x,
+            point[1] - tree_y,
+            point[2] - tree_z,
+        )
+        return replace(
+            anchored,
+            tree_lateral_m=sum(tangent[index] * relative[index]
+                               for index in range(3)),
+            tree_height_m=relative[2],
+        )
+    except (TypeError, ValueError, ZeroDivisionError):
+        return anchored
+
+
+def _rotate_vector(vector, quaternion):
+    """Rotate a vector by an XYZW quaternion without ROS/Numpy dependencies."""
+    x, y, z, w = quaternion
+    vx, vy, vz = vector
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    return (
+        (1.0 - 2.0 * (yy + zz)) * vx + 2.0 * (xy - wz) * vy +
+        2.0 * (xz + wy) * vz,
+        2.0 * (xy + wz) * vx + (1.0 - 2.0 * (xx + zz)) * vy +
+        2.0 * (yz - wx) * vz,
+        2.0 * (xz - wy) * vx + 2.0 * (yz + wx) * vy +
+        (1.0 - 2.0 * (xx + yy)) * vz,
+    )
+
 
 @dataclass
 class TargetAttempt:
@@ -60,6 +153,10 @@ class TargetAttempt:
     target: FruitTarget
     count: int = 0
     recentered_observation_indices: set = field(default_factory=set)
+    # Immutable tree-level ledger snapshot.  ``target`` may be replaced by a
+    # current visual observation during recovery, but this identity must never
+    # drift after the first stable scan.
+    ledger_target: FruitTarget | None = None
 
 
 def detection_candidates(message, class_name, min_confidence):
@@ -144,11 +241,10 @@ def associate_known_targets(
     """Associate one detection to one tree-level logical target.
 
     ``FruitTarget.target_id`` is an image-tracker ID, not a physical identity.
-    A camera recenter or a fan observation can legitimately replace it.  First
-    retain the strict IoU/centre association used within one view; only then
-    make a deterministic nearest-neighbour association for still-unmatched
-    targets.  The caller supplies a finite pixel gate, so a newly seen object
-    can never be silently converted into an existing logical target.
+    A camera recenter or a fan observation can legitimately replace it.  Tree-
+    plane anchors are preferred whenever both observations have them; legacy
+    pixel nearest-neighbour matching is retained only when spatial geometry is
+    unavailable.
 
     Returns ``(logical_snapshot, current_detection, forced)`` tuples.  Each
     logical target and detection appears at most once.
@@ -167,10 +263,11 @@ def associate_known_targets(
         for candidate_index, candidate in enumerate(candidates):
             if same_target(candidate, previous):
                 strict.append((
+                    candidate.tree_plane_distance_to(previous),
                     -candidate.iou(previous),
                     candidate.distance_to(previous),
                     known_index, candidate_index))
-    for _negative_iou, _distance, known_index, candidate_index in sorted(strict):
+    for _plane_distance, _negative_iou, _distance, known_index, candidate_index in sorted(strict):
         if known_index in used_known or candidate_index in used_candidates:
             continue
         pairs.append((known[known_index], candidates[candidate_index], False))
@@ -185,6 +282,11 @@ def associate_known_targets(
             continue
         for candidate_index, candidate in enumerate(candidates):
             if candidate_index in used_candidates:
+                continue
+            # When both views have tree-plane anchors, a failed spatial match
+            # must not be rescued by the former 320 px nearest-neighbour rule:
+            # that rule can exchange two nearby leaves after a view change.
+            if math.isfinite(candidate.tree_plane_distance_to(previous)):
                 continue
             distance = candidate.distance_to(previous)
             if distance <= maximum:
@@ -442,6 +544,7 @@ class TargetFlowMixin:
             self.get_parameter('fruit_collection_settle_sec').value)
         required = int(self.get_parameter('confirmation_frames').value)
         collection_started_at = None
+        result = None
         while time.monotonic() < deadline:
             if self._aborted(cancel_requested):
                 return None
@@ -457,14 +560,18 @@ class TargetFlowMixin:
                         if collection_started_at <= stamp <=
                         collection_started_at + settle
                     ]
-                    return stable_candidates_from_frames(
+                    result = stable_candidates_from_frames(
                         frames, required,
                         float(self.get_parameter('processed_iou_threshold').value),
                         float(self.get_parameter(
                             'processed_center_distance_px').value))
+            if result is not None:
+                return self._anchor_targets_to_tree_plane(result)
             time.sleep(0.02)
         with self._vision_mutex:
-            return [] if self._fruit_frames else None
+            result = [] if self._fruit_frames else None
+        return (None if result is None else
+                self._anchor_targets_to_tree_plane(result))
 
     def _reset_target_confirmation(self, target_id, *, clear_latest=True):
         """重置特定目标的确认状态，准备新一轮锁定。"""
@@ -535,14 +642,10 @@ class TargetFlowMixin:
         """
         根据物理距离和 IoU 过滤掉已处理或已耗尽的目标，生成待执行队列。
         """
-        iou_threshold = float(self.get_parameter('processed_iou_threshold').value)
-        distance_threshold = float(
-            self.get_parameter('processed_center_distance_px').value)
         kept = [
             candidate for candidate in candidates
             if not any(
-                candidate.iou(previous) >= iou_threshold or
-                candidate.distance_to(previous) <= distance_threshold
+                self._same_target(candidate, previous)
                 for previous in excluded)
         ]
         return sorted(
@@ -577,6 +680,16 @@ class TargetFlowMixin:
             else:
                 known.append(candidate)
 
+    def _merge_discovered_targets(self, known, candidates):
+        """Merge all IK survey views while retaining the clearest observation."""
+        for candidate in candidates:
+            matching = next((index for index, previous in enumerate(known)
+                             if self._same_target(candidate, previous)), None)
+            if matching is None:
+                known.append(candidate)
+            elif candidate.confidence > known[matching].confidence:
+                known[matching] = candidate
+
     def _replace_known_target(self, known, previous, current):
         """
         将已知列表中的旧目标替换为新目标（用于处理目标消失后的重新出现）。
@@ -603,7 +716,7 @@ class TargetFlowMixin:
     def _attempt_for(self, candidate, attempts):
         """查找该候选是否已经存在对应的重试记录。"""
         return next((attempt for attempt in attempts if self._same_target(
-            candidate, attempt.target)), None)
+            candidate, getattr(attempt, 'ledger_target', None) or attempt.target)), None)
 
     def _mark_unresolved(self, target, exhausted):
         """将目标标记为未解决（Unresolved），加入排除列表。"""
@@ -614,11 +727,32 @@ class TargetFlowMixin:
         """
         判断两个目标是否为同一个物理目标（基于 IoU 与中心距离）。
         """
+        try:
+            plane_gate = float(self.get_parameter(
+                'cross_view_target_distance_m').value)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            plane_gate = 0.0
+        if (plane_gate > 0.0 and
+                candidate.tree_plane_distance_to(previous) <= plane_gate):
+            return True
         return (
             candidate.iou(previous) >= float(
                 self.get_parameter('processed_iou_threshold').value) or
             candidate.distance_to(previous) <= float(
                 self.get_parameter('processed_center_distance_px').value))
+
+    def _anchor_targets_to_tree_plane(self, candidates):
+        """Attach one stable spatial proxy after the arm is stationary."""
+        try:
+            camera_pose = self._current_camera_pose()
+        except (AttributeError, TypeError, ValueError):
+            camera_pose = None
+        with self._state_mutex:
+            camera_model = self._camera_model
+        return [target_on_tree_plane(
+            candidate, camera_pose, camera_model, self._tree_in_base,
+            self._observation_candidate_index)
+            for candidate in candidates]
 
     # ---------- 状态重置 ----------
     def _reset_vision(self):
