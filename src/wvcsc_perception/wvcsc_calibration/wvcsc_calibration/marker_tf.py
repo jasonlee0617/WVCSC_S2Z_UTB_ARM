@@ -1,3 +1,5 @@
+# 中文说明：对选定 ArUco 目标进行时间平均并发布带时间戳 TF 的节点模块。
+# 该 TF 供标定/验证消费，不参与视觉伺服或喷洒触发。
 """Publish a temporally averaged selected ArUco pose as timestamped TF."""
 
 from collections import deque

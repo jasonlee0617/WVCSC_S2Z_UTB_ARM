@@ -1,3 +1,5 @@
+# 中文说明：把后端实例转换为 vision_msgs/Target2D，并绘制调试图像。
+# 坐标必须是整幅相机图像坐标；segment 使用安全点，detect 使用检测框中心。
 """ROS detection conversion and OpenCV rendering for perception results."""
 
 import cv2

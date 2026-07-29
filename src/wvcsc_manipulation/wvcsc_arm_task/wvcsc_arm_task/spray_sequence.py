@@ -6,9 +6,11 @@ from wvcsc_interfaces.action import AlignTarget, ExecuteSpray
 
 from .spray_workflow import SpraySession
 from .target_flow import (
-    TargetAttempt,
     completion_feedback_allowed,
     final_spray_outcome,
+)
+from .target_ledger import (
+    TargetAttempt,
     limit_targets_per_tree,
     target_accounting_is_complete,
 )
@@ -23,7 +25,6 @@ class SpraySequenceMixin:
         按几何关系跨轮合并；循环退出前强制满足
         ``detected == sprayed + unresolved``，从而禁止病果静默丢失。
         """
-        self._active_mission = str(request.mission_id).strip()
         self.get_logger().info(
             f'[ARM] GOAL_ACCEPTED mission={request.mission_id.strip()} '
             f'spray_duration={request.spray_duration:.1f}s')

@@ -1,3 +1,6 @@
+# 中文说明：实机感知、机械臂、继电器与 MissionManager 的组合入口。
+# 它只负责节点拓扑、参数和启动顺序；导航目标仍由完整任务入口提交。
+# 任何节点启动失败都必须保持现有的安全退出和继电器清理行为。
 """Real perception, arm task, relay and Qt mission-manager orchestration."""
 
 import os

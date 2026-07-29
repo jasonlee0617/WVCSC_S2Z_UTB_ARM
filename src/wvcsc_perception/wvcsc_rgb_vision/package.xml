@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- 中文说明：C10 RGB 感知流水线、segment/detect 后端和可视化话题的 ROS 包声明。 -->
 <package format="3">
   <name>wvcsc_rgb_vision</name>
   <version>0.1.0</version>

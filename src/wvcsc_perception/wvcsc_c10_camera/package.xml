@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- 中文说明：Synria C10 相机驱动、内参和诊断节点的 ROS 包声明。 -->
 <package format="3">
   <name>wvcsc_c10_camera</name>
   <version>0.1.0</version>

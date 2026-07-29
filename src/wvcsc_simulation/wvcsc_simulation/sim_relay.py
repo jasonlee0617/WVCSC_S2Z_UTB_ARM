@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# 中文说明：仿真继电器服务，实现与实机 `/relay/set` 相同的双通道软件契约。
+# 成功响应只表示仿真状态已更新；通道 1/2 的视觉状态分别供广域和喷嘴 UI 使用。
 """Gazebo-only implementation of the physical two-channel relay contract."""
 
 import math
@@ -26,6 +28,8 @@ class SimRelay(Node):
     def __init__(self):
         super().__init__('wvcsc_sim_relay')
         self.declare_parameter('service_name', '/relay/set')
+        # Keep these historical parameters in the public launch contract.
+        # The two-channel relay mapping is fixed by SetRelay (1=wide, 2=nozzle).
         self.declare_parameter('wide_channel', 1)
         self.declare_parameter('arm_channel', 2)
         self.declare_parameter('motion_locked_topic', '/motion_control/locked')

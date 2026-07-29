@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# 中文说明：C10 图像上的 ArUco 调试叠加节点。
+# 只发布可视化图像和检测诊断，不修改标定结果，也不触发机械臂运动。
 """Publish a C10 image with ArUco marker overlay for calibration debugging."""
 
 import math

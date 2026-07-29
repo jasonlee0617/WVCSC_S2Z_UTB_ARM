@@ -1,3 +1,6 @@
+# 中文说明：实机视觉伺服参数，定义图像误差到末端速度命令的控制边界。
+# 输入来自 `/vision/target`，输出进入 MoveIt Servo；碰撞、限位和奇异性仍是硬停止条件。
+# 像素映射、滤波和超时参数必须与相机标定及 `AlignTarget` 接口保持一致。
 wvcsc_visual_servo:
   ros__parameters:
     control_rate_hz: 30.0

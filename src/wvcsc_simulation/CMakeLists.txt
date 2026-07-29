@@ -1,3 +1,5 @@
+# 中文说明：Gazebo、Nav2、机械臂和仿真辅助脚本的构建/安装入口。
+# 资源安装路径必须使用 ament 的 Python 安装变量，避免只在单一 Python 版本下可用。
 cmake_minimum_required(VERSION 3.8)
 project(wvcsc_simulation)
 
@@ -20,10 +22,11 @@ ament_target_dependencies(wvcsc_spray_visual_plugin gazebo_ros rclcpp std_msgs)
 ament_python_install_package(${PROJECT_NAME})
 
 # data_acquisition is imported as wvcsc_simulation.data_acquisition in launch files.
-# It must live alongside the wvcsc_simulation package (installed by ament_python_install_package).
+# Install it beside the package using the active Python install directory rather
+# than a distribution-specific Python version.
 install(
   DIRECTORY data_acquisition
-  DESTINATION local/lib/python3.10/dist-packages/wvcsc_simulation
+  DESTINATION ${PYTHON_INSTALL_DIR}/wvcsc_simulation
   PATTERN "scripts" EXCLUDE
   PATTERN "__pycache__" EXCLUDE)
 

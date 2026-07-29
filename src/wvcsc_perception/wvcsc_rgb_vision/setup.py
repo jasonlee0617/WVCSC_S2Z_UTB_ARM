@@ -1,3 +1,5 @@
+# 中文说明：安装 perception_pipeline 及可插拔病态目标后端模块。
+# entry point 是 ROS 节点公开入口；模型权重、话题和后端由 vision YAML 配置。
 import os
 from glob import glob
 

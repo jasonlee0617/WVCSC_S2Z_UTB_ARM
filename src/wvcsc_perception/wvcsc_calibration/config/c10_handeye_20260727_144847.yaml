@@ -1,3 +1,5 @@
+# 中文说明：已保存的 C10 实机手眼标定结果；供标定加载器选择和质量检查。
+# translation/rotation 的单位和坐标系必须与 calibration_io.py 的契约一致。
 calibration:
   type: eye_in_hand
   parent_frame: tool0

@@ -13,7 +13,6 @@ class RelayController:
     def __init__(
             self, node, *, service_name, wide_channel, arm_channel,
             require_service, status_qos, required_failure_callback):
-        self._node = node
         self._logger = node.get_logger()
         self._client = node.create_client(SetRelay, str(service_name))
         self._wide_channel = int(wide_channel)

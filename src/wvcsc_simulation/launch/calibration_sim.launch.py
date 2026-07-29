@@ -1,3 +1,5 @@
+# 中文说明：Gazebo 中车辆搭载 Alicia-M/C10 的手眼标定启动链。
+# 负责零重力启动、控制器、相机、ArUco 和采集节点顺序，不执行完整喷洒任务。
 """Gazebo Classic vehicle-mounted Alicia-M/C10 eye-in-hand calibration."""
 
 import os

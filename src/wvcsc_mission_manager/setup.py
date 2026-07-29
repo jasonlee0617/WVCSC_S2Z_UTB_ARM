@@ -1,3 +1,5 @@
+# 中文说明：安装 MissionManager 状态机、任务请求、停稳检测和继电器控制模块。
+# 入口名称被 launch 和测试依赖，变更时必须同步启动文件。
 import os
 from glob import glob
 

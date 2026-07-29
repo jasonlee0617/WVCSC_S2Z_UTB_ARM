@@ -1,3 +1,5 @@
+# 中文说明：单个视觉伺服 Goal 的无 ROS 决策会话。
+# 它维护误差、稳定、超时和失败摘要；节点层负责通信与真正的 Servo 输出。
 """Per-goal visual-servo decisions without ROS transport or Action side effects."""
 
 from dataclasses import dataclass, field

@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- 中文说明：WVCSC Gazebo/Nav2/MoveIt 仿真包的依赖、脚本和资源声明。 -->
 <package format="3">
   <name>wvcsc_simulation</name>
   <version>0.1.0</version>

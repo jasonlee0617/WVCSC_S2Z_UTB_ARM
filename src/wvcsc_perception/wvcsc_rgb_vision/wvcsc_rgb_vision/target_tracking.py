@@ -1,3 +1,5 @@
+# 中文说明：病态目标模板跟踪和跨帧/跨视角关联辅助模块。
+# 目标账本的逻辑 ID 优先于 YOLO 临时 ID；关联不可靠时必须返回失败，禁止猜测重复喷洒。
 """Pure target-template tracking and cross-frame association."""
 
 from dataclasses import dataclass, replace

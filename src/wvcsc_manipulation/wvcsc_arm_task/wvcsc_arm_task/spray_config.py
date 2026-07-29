@@ -1,3 +1,5 @@
+# 中文说明：喷洒任务参数声明、读取和合法性校验模块。
+# 这里集中定义单位、范围和模式默认值，避免 SprayTask 在流程代码中散落参数约束。
 """Spray task parameter declaration, parsing and validation."""
 
 import math

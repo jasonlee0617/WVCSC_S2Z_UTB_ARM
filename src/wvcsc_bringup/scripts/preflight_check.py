@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# 中文说明：实机启动前置检查节点，校验相机、标定、模型和任务几何契约。
+# 检查失败时应阻止任务启动，避免在标定/设备不完整的情况下驱动机械臂或继电器。
+# 本脚本只读配置和设备状态，不发布导航目标、不发送喷洒 Action。
 """Fail-fast checks for WVCSC mapping and Qt-created real missions."""
 
 import argparse

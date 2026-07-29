@@ -1,3 +1,5 @@
+# 中文说明：安装 wvcsc_arm_task Python 模块、配置文件和可执行入口。
+# entry_points 中的名称是 ROS 2 launch 使用的公开运行入口，修改需同步启动文件。
 import os
 from glob import glob
 

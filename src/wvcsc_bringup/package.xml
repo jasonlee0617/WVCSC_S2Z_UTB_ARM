@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- 中文说明：bringup 包的 ROS 依赖、启动资源和安装边界。 -->
 <package format="3">
   <name>wvcsc_bringup</name>
   <version>0.2.0</version>

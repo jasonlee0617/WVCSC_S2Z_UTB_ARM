@@ -189,6 +189,12 @@ class _Harness:
         self._start_navigation = lambda: setattr(self, 'nav_sent', True)
         self._begin_stop_verification = lambda: None
         self._tick_wide_spray_motion = lambda _now: None
+        self._tick_startup_retry = (
+            MissionManager._tick_startup_retry.__get__(self, _Harness))
+        self._tick_navigation_timeout = (
+            MissionManager._tick_navigation_timeout.__get__(self, _Harness))
+        self._tick_active_work_phase = (
+            MissionManager._tick_active_work_phase.__get__(self, _Harness))
 
     def _fail(self, message):
         self.failures.append(str(message))

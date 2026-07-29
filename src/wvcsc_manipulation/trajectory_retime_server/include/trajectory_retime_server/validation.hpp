@@ -1,3 +1,5 @@
+// 中文说明：轨迹重定时请求的纯参数校验辅助声明。
+// 校验只保证缩放因子和关节轨迹输入满足服务契约，不执行运动或改变原始轨迹语义。
 #ifndef TRAJECTORY_RETIME_SERVER__VALIDATION_HPP_
 #define TRAJECTORY_RETIME_SERVER__VALIDATION_HPP_
 

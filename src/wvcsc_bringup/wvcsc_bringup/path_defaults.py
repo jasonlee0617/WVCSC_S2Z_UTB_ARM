@@ -1,3 +1,6 @@
+# 中文说明：实机默认地图路径解析工具。
+# 只选择符合时间戳目录约定的地图，不修改地图文件本身；导航点资产由 Qt/任务文件另行管理。
+# 任何默认路径变化都必须通过 launch `--show-args` 和实际参数日志确认。
 """Default timestamped map paths for real bringup."""
 
 from __future__ import annotations

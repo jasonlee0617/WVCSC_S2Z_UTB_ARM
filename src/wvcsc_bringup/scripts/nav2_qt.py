@@ -7,10 +7,9 @@ import math
 import os
 import sys
 import uuid
-from dataclasses import dataclass
 
 import rclpy
-from geometry_msgs.msg import Point, Pose, PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
@@ -43,44 +42,39 @@ from wvcsc_interfaces.msg import (
     MissionStatus,
 )
 from wvcsc_interfaces.srv import LoadManualMission
+from wvcsc_bringup.mission_editor_model import (
+    ARM_ANCHOR_POSE_REFERENCE,
+    DEFAULT_ARM_SPRAY_DURATION_SEC,
+    DEFAULT_SAVE_DIRECTORY,
+    MAX_ARM_SPRAY_DURATION_SEC,
+    MIN_ARM_SPRAY_DURATION_SEC,
+    POINT_INSPECT,
+    POINT_TRANSIT,
+    SIM_NAV_MIN_PARKING_CLEARANCE_M,
+    TREE_CANOPY_SEGMENTS,
+    WorkPoint,
+    MissionEditor,
+    arm_anchor_from_vehicle_pose,
+    copy_pose,
+    non_overwriting_json_path,
+    pose_yaw,
+    route_timeline,
+    simulation_parking_clearance_error,
+    simulation_parking_clearance_m,
+    timestamped_mission_path,
+    tree_offset_from_arm_anchor,
+    tree_offset_from_docking,
+    valid_work_side,
+    vehicle_pose_from_arm_anchor,
+    work_side_from_tree_y,
+    WORK_SIDE_LEFT,
+    WORK_SIDE_RIGHT,
+    WORK_SIDE_UNSPECIFIED,
+)
+from wvcsc_bringup.nav2_markers import ManualMissionMarkerBuilder
 from wvcsc_bringup.qt_image_viewer import RosImagePanel
 
 
-DEFAULT_SAVE_DIRECTORY = os.path.expanduser('~')
-
-# These values are the installed ``alicia_mount_joint`` transform.  The
-# Qt editor deliberately uses the same fixed geometry as the real route
-# capture tools: a tree click is converted into alicia_base_link coordinates,
-# not vehicle-base coordinates.
-ARM_BASE_FORWARD_OFFSET_M = -0.40
-ARM_BASE_LEFT_OFFSET_M = 0.0
-ARM_BASE_YAW_RAD = math.pi
-SIDE_EPSILON_M = 0.05
-TREE_ROOT_RADIUS_M = 0.16
-TREE_CANOPY_RADIUS_M = 0.55
-TREE_CANOPY_SEGMENTS = 48
-
-# Gazebo 的树干碰撞圆柱半径约为 0.20 m。仿真静态地图使用 0.25 m
-# 的保守树干圆，并沿用 Nav2 的 0.55 m 膨胀半径。该预检只在仿真
-# 启用，用来阻止把停车位录在精确规划也无法到达的树干安全区内。
-SIM_TREE_TRUNK_RADIUS_M = 0.25
-SIM_NAV_FOOTPRINT_HALF_LENGTH_M = 0.725
-SIM_NAV_FOOTPRINT_HALF_WIDTH_M = 0.375
-SIM_NAV_FOOTPRINT_PADDING_M = 0.05
-SIM_NAV_INFLATION_RADIUS_M = 0.55
-SIM_NAV_MIN_PARKING_CLEARANCE_M = 0.05
-
-POINT_INSPECT = 'INSPECT'
-POINT_TRANSIT = 'TRANSIT'
-POINT_TYPES = (POINT_TRANSIT, POINT_INSPECT)
-
-WORK_SIDE_UNSPECIFIED = 'UNSPECIFIED'
-WORK_SIDE_LEFT = 'LEFT'
-WORK_SIDE_RIGHT = 'RIGHT'
-ARM_ANCHOR_POSE_REFERENCE = 'alicia_base_link_xy_vehicle_yaw'
-DEFAULT_ARM_SPRAY_DURATION_SEC = 3.0
-MIN_ARM_SPRAY_DURATION_SEC = 0.2
-MAX_ARM_SPRAY_DURATION_SEC = 10.0
 MANUAL_MISSION_REQUEST_FIELDS = (
     'header', 'mission_id', 'home_pose', 'return_home_after_mission',
     'points')
@@ -103,43 +97,6 @@ def manual_mission_request_contract_error(request):
         'wvcsc_mission_manager 和 wvcsc_bringup，并重新 source install/setup.bash。')
 
 
-def non_overwriting_json_path(path):
-    """Return ``path`` or a numbered sibling without overwriting a mission."""
-    root, extension = os.path.splitext(os.path.expanduser(path))
-    extension = extension or '.json'
-    candidate = root + extension
-    suffix = 1
-    while os.path.exists(candidate):
-        candidate = f'{root}_{suffix:02d}{extension}'
-        suffix += 1
-    return candidate
-
-
-def timestamped_mission_path(directory=DEFAULT_SAVE_DIRECTORY, now=None):
-    """Create the default save path for one distinct manual mission export."""
-    timestamp = (now or datetime.datetime.now()).strftime('%Y%m%d_%H%M%S')
-    return non_overwriting_json_path(
-        os.path.join(os.path.expanduser(directory),
-                     f'navigation_points_{timestamp}.json'))
-
-
-def route_timeline(points):
-    """Return the user-facing relay contract for the submitted route."""
-    entries = []
-    previous = '起点'
-    for index, point in enumerate(points, start=1):
-        wide = 'ON' if point.wide_spray_on_approach else 'OFF'
-        current = f'{index}:{point.point_type}'
-        item = f'{previous} --[广域={wide}]--> {current}'
-        if point.point_type == POINT_INSPECT:
-            item += f' 病株={point.arm_spray_duration_sec:.1f}s'
-        if point.dwell_time_sec > 0.0:
-            item += f' 停留={point.dwell_time_sec:.1f}s'
-        entries.append(item)
-        previous = current
-    return ' | '.join(entries)
-
-
 def remove_opencv_qt_plugin_override(environment=None):
     """Prevent a pip OpenCV wheel from selecting its incompatible Qt plugin.
 
@@ -156,285 +113,6 @@ def remove_opencv_qt_plugin_override(environment=None):
     font_path = environment.get('QT_QPA_FONTDIR', '')
     if '/cv2/qt/' in font_path.replace('\\', '/'):
         environment.pop('QT_QPA_FONTDIR', None)
-
-
-def arm_anchor_from_vehicle_pose(vehicle_pose):
-    """Return the operator-facing arm-base anchor for a vehicle pose.
-
-    The XY point is ``alicia_base_link``.  Its orientation deliberately keeps
-    the vehicle heading because the RViz 2D Goal arrow means "vehicle front",
-    not the Alicia arm's local +X direction.
-    """
-    arm_anchor = copy_pose(vehicle_pose)
-    yaw = pose_yaw(vehicle_pose)
-    cosine, sine = math.cos(yaw), math.sin(yaw)
-    arm_anchor.position.x += (
-        cosine * ARM_BASE_FORWARD_OFFSET_M
-        - sine * ARM_BASE_LEFT_OFFSET_M)
-    arm_anchor.position.y += (
-        sine * ARM_BASE_FORWARD_OFFSET_M
-        + cosine * ARM_BASE_LEFT_OFFSET_M)
-    return arm_anchor
-
-
-def vehicle_pose_from_arm_anchor(arm_anchor_pose):
-    """Convert an operator-facing arm-base click into a Nav2 vehicle goal."""
-    vehicle_pose = copy_pose(arm_anchor_pose)
-    yaw = pose_yaw(arm_anchor_pose)
-    cosine, sine = math.cos(yaw), math.sin(yaw)
-    vehicle_pose.position.x -= (
-        cosine * ARM_BASE_FORWARD_OFFSET_M
-        - sine * ARM_BASE_LEFT_OFFSET_M)
-    vehicle_pose.position.y -= (
-        sine * ARM_BASE_FORWARD_OFFSET_M
-        + cosine * ARM_BASE_LEFT_OFFSET_M)
-    return vehicle_pose
-
-
-def tree_offset_from_arm_anchor(arm_anchor_pose, tree_pose):
-    """Return signed Alicia-frame XY for a tree clicked in ``map``."""
-    arm_yaw = pose_yaw(arm_anchor_pose) + ARM_BASE_YAW_RAD
-    arm_cosine, arm_sine = math.cos(arm_yaw), math.sin(arm_yaw)
-    dx = tree_pose.position.x - arm_anchor_pose.position.x
-    dy = tree_pose.position.y - arm_anchor_pose.position.y
-    return (
-        arm_cosine * dx + arm_sine * dy,
-        -arm_sine * dx + arm_cosine * dy,
-    )
-
-
-def tree_offset_from_docking(docking_pose, tree_pose):
-    """Compatibility helper for legacy vehicle-base docking poses."""
-    return tree_offset_from_arm_anchor(
-        arm_anchor_from_vehicle_pose(docking_pose), tree_pose)
-
-
-def work_side_from_tree_y(tree_y_m):
-    tree_y_m = float(tree_y_m)
-    if not math.isfinite(tree_y_m) or abs(tree_y_m) < SIDE_EPSILON_M:
-        return WORK_SIDE_UNSPECIFIED
-    return WORK_SIDE_LEFT if tree_y_m > 0.0 else WORK_SIDE_RIGHT
-
-
-def valid_work_side(point):
-    """Return ``None`` when an inspect point's declared side is consistent."""
-    if point.point_type != POINT_INSPECT:
-        return None
-    inferred = work_side_from_tree_y(point.tree_y_m)
-    if inferred == WORK_SIDE_UNSPECIFIED:
-        return '病株相对机械臂基座的 Y 不能接近 0'
-    if point.work_side != inferred:
-        return (
-            f'病株侧位与相对 Y 不一致: Y={point.tree_y_m:.3f} m, '
-            f'应为 {inferred}')
-    return None
-
-
-def simulation_parking_clearance_m(arm_anchor_pose, tree_pose):
-    """Return clearance from the padded vehicle footprint to one tree's map cost.
-
-    RViz records ``alicia_base_link`` ground projections, whereas Nav2 moves
-    ``base_footprint``.  The calculation therefore first converts the anchor
-    to the actual vehicle pose, rotates the tree into the vehicle frame, and
-    measures the shortest distance to its padded rectangle.  A positive
-    result is free space remaining after the static trunk and inflation cost.
-    """
-    vehicle_pose = vehicle_pose_from_arm_anchor(arm_anchor_pose)
-    yaw = pose_yaw(vehicle_pose)
-    dx = tree_pose.position.x - vehicle_pose.position.x
-    dy = tree_pose.position.y - vehicle_pose.position.y
-    cosine, sine = math.cos(yaw), math.sin(yaw)
-    local_x = cosine * dx + sine * dy
-    local_y = -sine * dx + cosine * dy
-    half_length = (SIM_NAV_FOOTPRINT_HALF_LENGTH_M +
-                   SIM_NAV_FOOTPRINT_PADDING_M)
-    half_width = (SIM_NAV_FOOTPRINT_HALF_WIDTH_M +
-                  SIM_NAV_FOOTPRINT_PADDING_M)
-    nearest_x = min(max(local_x, -half_length), half_length)
-    nearest_y = min(max(local_y, -half_width), half_width)
-    footprint_distance = math.hypot(local_x - nearest_x, local_y - nearest_y)
-    return (footprint_distance - SIM_TREE_TRUNK_RADIUS_M -
-            SIM_NAV_INFLATION_RADIUS_M)
-
-
-def simulation_parking_clearance_error(point, enabled=False):
-    """Return a simulation-only recording error for an unsafe inspect parking pose."""
-    if (not enabled or point.point_type != POINT_INSPECT or
-            point.tree_pose is None):
-        return None
-    clearance = simulation_parking_clearance_m(point.pose, point.tree_pose)
-    if clearance >= SIM_NAV_MIN_PARKING_CLEARANCE_M:
-        return None
-    return (
-        '仿真停车位过近：车辆 footprint 至树干/膨胀区净余量 '
-        f'{clearance:.2f} m，小于 {SIM_NAV_MIN_PARKING_CLEARANCE_M:.2f} m；'
-        '请将机械臂基座停靠位远离树中心后重新记录')
-
-
-def copy_pose(source):
-    pose = Pose()
-    pose.position.x = source.position.x
-    pose.position.y = source.position.y
-    pose.position.z = source.position.z
-    pose.orientation.x = source.orientation.x
-    pose.orientation.y = source.orientation.y
-    pose.orientation.z = source.orientation.z
-    pose.orientation.w = source.orientation.w
-    return pose
-
-
-def pose_yaw(pose):
-    return math.atan2(
-        2.0 * (pose.orientation.w * pose.orientation.z
-               + pose.orientation.x * pose.orientation.y),
-        1.0 - 2.0 * (pose.orientation.y ** 2 + pose.orientation.z ** 2),
-    )
-
-
-def pose_to_json(pose):
-    return {
-        'position': {
-            'x': pose.position.x,
-            'y': pose.position.y,
-            'z': pose.position.z,
-        },
-        'orientation': {
-            'x': pose.orientation.x,
-            'y': pose.orientation.y,
-            'z': pose.orientation.z,
-            'w': pose.orientation.w,
-        },
-    }
-
-
-def pose_from_json(data):
-    pose = Pose()
-    pose.position.x = float(data['position']['x'])
-    pose.position.y = float(data['position']['y'])
-    pose.position.z = float(data['position'].get('z', 0.0))
-    pose.orientation.x = float(data['orientation'].get('x', 0.0))
-    pose.orientation.y = float(data['orientation'].get('y', 0.0))
-    pose.orientation.z = float(data['orientation']['z'])
-    pose.orientation.w = float(data['orientation']['w'])
-    return pose
-
-
-@dataclass
-class WorkPoint:
-    pose: Pose
-    tree_x_m: float = 0.0
-    tree_y_m: float = 0.0
-    tree_base_z_m: float = 0.0
-    point_type: str = POINT_TRANSIT
-    work_side: str = WORK_SIDE_UNSPECIFIED
-    wide_spray_on_approach: bool = False
-    arm_spray_duration_sec: float = DEFAULT_ARM_SPRAY_DURATION_SEC
-    dwell_time_sec: float = 0.0
-    tree_pose: Pose | None = None
-
-
-class MissionEditor:
-    """Qt 保存的人工任务；所有停靠点均由操作员在 RViz 中记录。"""
-
-    schema_version = 8
-
-    def __init__(self, spray_duration=DEFAULT_ARM_SPRAY_DURATION_SEC):
-        spray_duration = float(spray_duration)
-        if not (MIN_ARM_SPRAY_DURATION_SEC <= spray_duration <=
-                MAX_ARM_SPRAY_DURATION_SEC):
-            raise ValueError(
-                'default_arm_spray_duration_sec must be within '
-                f'{MIN_ARM_SPRAY_DURATION_SEC:.1f}–'
-                f'{MAX_ARM_SPRAY_DURATION_SEC:.1f}')
-        self.start_pose = None
-        self.points = []
-        self.spray_duration = spray_duration
-        self.return_home_after_mission = False
-
-    def add_point(self, pose, tree_x_m=0.0, tree_y_m=0.0, tree_base_z_m=0.0,
-                  point_type=POINT_TRANSIT,
-                  work_side=WORK_SIDE_UNSPECIFIED,
-                  wide_spray_on_approach=False,
-                  arm_spray_duration_sec=None,
-                  dwell_time_sec=0.0,
-                  tree_pose=None):
-        if point_type not in POINT_TYPES:
-            raise ValueError(f'unsupported point type: {point_type}')
-        if point_type == POINT_INSPECT and work_side == WORK_SIDE_UNSPECIFIED:
-            work_side = work_side_from_tree_y(tree_y_m)
-        if arm_spray_duration_sec is None:
-            arm_spray_duration_sec = self.spray_duration
-        self.points.append(WorkPoint(
-            copy_pose(pose), float(tree_x_m), float(tree_y_m),
-            float(tree_base_z_m), point_type, work_side,
-            bool(wide_spray_on_approach), float(arm_spray_duration_sec),
-            float(dwell_time_sec),
-            copy_pose(tree_pose) if tree_pose is not None else None))
-
-    def save(self, path):
-        data = {
-            'schema_version': self.schema_version,
-            'pose_reference': ARM_ANCHOR_POSE_REFERENCE,
-            'start_pose': (
-                pose_to_json(self.start_pose) if self.start_pose else None),
-            'spray_duration': self.spray_duration,
-            'return_home_after_mission': self.return_home_after_mission,
-            'route_points': [
-                {'pose': pose_to_json(point.pose),
-                 'point_type': point.point_type,
-                 'tree_x_m': point.tree_x_m,
-                 'tree_y_m': point.tree_y_m,
-                 'tree_base_z_m': point.tree_base_z_m,
-                 'tree_pose': (
-                     pose_to_json(point.tree_pose)
-                     if point.tree_pose is not None else None),
-                 'work_side': point.work_side,
-                 'wide_spray_on_approach': point.wide_spray_on_approach,
-                 'arm_spray_duration_sec': point.arm_spray_duration_sec,
-                 'dwell_time_sec': point.dwell_time_sec}
-                for point in self.points
-            ],
-        }
-        with open(path, 'w', encoding='utf-8') as stream:
-            json.dump(data, stream, indent=2, ensure_ascii=False)
-
-    def load(self, path):
-        with open(path, encoding='utf-8') as stream:
-            data = json.load(stream)
-        version = data.get('schema_version')
-        if version != self.schema_version:
-            raise ValueError(
-                f'unsupported navigation file schema_version: {version!r}')
-        if data.get('pose_reference') != ARM_ANCHOR_POSE_REFERENCE:
-            raise ValueError(
-                'schema v8 requires pose_reference='
-                f'{ARM_ANCHOR_POSE_REFERENCE!r}')
-
-        self.start_pose = (
-            pose_from_json(data['start_pose'])
-            if data.get('start_pose') else None)
-        self.spray_duration = float(data.get('spray_duration', 3.0))
-        self.return_home_after_mission = bool(
-            data.get('return_home_after_mission', False))
-        self.points = []
-        for item in data.get('route_points', []):
-            point_type = str(item.get('point_type', POINT_TRANSIT))
-            if point_type not in POINT_TYPES:
-                raise ValueError(f'unsupported point type: {point_type}')
-            tree_pose_data = item.get('tree_pose')
-            self.points.append(WorkPoint(
-                pose_from_json(item['pose']),
-                float(item.get('tree_x_m', 0.0)),
-                float(item.get('tree_y_m', 0.0)),
-                float(item.get('tree_base_z_m', 0.0)),
-                point_type,
-                str(item.get('work_side', WORK_SIDE_UNSPECIFIED)),
-                bool(item.get('wide_spray_on_approach', False)),
-                float(item.get('arm_spray_duration_sec',
-                               data.get('spray_duration', 3.0))),
-                float(item.get('dwell_time_sec', 0.0)),
-                pose_from_json(tree_pose_data) if tree_pose_data else None,
-            ))
 
 
 class Nav2QtNode(Node):
@@ -610,253 +288,59 @@ class Nav2QtNode(Node):
         return request
 
     def publish_markers(self, editor, candidate, pending_dock=None):
-        markers = MarkerArray()
-        clear = Marker()
-        clear.action = Marker.DELETEALL
-        markers.markers.append(clear)
-        if editor.start_pose is not None:
-            markers.markers.append(self._marker(
-                editor.start_pose, 'manual_start', 0, 0.2, 0.9, 0.2))
-            markers.markers.append(self._vehicle_marker(
-                editor.start_pose, 'manual_start_vehicle', 0, 0.2, 0.9, 0.2))
-            markers.markers.append(self._mount_line(
-                editor.start_pose, 'manual_start_mount', 0, 0.2, 0.9, 0.2))
-        for index, point in enumerate(editor.points, start=1):
-            color = {
-                POINT_TRANSIT: (0.1, 0.6, 1.0),
-                POINT_INSPECT: (1.0, 0.75, 0.0),
-            }[point.point_type]
-            markers.markers.append(self._marker(
-                point.pose, 'manual_target', index, *color))
-            markers.markers.append(self._vehicle_marker(
-                point.pose, 'manual_target_vehicle', index, *color))
-            markers.markers.append(self._mount_line(
-                point.pose, 'manual_target_mount', index, *color))
-            markers.markers.append(self._label(point.pose, index, point))
-            if point.tree_pose is not None:
-                markers.markers.append(
-                    self._tree_root_marker(point.tree_pose, index))
-                markers.markers.append(
-                    self._tree_canopy_marker(point.tree_pose, index))
-                markers.markers.append(
-                    self._tree_line(point.pose, point.tree_pose, index))
-                markers.markers.append(
-                    self._tree_distance_label(point.pose, point.tree_pose, index))
-                markers.markers.append(self._tree_label(point.tree_pose, index))
-        # Cyan line: operator-recorded route after every arm-base click has
-        # been converted into the actual vehicle-base Nav2 goal.  It is not a
-        # planner prediction; the magenta Path in RViz is recorded odometry.
-        route_anchors = []
-        if editor.start_pose is not None:
-            route_anchors.append(editor.start_pose)
-        route_anchors.extend(point.pose for point in editor.points)
-        if len(route_anchors) >= 2:
-            markers.markers.append(self._vehicle_route_marker(route_anchors))
-        if candidate is not None:
-            markers.markers.append(self._marker(
-                candidate, 'manual_candidate', 1000, 1.0, 0.8, 0.0))
-            markers.markers.append(self._vehicle_marker(
-                candidate, 'manual_candidate_vehicle', 1000, 1.0, 0.8, 0.0))
-            markers.markers.append(self._mount_line(
-                candidate, 'manual_candidate_mount', 1000, 1.0, 0.8, 0.0))
-        if pending_dock is not None:
-            markers.markers.append(self._marker(
-                pending_dock, 'manual_pending_inspect_dock', 1001,
-                0.75, 0.2, 0.9))
-            markers.markers.append(self._vehicle_marker(
-                pending_dock, 'manual_pending_inspect_vehicle', 1001,
-                0.75, 0.2, 0.9))
-        self.marker_pub.publish(markers)
+        self.marker_pub.publish(
+            self._marker_builder().build(editor, candidate, pending_dock))
 
-    def _marker(self, pose, namespace, marker_id, red, green, blue):
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = namespace
-        marker.id = marker_id
-        marker.type = Marker.ARROW
-        marker.action = Marker.ADD
-        marker.pose = copy_pose(pose)
-        marker.scale.x = 0.55
-        marker.scale.y = 0.14
-        marker.scale.z = 0.14
-        marker.color.r = red
-        marker.color.g = green
-        marker.color.b = blue
-        marker.color.a = 0.9
-        return marker
+    def _marker_builder(self):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg())
 
-    def _vehicle_marker(self, arm_anchor, namespace, marker_id,
-                        red, green, blue):
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = namespace
-        marker.id = marker_id
-        marker.type = Marker.SPHERE
-        marker.action = Marker.ADD
-        marker.pose = vehicle_pose_from_arm_anchor(arm_anchor)
-        marker.scale.x = marker.scale.y = marker.scale.z = 0.16
-        marker.color.r = red
-        marker.color.g = green
-        marker.color.b = blue
-        marker.color.a = 0.55
-        return marker
+    # Keep these private entry points during the Qt refactor.  They are used
+    # by existing focused marker tests and preserve the former marker shapes.
+    def _marker(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).marker(*args)
 
-    def _mount_line(self, arm_anchor, namespace, marker_id,
-                    red, green, blue):
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = namespace
-        marker.id = marker_id
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
-        marker.scale.x = 0.025
-        marker.color.r = red
-        marker.color.g = green
-        marker.color.b = blue
-        marker.color.a = 0.65
-        marker.points.extend([
-            arm_anchor.position,
-            vehicle_pose_from_arm_anchor(arm_anchor).position,
-        ])
-        return marker
+    def _vehicle_marker(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).vehicle_marker(
+                *args)
 
-    def _vehicle_route_marker(self, arm_anchors):
-        """Show the recorded vehicle-base route derived from arm-base clicks."""
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'manual_vehicle_route'
-        marker.id = 0
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
-        marker.scale.x = 0.045
-        marker.color.r = 0.0
-        marker.color.g = 0.95
-        marker.color.b = 0.95
-        marker.color.a = 0.90
-        for arm_anchor in arm_anchors:
-            vehicle_pose = vehicle_pose_from_arm_anchor(arm_anchor)
-            marker.points.append(Point(
-                x=vehicle_pose.position.x,
-                y=vehicle_pose.position.y,
-                z=0.06,
-            ))
-        return marker
+    def _mount_line(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).mount_line(*args)
 
-    def _label(self, pose, index, point):
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'manual_target_label'
-        marker.id = index
-        marker.type = Marker.TEXT_VIEW_FACING
-        marker.action = Marker.ADD
-        marker.pose = copy_pose(pose)
-        marker.pose.position.z += 0.35
-        marker.scale.z = 0.25
-        marker.color.r = marker.color.g = marker.color.b = marker.color.a = 1.0
-        marker.text = f'{index}: {point.point_type}'
-        if point.point_type == POINT_INSPECT:
-            marker.text += f' {point.work_side}'
-        return marker
+    def _vehicle_route_marker(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).vehicle_route_marker(
+                *args)
 
-    def _tree_root_marker(self, pose, marker_id):
-        """Draw the physical tree-trunk footprint at the manually clicked root."""
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'manual_tree_root'
-        marker.id = marker_id
-        marker.type = Marker.CYLINDER
-        marker.action = Marker.ADD
-        marker.pose = copy_pose(pose)
-        marker.pose.position.z = 0.015
-        marker.scale.x = marker.scale.y = TREE_ROOT_RADIUS_M * 2.0
-        marker.scale.z = 0.03
-        marker.color.r = 0.45
-        marker.color.g = 0.20
-        marker.color.b = 0.05
-        marker.color.a = 0.95
-        return marker
+    def _label(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).label(*args)
 
-    def _tree_canopy_marker(self, pose, marker_id):
-        """Draw the horizontal outer envelope of the current tree model."""
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'manual_tree_canopy'
-        marker.id = marker_id
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
-        marker.scale.x = 0.025
-        marker.color.r = 1.0
-        marker.color.g = 0.72
-        marker.color.b = 0.05
-        marker.color.a = 0.95
-        for step in range(TREE_CANOPY_SEGMENTS + 1):
-            angle = 2.0 * math.pi * step / TREE_CANOPY_SEGMENTS
-            marker.points.append(Point(
-                x=pose.position.x + TREE_CANOPY_RADIUS_M * math.cos(angle),
-                y=pose.position.y + TREE_CANOPY_RADIUS_M * math.sin(angle),
-                z=0.04,
-            ))
-        return marker
+    def _tree_root_marker(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).tree_root_marker(
+                *args)
 
-    def _tree_distance_label(self, arm_anchor, tree, marker_id):
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'manual_tree_distance'
-        marker.id = marker_id
-        marker.type = Marker.TEXT_VIEW_FACING
-        marker.action = Marker.ADD
-        marker.pose.position.x = (arm_anchor.position.x + tree.position.x) / 2.0
-        marker.pose.position.y = (arm_anchor.position.y + tree.position.y) / 2.0
-        marker.pose.position.z = 0.24
-        marker.scale.z = 0.18
-        marker.color.r = marker.color.g = marker.color.b = marker.color.a = 1.0
-        distance = math.hypot(
-            tree.position.x - arm_anchor.position.x,
-            tree.position.y - arm_anchor.position.y)
-        marker.text = f'ARM-ROOT: {distance:.2f} m'
-        return marker
+    def _tree_canopy_marker(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).tree_canopy_marker(
+                *args)
 
-    def _tree_label(self, pose, marker_id):
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'manual_tree_label'
-        marker.id = marker_id
-        marker.type = Marker.TEXT_VIEW_FACING
-        marker.action = Marker.ADD
-        marker.pose = copy_pose(pose)
-        marker.pose.position.z = 0.30
-        marker.scale.z = 0.16
-        marker.color.r = 1.0
-        marker.color.g = 0.85
-        marker.color.b = 0.2
-        marker.color.a = 1.0
-        marker.text = f'ROOT\nCANOPY r={TREE_CANOPY_RADIUS_M:.2f}m'
-        return marker
+    def _tree_distance_label(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).tree_distance_label(
+                *args)
 
-    def _tree_line(self, docking, tree, marker_id):
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'manual_tree_link'
-        marker.id = marker_id
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
-        marker.scale.x = 0.04
-        marker.color.r = 1.0
-        marker.color.g = 0.2
-        marker.color.b = 0.2
-        marker.color.a = 0.85
-        marker.points.extend([docking.position, tree.position])
-        return marker
+    def _tree_label(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).tree_label(*args)
+
+    def _tree_line(self, *args):
+        return ManualMissionMarkerBuilder(
+            self.map_frame, lambda: self.get_clock().now().to_msg()).tree_line(*args)
 
 
 class Nav2Gui(QWidget):

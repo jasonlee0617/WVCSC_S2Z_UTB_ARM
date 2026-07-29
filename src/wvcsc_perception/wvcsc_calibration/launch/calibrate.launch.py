@@ -1,3 +1,5 @@
+# 中文说明：交互式 C10 手眼标定启动入口。
+# 采样需要操作员在独立终端确认，launch 子进程不得假设 stdin 是可交互 TTY。
 """Alicia-M + C10 eye-in-hand calibration session (interactive sampling).
 
 The arm model reuses the Alicia-M native URDF (no vehicle chassis), and the

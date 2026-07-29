@@ -1,3 +1,5 @@
+# 中文说明：视觉伺服节点参数读取与范围检查辅助函数。
+# 参数只从 ROS 节点读取并转换为控制器配置，不在此处改变运行时默认值。
 from dataclasses import dataclass
 import math
 

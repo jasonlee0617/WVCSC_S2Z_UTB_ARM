@@ -1,3 +1,6 @@
+# 中文说明：实机独立导航入口，启动车辆传感器、定位、Nav2 与导航 RViz。
+# Qt 完整任务会复用其中的导航链，但任务点加载和喷洒触发由 MissionManager 负责。
+# 地图路径、目标话题和底盘控制接口是外部可见契约，不能在此处静默改名。
 """Standalone real navigation aligned with wtb_navigation2_fdimu.launch.py."""
 
 import os

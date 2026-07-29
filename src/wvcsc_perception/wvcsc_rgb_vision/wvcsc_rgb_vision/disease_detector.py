@@ -1,3 +1,5 @@
+# 中文说明：病态目标 YOLO detect 后端。
+# 输入整幅图像，输出检测框和置信度；不生成掩膜，流水线将框中心作为 Target2D 控制点。
 """YOLO detection backend for disease targets."""
 
 from .model_utils import (

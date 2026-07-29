@@ -1,3 +1,6 @@
+# 中文说明：实机建图模式入口，组合底盘、雷达、IMU、EKF 与 Cartographer。
+# 本文件用于建图/定位准备，不负责完整任务的路线执行和机械臂喷洒。
+# 传感器话题与 TF 关系必须与 real_navigation.launch.py 保持一致。
 """Standalone real mapping launch matching my_cartographer's proven chain."""
 
 import os

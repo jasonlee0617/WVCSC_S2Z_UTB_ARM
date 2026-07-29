@@ -1,3 +1,6 @@
+// 中文说明：提供 `/trajectory_retime/retime` 服务的 ROS 2 C++ 节点。
+// 节点接收 JointTrajectory 和速度/加速度缩放，调用 MoveIt 时间参数化后返回新轨迹；
+// 它不直接发送控制器命令，调用方仍负责后续执行与安全检查。
 #include <cmath>
 #include <functional>
 #include <memory>

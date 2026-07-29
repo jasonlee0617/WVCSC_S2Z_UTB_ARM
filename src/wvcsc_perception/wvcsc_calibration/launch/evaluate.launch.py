@@ -1,3 +1,5 @@
+# 中文说明：加载已保存手眼结果并发布 TF/RViz 进行验证的启动入口。
+# 它只做离线/在线可视化核验，不重新采样、不覆盖标定文件。
 """Alicia-M + C10 eye-in-hand verification (loads saved calibration).
 
 The arm model reuses the Alicia-M native URDF (no vehicle chassis).

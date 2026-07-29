@@ -1,3 +1,5 @@
+# 中文说明：病态目标 YOLO segment 后端。
+# 输入整幅图像，输出框、掩膜和掩膜安全点；默认实机/仿真流程使用此后端。
 """YOLO segmentation backend for disease targets."""
 
 import math

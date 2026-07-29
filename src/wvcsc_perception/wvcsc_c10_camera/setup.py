@@ -1,3 +1,5 @@
+# 中文说明：安装 C10 相机节点、launch 文件和相机参数资源。
+# 设备路径、图像话题和相机信息由 launch/YAML 公开配置，不在 setup 中硬编码。
 import os
 from glob import glob
 

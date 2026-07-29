@@ -1,3 +1,5 @@
+# 中文说明：生成确定性的果园树木、果实和病态标签仿真资产。
+# 固定随机种子保证回归可重复；生成逻辑不改变任务管理器或感知接口。
 """Generate deterministic sparse orchard assets for Gazebo."""
 
 import copy

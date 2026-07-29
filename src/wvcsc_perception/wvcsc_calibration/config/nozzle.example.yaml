@@ -1,5 +1,7 @@
 # Temporary commissioning profile: spray_nozzle_link is coincident with tool0.
 # Replace this file with measured nozzle extrinsics before precision spraying.
+# 中文说明：喷嘴相对 tool0 的示例标定，不是完整实机精度标定结果。
+# 仅供启动链验证 TF/接口；正式喷洒必须替换为实测喷嘴外参。
 schema_version: 1
 parent_frame: tool0
 child_frame: spray_nozzle_link

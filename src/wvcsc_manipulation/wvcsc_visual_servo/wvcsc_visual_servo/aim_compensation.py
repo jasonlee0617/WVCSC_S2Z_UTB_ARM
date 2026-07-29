@@ -1,3 +1,6 @@
+# 中文说明：喷嘴轴线在相机图像中的标定补偿与投影工具。
+# 输入是 camera_color_optical_frame 下的 TF 和工作平面，输出给 AlignTarget 的像素目标；
+# 本模块只计算几何，不移动机械臂、不发送继电器命令。
 """Project a calibrated spray-nozzle axis into the C10 image.
 
 The transform supplied to :func:`project_nozzle_axis` must describe the

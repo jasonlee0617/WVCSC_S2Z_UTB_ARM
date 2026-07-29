@@ -1,3 +1,6 @@
+# 中文说明：实机机械臂喷嘴执行器参数，连接 `/spray/execute` 与继电器通道 2。
+# SprayActuator 在继电器成功确认后负责定时开启、反馈进度以及取消/异常清理。
+# 本文件不控制车辆行进中的广域通道 1，也不替代 MissionManager 的任务门控。
 wvcsc_spray_actuator:
   ros__parameters:
     action_name: /spray/execute

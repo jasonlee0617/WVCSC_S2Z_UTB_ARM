@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# 中文说明：按预设停靠位直接采集仿真 C10 图像的辅助脚本。
+# 它是数据采集入口，不是完整任务启动入口；保存结果后退出。
 """Capture six raw C10 frames after direct seed-specific docking poses."""
 
 import argparse

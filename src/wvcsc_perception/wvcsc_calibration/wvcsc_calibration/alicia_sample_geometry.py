@@ -1,3 +1,5 @@
+# 中文说明：Alicia-M 手眼采样的固定姿态与几何常量。
+# 仿真和实机共用同一采样顺序；这里只保存不可变采样契约，不创建 ROS 通信。
 """Alicia-M hand-eye sampling constants.
 
 The hand-eye collector deliberately follows the official Alicia-M calibration

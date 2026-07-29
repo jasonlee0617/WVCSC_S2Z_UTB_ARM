@@ -397,7 +397,6 @@ class _ClosedLoopSequenceHarness:
     def __init__(self, *, alignment_ok=True, fallback_enabled=True,
                  recenter_ok=True, alignment_code=None, targets=None,
                  failed_target_ids=()):
-        self._active_mission = ''
         self._spray_on_alignment_failure = fallback_enabled
         self._observation_mode = 'joint_presets'
         self._observation_candidate_index = 0

@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- 中文说明：C10 内参、Alicia-M 手眼标定和 ArUco 观测工具的 ROS 包声明。 -->
 <package format="3">
   <name>wvcsc_calibration</name>
   <version>0.1.0</version>

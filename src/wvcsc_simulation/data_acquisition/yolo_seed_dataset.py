@@ -1,3 +1,5 @@
+# 中文说明：写入和校验待人工标注的仿真 C10 图像数据集。
+# 数据集契约与运行时 perception_pipeline 解耦，不能把采集标签当作在线目标消息。
 """Write and validate raw Gazebo C10 captures for later manual annotation."""
 
 from datetime import datetime, timezone
@@ -9,7 +11,7 @@ import yaml
 
 
 CLASS_NAMES = {0: 'diseased_fruit'}
-FRUIT_SEG_CLASS_NAMES = {0: 'diseased_fruit'}
+FRUIT_SEG_CLASS_NAMES = dict(CLASS_NAMES)
 IMAGE_SIZE = (640, 480)
 
 

@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- 中文说明：任务、感知、继电器和视觉伺服接口包；不包含节点实现。 -->
 <package format="3">
   <name>wvcsc_interfaces</name>
   <version>0.1.0</version>

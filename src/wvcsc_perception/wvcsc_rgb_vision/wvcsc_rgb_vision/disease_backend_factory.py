@@ -1,3 +1,5 @@
+# 中文说明：根据配置创建 segment 或 detect 病态目标后端。
+# 工厂只负责选择/构造模型适配器，不参与树导航、目标账本或 ROS 消息发布。
 """Construct the configured disease-target inference backend."""
 
 from .disease_detector import DiseaseDetector

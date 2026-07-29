@@ -1,3 +1,5 @@
+# 中文说明：IK 与 joint_preset 共用的观察候选数据契约。
+# 候选只描述位姿、距离和安全筛选结果，实际移动仍由上层 MoveIt 适配器负责。
 """Shared observation-candidate contract for IK and joint-preset strategies."""
 
 from dataclasses import dataclass

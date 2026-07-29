@@ -41,7 +41,6 @@ from .perception_types import (
     deduplicate_instances,
 )
 from .target_tracking import (
-    TargetTemplate,
     match_target_template,
     reassociation_candidate,
     smoothed_target,
@@ -242,15 +241,8 @@ class PerceptionPipeline(Node):
             self._fruit_pub.publish(instances_to_array(message, fruits))
             if bool(self.get_parameter('publish_visualization').value):
                 self._publish_fruit_visualization(message, image, fruits)
-        target = None
-        invalid_reason = 'not_target_mode'
-        event = 'frame'
         if self._inference_mode == 'target':
-            target, invalid_reason, event = self._publish_selected_target(
-                message, fruits, image)
-        elif self._inference_mode == 'disease' and not any(
-            item.class_name == self._canonical_target_name for item in fruits):
-            invalid_reason = f'no_{self._canonical_target_name}'
+            self._publish_selected_target(message, fruits, image)
 
     def _fruit_instances(self, image):
         """Run the configured disease backend on the full camera image."""

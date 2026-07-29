@@ -1,3 +1,5 @@
+# 中文说明：轨迹重定时服务。调用方提交待处理轨迹和缩放比例，服务端返回时间参数化结果。
+# 服务属于机械臂运动准备数据流，不会触发喷洒、视觉伺服或控制器执行。
 trajectory_msgs/JointTrajectory trajectory
 string group_name
 float64 velocity_scaling

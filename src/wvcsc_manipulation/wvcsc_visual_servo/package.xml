@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- 中文说明：视觉伺服节点、纯控制算法和 MoveIt Servo 配置的 ROS 包声明。 -->
 <package format="3">
   <name>wvcsc_visual_servo</name>
   <version>0.1.0</version>

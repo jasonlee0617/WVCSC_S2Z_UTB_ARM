@@ -984,24 +984,31 @@ class MissionManager(Node):
 
     # ---------- 100ms 调度看门狗 (Tick) ----------
     def _tick(self):
-        """
-        核心调度步进逻辑。每 0.1 秒触发一次，用于检测：
-        1. Nav2 或机械臂的全局超时。
-        2. 停稳检测的状态转换。
-        3. 机械臂反馈进度的卡死检查 (progress_timeout)。
-        """
+        """Advance watchdogs in the existing abort, navigation, then work order."""
         now = self._now()
         self._advance_abort_and_home()
         if self._abort_and_home_requested:
             return
         self._tick_wide_spray_motion(now)
-        if self._nav_retry_due is not None:
-            if not self._navigation_active():
-                self._clear_nav_startup_retry()
-            elif now >= self._nav_retry_due:
-                self._nav_retry_due = None
-                self._start_navigation()
+        if self._tick_startup_retry(now):
             return
+        if self._tick_navigation_timeout(now):
+            return
+        self._tick_active_work_phase(now)
+
+    def _tick_startup_retry(self, now):
+        """Run, and consume this tick for, a pending first-Nav2-goal retry."""
+        if self._nav_retry_due is None:
+            return False
+        if not self._navigation_active():
+            self._clear_nav_startup_retry()
+        elif now >= self._nav_retry_due:
+            self._nav_retry_due = None
+            self._start_navigation()
+        return True
+
+    def _tick_navigation_timeout(self, now):
+        """Cancel a timed-out Nav2 goal before applying the existing recovery path."""
         if self._navigation_active() and self._phase_started is not None:
             if now - self._phase_started >= self._nav_timeout:
                 if not self._nav_timeout_canceling:
@@ -1011,14 +1018,18 @@ class MissionManager(Node):
                     self._cancel_nav_goal()
                     self.get_logger().warning(
                         '[NAV] goal timed out; canceling before skipping point')
-        if self._nav_timeout_canceling:
-            if (self._nav_timeout_cancel_deadline is not None and
-                    now >= self._nav_timeout_cancel_deadline):
-                self._nav_timeout_canceling = False
-                self._nav_timeout_cancel_deadline = None
-                self._pause_for_recovery(
-                    'Nav2 timeout cancellation did not settle; relocalize and resume')
-            return
+        if not self._nav_timeout_canceling:
+            return False
+        if (self._nav_timeout_cancel_deadline is not None and
+                now >= self._nav_timeout_cancel_deadline):
+            self._nav_timeout_canceling = False
+            self._nav_timeout_cancel_deadline = None
+            self._pause_for_recovery(
+                'Nav2 timeout cancellation did not settle; relocalize and resume')
+        return True
+
+    def _tick_active_work_phase(self, now):
+        """Advance stop verification, transit dwell, or arm-action watchdogs."""
         if self.core.state == MissionState.VERIFYING_STOP:
             status = self._stop_detector.status(now)
             if status == StopDetector.STABLE:

@@ -17,6 +17,14 @@ LOAD_MANUAL_MISSION = (
 SPEC = importlib.util.spec_from_file_location('nav2_qt', SCRIPT)
 nav2_qt = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(nav2_qt)
+from wvcsc_bringup import mission_editor_model, nav2_markers
+
+
+def test_qt_entry_point_reuses_the_internal_editor_and_marker_modules():
+    assert nav2_qt.MissionEditor is mission_editor_model.MissionEditor
+    assert nav2_qt.WorkPoint is mission_editor_model.WorkPoint
+    assert nav2_qt.ManualMissionMarkerBuilder is (
+        nav2_markers.ManualMissionMarkerBuilder)
 
 
 def _pose(x, y, yaw=0.0):

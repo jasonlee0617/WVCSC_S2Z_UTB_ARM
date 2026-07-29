@@ -1,3 +1,5 @@
+# 中文说明：自动手眼采样启动入口，保留操作员确认和独立 TTY 采集边界。
+# 启动文件只编排机械臂、相机、ArUco 和采集器；最终标定质量由 collector/quality 模块判定。
 """Start one operator-confirmed Alicia-M/C10 hand-eye calibration session."""
 
 import os

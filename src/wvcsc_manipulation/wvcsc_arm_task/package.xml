@@ -1,4 +1,5 @@
 <?xml version="1.0"?>
+<!-- 中文说明：Alicia-M 观察、视觉对准和喷洒 Action 节点包的依赖声明。 -->
 <package format="3">
   <name>wvcsc_arm_task</name>
   <version>0.1.0</version>
