@@ -94,7 +94,7 @@ def generate_launch_description():
         Node(
             package='wtb_car_driver', executable='wtb_car', name='wtb_car',
             parameters=[{
-                'WHEELBASE': 0.82,
+                'WHEELBASE': 0.70,
                 'vel_scale': 1.0,
                 'steer_offset': 0.0,
                 'min_speed': 0.0005,
@@ -119,8 +119,8 @@ def generate_launch_description():
                 'min_height': -0.75,
                 'max_height': 0.5,
                 'transform_tolerance': 1.0,
-                'angle_min': -3.1415926,
-                'angle_max': 3.1415926,
+                'angle_min': -1.047,
+                'angle_max': 1.047,
                 'angle_increment': 0.0003,
                 'scan_time': 0.3333,
                 'range_min': 0.5,

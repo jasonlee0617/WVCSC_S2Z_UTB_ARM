@@ -67,18 +67,30 @@ def test_sim_navigation_uses_one_nav2_goal_checker_without_mission_docking_gate(
     assert route_goal_checker['stateful'] is False
     assert config['controller_server']['ros__parameters'][
         'robot_base_frame'] == 'base_footprint'
-    assert route_goal_checker['xy_goal_tolerance'] == pytest.approx(0.08)
-    assert route_goal_checker['yaw_goal_tolerance'] == pytest.approx(0.12)
+    assert route_goal_checker['xy_goal_tolerance'] == pytest.approx(0.20)
+    assert route_goal_checker['yaw_goal_tolerance'] == pytest.approx(0.174533)
     assert config['planner_server']['ros__parameters']['GridBased'][
         'tolerance'] == pytest.approx(0.0)
     assert config['planner_server']['ros__parameters']['GridBased'][
-        'minimum_turning_radius'] == pytest.approx(1.575)
+        'minimum_turning_radius'] == pytest.approx(1.345)
     follow_path = config['controller_server']['ros__parameters']['FollowPath']
     assert follow_path['plugin'] == (
         'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController')
     assert follow_path['desired_linear_vel'] == pytest.approx(0.25)
     assert follow_path['use_collision_detection'] is True
     assert follow_path['use_cost_regulated_linear_velocity_scaling'] is False
+    assert follow_path['wheel_base'] == pytest.approx(0.70)
+    assert follow_path['track_width'] == pytest.approx(0.86)
+    assert follow_path['goal_dist_tol'] == pytest.approx(0.20)
+    assert follow_path['approach_velocity_scaling_dist'] == pytest.approx(0.20)
+    assert follow_path['regulated_linear_scaling_min_radius'] == pytest.approx(1.345)
+    expected_footprint = (
+        '[[0.725, -0.50], [0.725, 0.50], '
+        '[-0.725, 0.50], [-0.725, -0.50]]')
+    assert config['local_costmap']['local_costmap']['ros__parameters'][
+        'footprint'] == expected_footprint
+    assert config['global_costmap']['global_costmap']['ros__parameters'][
+        'footprint'] == expected_footprint
     assert 'RewrittenYaml' in LAUNCH_SOURCE
     assert 'require_docking_quality' not in LAUNCH_SOURCE
     assert 'accept_aborted_near_goal' not in LAUNCH_SOURCE
@@ -96,7 +108,7 @@ def test_sim_navigation_uses_one_nav2_goal_checker_without_mission_docking_gate(
 
 
 def test_simulation_uses_confirmed_real_vehicle_geometry_and_driver_semantics():
-    assert "'wheel_base': 0.82" in LAUNCH_SOURCE
+    assert "'wheel_base': 0.70" in LAUNCH_SOURCE
     assert "'cmd_angular_mode': 'yaw_rate'" in LAUNCH_SOURCE
 
 

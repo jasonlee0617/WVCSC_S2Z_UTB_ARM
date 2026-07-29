@@ -375,7 +375,7 @@ def generate_launch_description():
         package='wvcsc_simulation', executable='ackermann_sim.py',
         parameters=[{
             'use_sim_time': True,
-            'wheel_base': 0.82,
+            'wheel_base': 0.70,
             'max_steering_angle': 0.48,
             'max_linear_speed': 0.35,
             # velocity_smoother 以 20 Hz 发布 /cmd_vel。超时必须明显大于

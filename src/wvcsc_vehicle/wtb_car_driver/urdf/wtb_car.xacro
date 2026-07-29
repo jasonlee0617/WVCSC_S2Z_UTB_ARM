@@ -10,8 +10,12 @@
   <xacro:property name="base_z" value="0.20"/>
   <xacro:property name="wheel_radius" value="0.20"/>
   <xacro:property name="wheel_length" value="0.12"/>
-  <xacro:property name="wheel_x" value="0.35"/>
-  <xacro:property name="wheel_y" value="0.43"/>
+  <!-- Measured vehicle geometry: front/rear axle distance is the wheelbase;
+       left/right wheel-center distance is the track width. -->
+  <xacro:property name="wheel_base" value="0.70"/>
+  <xacro:property name="track_width" value="0.86"/>
+  <xacro:property name="wheel_x" value="${wheel_base / 2.0}"/>
+  <xacro:property name="wheel_y" value="${track_width / 2.0}"/>
 
   <xacro:macro name="box_inertial" params="mass x y z">
     <inertial>

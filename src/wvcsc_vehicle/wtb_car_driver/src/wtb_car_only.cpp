@@ -59,8 +59,8 @@ public:
     WtbCarNode() : Node("wtb_car_node")
     {
         // --------核心参数校准（新增/修改）-----------
-        // 1. 轮距（前后轴距离）：实际测量后修改
-        this->declare_parameter<double>("WHEELBASE", 1.00);
+        // 1. 轴距（前后轴中心距离）：实车实测 0.70 m
+        this->declare_parameter<double>("WHEELBASE", 0.70);
         this->get_parameter("WHEELBASE", WHEELBASE);
 
          
@@ -563,5 +563,4 @@ int main(int argc, char * argv[])
     rclcpp::shutdown();
     return 0;
 }
-
 

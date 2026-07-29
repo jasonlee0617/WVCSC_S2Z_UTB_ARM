@@ -45,7 +45,7 @@ class AckermannSim(Node):
 
     def __init__(self):
         super().__init__('ackermann_sim')
-        self.declare_parameter('wheel_base', 0.82)
+        self.declare_parameter('wheel_base', 0.70)
         self.declare_parameter('max_steering_angle', 0.48)
         self.declare_parameter('max_linear_speed', 0.8)
         self.declare_parameter('command_timeout', 0.5)

@@ -96,8 +96,7 @@ def generate_launch_description():
         name='wtb_car',
         output='screen',
          parameters=[
-            # {'WHEELBASE': 0.66},
-            {'WHEELBASE': 0.82},
+            {'WHEELBASE': 0.70},
             {'vel_scale': 1.0},
             #  {'vel_scale': 2.0},
             {'steer_offset': 0.0},

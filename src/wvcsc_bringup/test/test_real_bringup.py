@@ -65,6 +65,40 @@ def test_navigation_matches_the_validated_single_command_stack():
     assert 'navigate_to_pose_ackermann.xml' in source
 
 
+def test_real_nav_geometry_and_arrival_tolerances_match_simulation():
+    navigation = PACKAGE.parent / 'wvcsc_navigation' / 'my_navigation2'
+    params = yaml.safe_load(
+        (navigation / 'param' / 'wtb_nav2_params.yaml').read_text(
+            encoding='utf-8'))
+    controller = params['controller_server']['ros__parameters']
+    checker = controller['general_goal_checker']
+    follow_path = controller['FollowPath']
+    planner = params['planner_server']['ros__parameters']['GridBased']
+
+    assert checker['xy_goal_tolerance'] == pytest.approx(0.20)
+    assert checker['yaw_goal_tolerance'] == pytest.approx(0.174533)
+    assert follow_path['wheel_base'] == pytest.approx(0.70)
+    assert follow_path['track_width'] == pytest.approx(0.86)
+    assert follow_path['goal_dist_tol'] == pytest.approx(0.20)
+    assert follow_path['approach_velocity_scaling_dist'] == pytest.approx(0.20)
+    assert follow_path['regulated_linear_scaling_min_radius'] == pytest.approx(1.345)
+    assert planner['tolerance'] == pytest.approx(0.0)
+    assert planner['minimum_turning_radius'] == pytest.approx(1.345)
+
+    footprint = (
+        '[[0.725, -0.50], [0.725, 0.50], '
+        '[-0.725, 0.50], [-0.725, -0.50]]')
+    for costmap in ('local_costmap', 'global_costmap'):
+        assert params[costmap][costmap]['ros__parameters'][
+            'footprint'] == footprint
+
+    assert "'WHEELBASE': 0.70" in _source('real_sensors.launch.py')
+    vehicle_source = (
+        PACKAGE.parent / 'wvcsc_vehicle' / 'wtb_car_driver' / 'launch' /
+        'start_wtb_car_fdimu.launch.py').read_text(encoding='utf-8')
+    assert "{'WHEELBASE': 0.70}" in vehicle_source
+
+
 def test_real_navigation_uses_ackermann_recovery_tree_without_spin():
     navigation = PACKAGE.parent / 'wvcsc_navigation' / 'my_navigation2'
     tree = (navigation / 'behavior_trees' /
