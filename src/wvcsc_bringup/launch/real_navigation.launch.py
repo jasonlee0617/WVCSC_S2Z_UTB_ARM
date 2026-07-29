@@ -9,6 +9,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from nav2_common.launch import RewrittenYaml
 
 from wvcsc_bringup.path_defaults import latest_map_yaml
 
@@ -22,8 +23,16 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     map_file = LaunchConfiguration('map')
     params_file = LaunchConfiguration('params_file')
+    nav_to_pose_bt_xml = LaunchConfiguration('nav_to_pose_bt_xml')
     use_rviz = LaunchConfiguration('use_rviz')
     rviz_goal_topic = LaunchConfiguration('rviz_goal_topic')
+    nav_params = RewrittenYaml(
+        source_file=params_file,
+        param_rewrites={
+            'default_nav_to_pose_bt_xml': nav_to_pose_bt_xml,
+        },
+        convert_types=True,
+    )
 
     # This is the field-validated vehicle, LiDAR, IMU, and EKF chain. It does
     # not start C10. The full mission provides its own unified sensor stack.
@@ -43,7 +52,7 @@ def generate_launch_description():
         launch_arguments={
             'map': map_file,
             'use_sim_time': use_sim_time,
-            'params_file': params_file,
+            'params_file': nav_params,
             'tf_buffer_size': '300',
         }.items(),
     )
@@ -81,6 +90,14 @@ def generate_launch_description():
             'params_file',
             default_value=os.path.join(
                 navigation_share, 'param', 'wtb_nav2_params.yaml')),
+        DeclareLaunchArgument(
+            'nav_to_pose_bt_xml',
+            default_value=os.path.join(
+                navigation_share, 'behavior_trees',
+                'navigate_to_pose_ackermann.xml'),
+            description=(
+                'NavigateToPose recovery tree for the Ackermann vehicle. '
+                'It intentionally has no in-place Spin recovery.')),
         vehicle_stack,
         nav2,
         rviz,

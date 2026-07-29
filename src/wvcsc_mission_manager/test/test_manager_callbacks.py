@@ -70,6 +70,7 @@ class _Relay:
     def __init__(self):
         self.commands = []
         self.reset_count = 0
+        self.wide_enabled = False
 
     @staticmethod
     def service_is_ready():
@@ -77,6 +78,8 @@ class _Relay:
 
     def command(self, channel, enabled, duration, continuation, context, **_kwargs):
         self.commands.append((channel, enabled, duration, context))
+        if channel == 1:
+            self.wide_enabled = bool(enabled)
         if continuation is not None:
             continuation()
 
@@ -98,17 +101,23 @@ class _WideMotionHarness:
         self.core.state = MissionState.NAVIGATING
         self._wide_motion_pending = True
         self._wide_motion_deadline = 10.0
-        self._last_odom_at = 4.0
+        self._last_odom_at = 5.0
         self._latest_linear_speed = 0.0
+        self._latest_angular_speed = 0.0
         self._wide_motion_linear_threshold = 0.03
+        self._linear_stop_threshold = 0.03
+        self._angular_stop_threshold = 0.03
+        self._stop_stable_duration = 1.0
+        self._odom_stale_timeout = 1.0
+        self._wide_stop_started_at = None
+        self._wide_stop_off_pending = False
         self._wide_relay_channel = 1
         self._relay = _Relay()
         self.commands = self._relay.commands
-
-    @staticmethod
-    def get_parameter(name):
-        assert name == 'odom_stale_timeout_sec'
-        return SimpleNamespace(value=1.0)
+        self._reset_wide_spray_motion = (
+            MissionManager._reset_wide_spray_motion.__get__(self, _WideMotionHarness))
+        self._disable_wide_spray_after_stop = (
+            MissionManager._disable_wide_spray_after_stop.__get__(self, _WideMotionHarness))
 
     @staticmethod
     def get_logger():
@@ -146,6 +155,9 @@ class _Harness:
         self._nav_timeout_canceling = False
         self._nav_timeout_cancel_deadline = None
         self._wide_motion_pending = False
+        self._wide_motion_deadline = None
+        self._wide_stop_started_at = None
+        self._wide_stop_off_pending = False
         self._wide_relay_channel = 1
         self.failures = []
         self._relay = _Relay()
@@ -158,6 +170,8 @@ class _Harness:
         self._nav_result = MissionManager._nav_result.__get__(self, _Harness)
         self._navigation_arrived = (
             MissionManager._navigation_arrived.__get__(self, _Harness))
+        self._reset_wide_spray_motion = (
+            MissionManager._reset_wide_spray_motion.__get__(self, _Harness))
         self._clear_nav_startup_retry = (
             MissionManager._clear_nav_startup_retry.__get__(self, _Harness))
         self._schedule_initial_nav_retry = (
@@ -292,6 +306,70 @@ def test_wide_spray_waits_for_motion_and_times_out_with_relay_off():
     MissionManager._tick_wide_spray_motion(timeout, now=10.0)
     assert timeout.commands == []
     assert timeout._wide_motion_pending is False
+
+
+def test_wide_spray_keeps_running_through_brief_or_interrupted_stops():
+    harness = _WideMotionHarness()
+    harness._wide_motion_pending = False
+    harness._wide_motion_deadline = None
+    harness._relay.wide_enabled = True
+    harness._latest_linear_speed = 0.04
+
+    MissionManager._tick_wide_spray_motion(harness, now=5.0)
+    assert harness.commands == []
+    assert harness._wide_stop_started_at is None
+
+    harness._latest_linear_speed = 0.0
+
+    MissionManager._tick_wide_spray_motion(harness, now=5.0)
+    MissionManager._tick_wide_spray_motion(harness, now=5.9)
+    assert harness.commands == []
+
+    harness._latest_linear_speed = 0.04
+    MissionManager._tick_wide_spray_motion(harness, now=5.95)
+    assert harness._wide_stop_started_at is None
+    assert harness.commands == []
+
+
+def test_wide_spray_turns_off_once_after_stable_stop_and_reopens_on_motion():
+    harness = _WideMotionHarness()
+    harness._wide_motion_pending = False
+    harness._wide_motion_deadline = None
+    harness._relay.wide_enabled = True
+    harness._latest_linear_speed = 0.0
+
+    MissionManager._tick_wide_spray_motion(harness, now=5.0)
+    MissionManager._tick_wide_spray_motion(harness, now=6.0)
+    assert harness.commands == [
+        (1, False, 0.0,
+         'transit_1: vehicle remained stopped; disable wide spray')]
+    assert harness._wide_motion_pending is True
+    assert harness._relay.wide_enabled is False
+
+    MissionManager._tick_wide_spray_motion(harness, now=6.1)
+    assert len(harness.commands) == 1
+
+    harness._latest_linear_speed = 0.03
+    harness._last_odom_at = 6.1
+    MissionManager._tick_wide_spray_motion(harness, now=6.1)
+    assert harness.commands[-1] == (
+        1, True, 0.0,
+        'transit_1: vehicle motion confirmed; enable wide spray')
+    assert harness._relay.wide_enabled is True
+
+
+def test_wide_spray_turns_off_immediately_when_odometry_becomes_stale():
+    harness = _WideMotionHarness()
+    harness._wide_motion_pending = False
+    harness._wide_motion_deadline = None
+    harness._relay.wide_enabled = True
+    harness._last_odom_at = 4.0
+
+    MissionManager._tick_wide_spray_motion(harness, now=5.1)
+    assert harness.commands == [
+        (1, False, 0.0,
+         'transit_1: odometry became stale; disable wide spray')]
+    assert harness._wide_motion_pending is True
 
 
 def test_initial_nav_rejection_retries_while_lifecycle_activates():

@@ -67,12 +67,15 @@ def test_wide_status_changes_only_after_a_confirmed_relay_response():
 
     relay.command(1, True, 0.0, None, 'wide on')
     assert node.publisher.values == [False, True]
+    assert relay.wide_enabled is True
 
     node.client.response = SimpleNamespace(success=False, message='rejected off')
     relay.command(1, False, 0.0, None, 'wide off')
     assert node.publisher.values == [False, True]
+    assert relay.wide_enabled is True
     assert failures == []
 
     node.client.response = SimpleNamespace(success=True, message='ok')
     relay.command(1, False, 0.0, None, 'wide off')
     assert node.publisher.values == [False, True, False]
+    assert relay.wide_enabled is False

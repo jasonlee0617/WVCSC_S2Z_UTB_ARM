@@ -80,6 +80,14 @@ class MissionManager(Node):
             self.get_parameter('wide_spray_motion_linear_threshold').value)
         self._wide_motion_timeout = float(
             self.get_parameter('wide_spray_motion_timeout_sec').value)
+        self._linear_stop_threshold = float(
+            self.get_parameter('linear_stop_threshold').value)
+        self._angular_stop_threshold = float(
+            self.get_parameter('angular_stop_threshold').value)
+        self._stop_stable_duration = float(
+            self.get_parameter('stop_stable_duration_sec').value)
+        self._odom_stale_timeout = float(
+            self.get_parameter('odom_stale_timeout_sec').value)
         self._return_home_after_mission = bool(
             self.get_parameter('return_home_after_mission').value)
         self._home_pose = (
@@ -92,9 +100,16 @@ class MissionManager(Node):
         if not all(math.isfinite(value) for value in (
                 self._arm_base_forward_offset, self._arm_base_left_offset,
                 self._arm_base_yaw, self._wide_motion_linear_threshold,
-                self._wide_motion_timeout)):
+                self._wide_motion_timeout, self._linear_stop_threshold,
+                self._angular_stop_threshold, self._stop_stable_duration,
+                self._odom_stale_timeout)):
             raise ValueError('arm base and wide spray parameters must be finite')
-        if self._wide_motion_linear_threshold < 0.0 or self._wide_motion_timeout <= 0.0:
+        if (self._wide_motion_linear_threshold < 0.0 or
+                self._wide_motion_timeout <= 0.0 or
+                self._linear_stop_threshold < 0.0 or
+                self._angular_stop_threshold < 0.0 or
+                self._stop_stable_duration <= 0.0 or
+                self._odom_stale_timeout <= 0.0):
             raise ValueError('wide spray motion thresholds are invalid')
         if (not math.isfinite(self._nav_startup_retry_timeout) or
                 not math.isfinite(self._nav_startup_retry_interval) or
@@ -155,8 +170,11 @@ class MissionManager(Node):
         self._manual_return_home = False
         self._last_odom_at = None
         self._latest_linear_speed = 0.0
+        self._latest_angular_speed = 0.0
         self._wide_motion_pending = False
         self._wide_motion_deadline = None
+        self._wide_stop_started_at = None
+        self._wide_stop_off_pending = False
         self._abort_and_home_requested = False
         self._abort_reset_sent = False
         self._abort_reset_started = False
@@ -505,8 +523,8 @@ class MissionManager(Node):
 
     def _start_navigation(self):
         """Ensure wide spray is off for a disabled incoming segment first."""
+        self._reset_wide_spray_motion()
         if self.core.state == MissionState.RETURNING_HOME:
-            self._wide_motion_pending = False
             self._relay.command(
                 self._wide_relay_channel, False, 0.0,
                 self._send_nav_goal, 'returning home: disable wide spray')
@@ -515,7 +533,6 @@ class MissionManager(Node):
         if point is None:
             self._fail('no current navigation point')
             return
-        self._wide_motion_pending = False
         if point.wide_spray_on_approach:
             self._send_nav_goal()
             return
@@ -537,7 +554,7 @@ class MissionManager(Node):
 
     def _skip_navigation_point(self, reason):
         """Continue after a Nav2 result that explicitly ended the goal."""
-        self._wide_motion_pending = False
+        self._reset_wide_spray_motion()
 
         def skip_after_wide_off():
             point = self.core.current_point
@@ -592,7 +609,7 @@ class MissionManager(Node):
         ``_command_all_relays_off`` here because the service itself is the
         failing dependency.
         """
-        self._wide_motion_pending = False
+        self._reset_wide_spray_motion()
         self._stop_detector.stop()
         self._clear_nav_startup_retry()
         self._cancel_nav_goal()
@@ -604,34 +621,88 @@ class MissionManager(Node):
         self._publish_status()
 
     def _command_all_relays_off(self):
-        self._wide_motion_pending = False
+        self._reset_wide_spray_motion()
         self._relay.command_all_off()
 
-    def _tick_wide_spray_motion(self, now):
-        if not self._wide_motion_pending:
-            return
-        if self.core.state != MissionState.NAVIGATING:
-            self._wide_motion_pending = False
-            return
-        if now >= self._wide_motion_deadline:
-            self._wide_motion_pending = False
-            self.get_logger().warning(
-                '[MISSION][WARN][RELAY] vehicle did not start moving before '
-                'wide spray timeout; continuing with channel 1 off')
-            return
-        if self._last_odom_at is None or now - self._last_odom_at > float(
-                self.get_parameter('odom_stale_timeout_sec').value):
-            return
-        if self._latest_linear_speed < self._wide_motion_linear_threshold:
-            return
+    def _reset_wide_spray_motion(self):
         self._wide_motion_pending = False
+        self._wide_motion_deadline = None
+        self._wide_stop_started_at = None
+        self._wide_stop_off_pending = False
+
+    def _tick_wide_spray_motion(self, now):
+        if self.core.state != MissionState.NAVIGATING:
+            self._reset_wide_spray_motion()
+            return
         point = self.core.current_point
-        context = (
-            'vehicle motion confirmed; enable wide spray'
-            if point is None else
-            f'{point.point_id}: vehicle motion confirmed; enable wide spray')
+        if point is None or not point.wide_spray_on_approach:
+            self._reset_wide_spray_motion()
+            return
+
+        odom_is_fresh = (
+            self._last_odom_at is not None and
+            now - self._last_odom_at <= self._odom_stale_timeout)
+        if self._wide_motion_pending:
+            if (self._wide_motion_deadline is not None and
+                    now >= self._wide_motion_deadline):
+                self._wide_motion_pending = False
+                self._wide_motion_deadline = None
+                self.get_logger().warning(
+                    '[MISSION][WARN][RELAY] vehicle did not start moving before '
+                    'wide spray timeout; continuing with channel 1 off')
+            elif (odom_is_fresh and
+                  self._latest_linear_speed >= self._wide_motion_linear_threshold):
+                self._wide_motion_pending = False
+                self._wide_motion_deadline = None
+                self._relay.command(
+                    self._wide_relay_channel, True, 0.0, None,
+                    f'{point.point_id}: vehicle motion confirmed; enable wide spray')
+
+        if self._wide_motion_pending or self._wide_stop_off_pending:
+            return
+        if not self._relay.wide_enabled:
+            self._wide_stop_started_at = None
+            return
+        if not odom_is_fresh:
+            self._disable_wide_spray_after_stop(
+                point, 'odometry became stale; disable wide spray')
+            return
+        if (self._latest_linear_speed >= self._linear_stop_threshold or
+                self._latest_angular_speed >= self._angular_stop_threshold):
+            self._wide_stop_started_at = None
+            return
+        if self._wide_stop_started_at is None:
+            self._wide_stop_started_at = now
+            return
+        if now - self._wide_stop_started_at >= self._stop_stable_duration:
+            self._disable_wide_spray_after_stop(
+                point, 'vehicle remained stopped; disable wide spray')
+
+    def _disable_wide_spray_after_stop(self, point, reason):
+        """Turn channel 1 off once, then wait for this segment to move again."""
+        if self._wide_stop_off_pending or not self._relay.wide_enabled:
+            return
+        point_id = point.point_id
+        self._wide_stop_off_pending = True
+        self._wide_motion_pending = False
+        self._wide_motion_deadline = None
+
+        def rearm_after_confirmed_off():
+            self._wide_stop_off_pending = False
+            self._wide_stop_started_at = None
+            current = self.core.current_point
+            if (self.core.state == MissionState.NAVIGATING and
+                    current is not None and
+                    current.point_id == point_id and
+                    current.wide_spray_on_approach):
+                self._wide_motion_pending = True
+                # A recovery can last longer than the initial 10-second
+                # startup gate. Re-enable only after fresh forward motion.
+                self._wide_motion_deadline = None
+
         self._relay.command(
-            self._wide_relay_channel, True, 0.0, None, context)
+            self._wide_relay_channel, False, 0.0, rearm_after_confirmed_off,
+            f'{point_id}: {reason}')
 
     def _publish_motion_command(self, command):
         self._motion_command_pub.publish(String(data=str(command)))
@@ -745,7 +816,7 @@ class MissionManager(Node):
 
     def _navigation_arrived(self):
         """Enter the existing relay/stop gate after final pose convergence."""
-        self._wide_motion_pending = False
+        self._reset_wide_spray_motion()
         if self.core.state == MissionState.NAVIGATING:
             if not self.core.nav_succeeded():
                 self._fail('cannot enter stop verification after navigation result')
@@ -769,6 +840,7 @@ class MissionManager(Node):
         now = self._now()
         self._last_odom_at = now
         self._latest_linear_speed = linear
+        self._latest_angular_speed = angular
         self._stop_detector.update(now, linear, angular)
 
     def _on_motion_control_state(self, message):

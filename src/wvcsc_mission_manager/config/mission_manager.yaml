@@ -50,6 +50,8 @@ mission_manager:
     arm_relay_channel: 2
     wide_spray_motion_linear_threshold: 0.03
     wide_spray_motion_timeout_sec: 10.0
+    # 通道 1 已开启后，若车辆按下方停稳阈值持续停稳或 /odom 失联，
+    # MissionManager 会关闭喷洒；同一导航段恢复运动后自动重新开启。
 
     # ----------------------------------------------------------------
     # HOME (待命/充电) 位姿配置

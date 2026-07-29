@@ -32,6 +32,7 @@
   <exec_depend>my_cartographer</exec_depend>
   <exec_depend>my_navigation2</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>pointcloud_to_laserscan</exec_depend>

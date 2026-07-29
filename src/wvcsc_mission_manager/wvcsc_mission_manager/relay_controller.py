@@ -29,6 +29,11 @@ class RelayController:
     def service_is_ready(self):
         return self._client.service_is_ready()
 
+    @property
+    def wide_enabled(self):
+        """Return the last successfully confirmed channel-1 state."""
+        return self._wide_enabled
+
     def reset_failure_latch(self):
         self._failure_latched = False
 

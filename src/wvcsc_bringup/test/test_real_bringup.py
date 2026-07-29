@@ -7,6 +7,7 @@ duplicate hardware stacks, and drift from the field-validated Nav2 launch.
 
 import importlib.util
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 import yaml
@@ -59,6 +60,27 @@ def test_navigation_matches_the_validated_single_command_stack():
     assert 'orchard.yaml' not in source
     assert 'SetRemap' not in source
     assert 'bringup_launch.py' in source
+    assert 'RewrittenYaml' in source
+    assert "'nav_to_pose_bt_xml'" in source
+    assert 'navigate_to_pose_ackermann.xml' in source
+
+
+def test_real_navigation_uses_ackermann_recovery_tree_without_spin():
+    navigation = PACKAGE.parent / 'wvcsc_navigation' / 'my_navigation2'
+    tree = (navigation / 'behavior_trees' /
+            'navigate_to_pose_ackermann.xml').read_text(encoding='utf-8')
+    ElementTree.fromstring(tree)
+
+    assert '<Spin' not in tree
+    assert '<ClearEntireCostmap' in tree
+    assert '<Wait ' in tree
+    assert '<BackUp ' in tree
+    assert 'behavior_trees' in (navigation / 'CMakeLists.txt').read_text(
+        encoding='utf-8')
+    params = yaml.safe_load((navigation / 'param' / 'wtb_nav2_params.yaml').read_text(
+        encoding='utf-8'))
+    assert params['bt_navigator']['ros__parameters'][
+        'default_nav_to_pose_bt_xml'] == ''
 
 
 def test_cartographer_launch_owns_the_complete_mapping_hardware_chain():
