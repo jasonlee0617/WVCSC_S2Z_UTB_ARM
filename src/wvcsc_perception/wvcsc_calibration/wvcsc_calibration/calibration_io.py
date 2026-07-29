@@ -1,5 +1,3 @@
-# 中文说明：easy_handeye2 输出与 WVCSC 部署标定文件之间的校验/转换层。
-# 它负责字段、坐标系、单位和质量摘要，不负责采样运动，也不自动宣称绝对精度。
 """Validate and export easy_handeye2 output to the WVCSC deployment file."""
 
 import argparse

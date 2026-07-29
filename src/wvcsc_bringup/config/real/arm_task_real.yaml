@@ -1,74 +1,106 @@
+# 实机喷洒任务覆盖配置。
+# 本文件覆盖 SprayTask 在代码中声明的参数默认值；实机 launch 不会同时加载
+# wvcsc_arm_task/config/arm_task.yaml。未在此处出现的参数使用 spray_config.py 默认值。
+# 所有距离单位为米、时间单位为秒、角度单位为度（参数名以 _deg 结尾）或弧度
+#（参数名以 _rad 结尾）、图像误差单位为像素。
 wvcsc_spray_task:
   ros__parameters:
-    # Real model is leaf-only; ROS interface uses the shared diseased_target name.
-    target_class_name: diseased_target
-    disease_confidence: 0.25
-    # One real-tree task may spray only the two highest-confidence leaves.
+    # 单视角目标发现顺序：
+    # 1. 感知节点完成单帧置信度过滤，SprayTask 接收全部合格框；
+    # 2. 最近 m 秒出现率达到 target_presence_ratio；
+    # 3. 最近窗口有效推理帧数达到 target_presence_min_frames；
+    # 4. 确认为稳定目标。确认两个可提前冻结，n 秒到期则冻结当前零或一个目标。
+    # 每株任务最多冻结并喷洒的逻辑目标数量；冻结后新目标不能加入账本。
     max_targets_per_tree: 2
-    # One static real-world observation must persist across a full sliding
-    # window before it enters the frozen two-target ledger.
+    # n：每个固定观察位允许进行初始目标发现的总时间。
     view_detection_duration_sec: 7.0
+    # m：单目标出现率使用的最近滑动时间窗口，必须不大于 n。
     target_presence_window_sec: 2.0
+    # 单目标在最近 m 秒有效推理帧中的最低出现比例；0.50 表示至少一半。
     target_presence_ratio: 0.50
+    # 最近 m 秒至少需要的有效推理帧数，防止样本过少时误确认。
     target_presence_min_frames: 5
+
+    # 所有冻结目标处理结束后，在当前观察位停留多久再返回机械臂 HOME。
     post_spray_home_delay_sec: 2.0
+    # MoveIt 粗重心后重新确认目标时允许的最低单帧置信度。
     target_post_recenter_min_confidence: 0.30
-    # Real hardware follows the same coarse-MoveIt + Visual Servo path as
-    # simulation.  TIMEOUT, TARGET_STALE, or output stall may spray once from
-    # the current servo pose, then recheck pending targets.  Singularity only
-    # permits observation recovery/retry; collision, limit, direction, and
-    # safety-stop gates still prohibit endpoint spray.
+    # 是否允许特定软视觉故障执行安全回退喷洒。TIMEOUT、TARGET_STALE 或输出停滞
+    # 可从当前安全末端位置喷洒一次；奇异性只允许换观察位恢复。碰撞、关节限位、
+    # 方向发散和硬安全停止始终禁止绕过安全门喷洒。
     spray_on_alignment_failure: true
 
-    # Field-validated scans for both sides of alicia_base_link.  These are
-    # planned by MoveIt in joint space; they are not sent directly to the arm
-    # controller.  The right-side values are independently measured, not
-    # mirrored from the left-side set.
+    # 观察位模式：joint_presets 使用现场测量的固定关节角；ik 使用动态观察位。
+    # 本实机配置默认固定关节预设，所有预设仍由 MoveIt 规划，不直接下发控制器。
     observation_mode: joint_presets
+    # 左侧病株的中心固定观察位，依次对应六个机械臂关节角。
     joint_preset_center_deg: [95.3, -136.9, -71.0, 7.7, 57.3, -4.4]
+    # 左侧病株中心视角无目标时使用的左扇形固定观察位。
     joint_preset_fan_left_deg: [52.2, -131.7, -55.4, -58.9, 76.5, 18.2]
+    # 左侧病株前两个视角均无目标时使用的右扇形固定观察位。
     joint_preset_fan_right_deg: [118.5, -129.4, -55.8, 47.6, 66.2, -17.1]
+    # 右侧病株的中心固定观察位；该组角度为独立实测值，不是左侧镜像。
     joint_preset_right_center_deg: [-105.4, -127.8, -50.5, -15.4, 71.2, -4.9]
+    # 右侧病株中心视角无目标时使用的左扇形固定观察位。
     joint_preset_right_fan_left_deg: [-139.8, -128.6, -57.3, -70.1, 79.7, 13.0]
+    # 右侧病株前两个视角均无目标时使用的右扇形固定观察位。
     joint_preset_right_fan_right_deg: [-70.8, -126.8, -50.6, 32.2, 69.8, -12.1]
+    # 根据 tree_hint 判断左右作业侧时的 Y 轴死区；绝对值不超过该值视为侧别不明。
     joint_preset_side_epsilon_m: 0.05
 
-    # ``joint_presets`` is MoveIt joint-space planning, not direct FK output.
-    # A target outside 48px receives collision-aware MoveIt coarse alignment
-    # before Visual Servo takes over.  The Servo entry window is deliberately
-    # no larger than the recenter trigger; it is not a spray-distance gate.
+    # 目标到标定喷嘴瞄准像素的误差超过该值时，先执行碰撞感知的 MoveIt 粗重心。
     target_recenter_trigger_px: 48.0
+    # 兼容保留的粗重心像素范围参数；当前准入主要由旋转角、碰撞 IK、关节余量和
+    # MoveIt 规划共同限制，不应把它理解为喷洒距离阈值。
     target_recenter_workspace_px: 128.0
+    # 粗重心后允许交给视觉伺服的最大二维像素误差范数。
     visual_servo_entry_max_error_px: 48.0
+    # 粗重心后目标必须在工作区内连续稳定的最短时间。
     target_post_recenter_stable_sec: 0.50
-    # A single field-of-view correction may exceed the generic 20deg default.
-    # Final motion still must pass collision IK, kinematic and OMPL checks.
+    # 单次粗重心允许的最大相机姿态旋转角；最终仍须通过碰撞 IK 和 MoveIt。
     target_recenter_max_angle_deg: 45.0
+    # 一个目标多次粗重心累计允许的最大旋转角。
     target_recenter_max_total_angle_deg: 45.0
 
+    # 单个冻结目标最多调用视觉对准 Action 的次数。
     max_alignment_attempts: 2
+    # 单次 AlignTarget 视觉伺服允许的最长执行时间。
     vision_timeout_sec: 30.0
+    # 底层定时喷洒 Action 名称，由 SprayTask 调用。
     spray_action_name: /spray/execute
+    # 视觉闭环对准 Action 名称，由 SprayTask 调用。
     vision_action_name: /vision/align_target
 
-    # 树叶主要分布在树根以上 0.80--1.80 m；首个 Look-at 观察位对准中点。
+    # IK 模式首个 Look-at 观察位瞄准的树冠中心高度；覆盖约 0.80～1.80 m 叶区。
     observation_center_height_m: 1.30
+    # IK 候选中相机相对机械臂的最小前伸距离。
     observation_camera_reach_min_m: 0.20
+    # IK 候选中相机相对机械臂的最大前伸距离。
     observation_camera_reach_max_m: 0.40
+    # IK 相机前伸距离候选的离散步长。
     observation_camera_reach_step_m: 0.10
-    # 相机光心相对 alicia_base_link 的 Z 高度；0.20 m 为确认的最小车顶净空。
+    # IK 候选中相机光心相对 alicia_base_link 的最低 Z 高度。
     camera_height_min_m: 0.15
+    # IK 候选中相机光心相对 alicia_base_link 的最高 Z 高度。
     camera_height_max_m: 0.30
+    # IK 相机高度候选的离散步长。
     camera_height_step_m: 0.10
+    # IK 初始扫描的中心、左扇形和右扇形方位偏移角。
     observation_azimuth_offsets_deg: [0.0, -12.0, 12.0]
+    # 用于检查喷嘴轴线与树平面关系的已标定喷嘴坐标系。
     spray_nozzle_frame: spray_nozzle_link
+    # IK 观察候选允许的喷嘴到树平面最小法向距离。
     observation_nozzle_plane_min_m: 0.20
+    # IK 观察候选允许的喷嘴到树平面最大法向距离。
     observation_nozzle_plane_max_m: 2.00
-    # 完整任务会用实测喷嘴标定覆盖这两个参数。
+    # IK 候选排序优先接近的喷嘴到树平面距离；完整任务应由实测标定确定。
     observation_preferred_nozzle_plane_distance_m: 1.00
+    # 判断候选是否足够接近首选喷嘴树平面距离的容差。
     observation_nozzle_plane_tolerance_m: 0.05
+    # IK、观察位和伺服交接允许的最大雅可比条件数，越小越远离奇异位形。
     observation_max_condition_number: 16.0
 
-    # Keep automatic execution conservative until measured calibration exists.
+    # MoveIt 执行 IK 观察位时允许的末端位置误差。
     observation_position_tolerance_m: 0.01
+    # MoveIt 执行 IK 观察位时允许的末端姿态角误差。
     observation_orientation_tolerance_rad: 0.01

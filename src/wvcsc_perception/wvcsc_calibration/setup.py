@@ -1,5 +1,3 @@
-# 中文说明：安装标定 Python 模块、launch、YAML 和标定辅助命令。
-# 采集器需要交互终端；setup 只负责安装，不自动启动真实硬件。
 import os
 from glob import glob
 

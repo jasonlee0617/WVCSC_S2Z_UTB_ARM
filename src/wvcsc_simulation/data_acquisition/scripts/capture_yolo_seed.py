@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# 中文说明：按观察位采集 C10 仿真图像，用于后续 YOLO 数据集制作。
-# 脚本只等待导航/观察状态并保存图像，不发送喷洒或修改任务状态。
 """Capture one C10 frame after each tree goal reaches its observation pose."""
 
 import argparse

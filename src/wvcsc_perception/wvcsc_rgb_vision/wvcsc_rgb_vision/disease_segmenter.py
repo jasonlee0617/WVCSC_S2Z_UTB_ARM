@@ -1,5 +1,3 @@
-# 中文说明：病态目标 YOLO segment 后端。
-# 输入整幅图像，输出框、掩膜和掩膜安全点；默认实机/仿真流程使用此后端。
 """YOLO segmentation backend for disease targets."""
 
 import math
@@ -55,7 +53,7 @@ class DiseaseSegmenter:
             return []
         instances = []
         for index, box in enumerate(result.boxes):
-            if int(box.cls[0]) != self._target_class_id or index >= len(result.masks.xy):
+            if index >= len(result.masks.xy):
                 continue
             polygon = np.asarray(result.masks.xy[index], dtype=np.float32)
             if len(polygon) < 3:

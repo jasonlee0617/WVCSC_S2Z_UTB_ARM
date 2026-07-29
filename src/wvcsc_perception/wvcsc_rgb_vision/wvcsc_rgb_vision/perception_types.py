@@ -1,5 +1,3 @@
-# 中文说明：感知实例、跟踪目标和几何数据结构。
-# 这些类型不依赖 ROS，负责在模型后端、去重、跟踪和发布层之间传递统一数据。
 """Pure data structures and geometry shared by the perception pipeline."""
 
 from dataclasses import dataclass

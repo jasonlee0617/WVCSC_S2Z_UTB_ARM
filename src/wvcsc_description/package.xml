@@ -1,5 +1,4 @@
 <?xml version="1.0"?>
-<!-- 中文说明：统一车辆、传感器和 Alicia-M 模型描述包的 ROS 依赖与资源安装声明。 -->
 <package format="3">
   <name>wvcsc_description</name>
   <version>0.1.0</version>

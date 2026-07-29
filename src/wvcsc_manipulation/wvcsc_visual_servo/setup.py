@@ -1,5 +1,3 @@
-# 中文说明：安装视觉伺服 Python 模块及其 ROS 2 可执行入口。
-# 节点入口与纯算法模块分离，参数和 Action 话题由 launch/config 提供。
 from setuptools import find_packages, setup
 
 

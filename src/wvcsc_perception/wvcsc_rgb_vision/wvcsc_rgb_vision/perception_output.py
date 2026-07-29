@@ -1,5 +1,3 @@
-# 中文说明：把后端实例转换为 vision_msgs/Target2D，并绘制调试图像。
-# 坐标必须是整幅相机图像坐标；segment 使用安全点，detect 使用检测框中心。
 """ROS detection conversion and OpenCV rendering for perception results."""
 
 import cv2
@@ -43,13 +41,12 @@ def instance_label(instance):
     Full UUIDs remain on ROS messages for machine correlation but are not an
     operator-facing physical identity and therefore do not belong on the image.
     """
-    label = 'DISEASE' if instance.class_name == 'diseased_target' else instance.class_name
-    return f'{label} {instance.confidence:.2f}'
+    return f'DISEASE {instance.confidence:.2f}'
 
 
 def annotated_image(
         image, instances, *, draw_diseased_aim_point=False,
-        selected_target_id='', canonical_target_class_name='diseased_target'):
+        selected_target_id=''):
     """Render boxes, labels, selected-target emphasis and aim points."""
     annotated = image.copy()
     for instance in instances:
@@ -80,9 +77,7 @@ def annotated_image(
             1,
             cv2.LINE_AA,
         )
-        if (
-                draw_diseased_aim_point and
-                instance.class_name == canonical_target_class_name):
+        if draw_diseased_aim_point:
             cv2.circle(
                 annotated,
                 (round(instance.aim_u), round(instance.aim_v)),

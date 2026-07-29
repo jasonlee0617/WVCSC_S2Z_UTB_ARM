@@ -1,5 +1,3 @@
-# 中文说明：机械臂键盘控制的可选 TTY 前端。
-# 它只发送既有运动控制命令，供人工复位/诊断使用，不参与完整任务自动调度。
 """Optional TTY front-end for the existing WVCSC motion-control interfaces."""
 
 import select

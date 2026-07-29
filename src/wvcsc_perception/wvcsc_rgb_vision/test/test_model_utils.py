@@ -604,7 +604,7 @@ def test_disease_segmenter_keeps_full_image_safe_mask_point():
     assert 5.0 <= result[0].control_v <= 25.0
 
 
-def test_disease_detector_returns_only_full_image_configured_boxes():
+def test_disease_detector_returns_single_class_full_image_boxes():
     class Box:
         def __init__(self, class_id, confidence, xyxy):
             self.cls = np.array([class_id])
@@ -617,7 +617,6 @@ def test_disease_detector_returns_only_full_image_configured_boxes():
             assert kwargs == {'verbose': False, 'conf': 0.25}
             return [SimpleNamespace(boxes=[
                 Box(1, 0.9, [5.0, 7.0, 25.0, 27.0]),
-                Box(0, 0.8, [1.0, 2.0, 3.0, 4.0]),
             ])]
 
     detector = object.__new__(DiseaseDetector)

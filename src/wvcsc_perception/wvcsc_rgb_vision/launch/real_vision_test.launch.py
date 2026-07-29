@@ -1,5 +1,3 @@
-# 中文说明：实机 RGB 病态目标感知测试启动入口。
-# 默认启动 segment 后端；detect 后端只能通过显式 YAML 参数切换，输出话题契约保持不变。
 """Standalone real-camera disease-target YOLO test."""
 
 import os
@@ -40,8 +38,7 @@ def generate_launch_description():
             description='Process frames without /mission/status or a robot.'),
         DeclareLaunchArgument(
             'vision_config_file',
-            default_value=os.path.join(
-                vision_share, 'config', 'vision_real_detect.yaml'),
+            default_value=os.path.join(vision_share, 'config', 'vision_real.yaml'),
             description='Perception YAML, including model backend and class contract.'),
 
         IncludeLaunchDescription(

@@ -1,10 +1,8 @@
-# 中文说明：实机单臂喷洒测试启动链，不启动车辆导航。
-# 它负责相机、MoveIt、视觉、喷洒执行器和单臂 Qt 的组合；真正的动作由 ExecuteSpray 驱动。
-# 启动参数必须继续与完整实机任务保持兼容，不能在 launch 层绕过安全锁或继电器确认。
 """Real Alicia-M spray-flow test without vehicle navigation."""
 
 import os
 from functools import partial
+import importlib.util
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
@@ -14,10 +12,6 @@ from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
-from wvcsc_bringup.calibration_launch import (
-    load_calibrated_mount as _load_calibrated_mount,
-    resolve_handeye_calibration as _resolve_handeye_calibration,
-)
 
 
 def _include(launch_dir, filename, arguments=None):
@@ -27,14 +21,25 @@ def _include(launch_dir, filename, arguments=None):
     )
 
 
+def _real_mission_helpers(launch_dir):
+    path = os.path.join(launch_dir, 'real_system_mission.launch.py')
+    spec = importlib.util.spec_from_file_location(
+        'wvcsc_real_system_mission_helpers', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _launch(context, *, launch_dir):
     bringup_share = get_package_share_directory('wvcsc_bringup')
     description_share = get_package_share_directory('wvcsc_description')
+    vision_share = get_package_share_directory('wvcsc_rgb_vision')
     controller_share = get_package_share_directory('controller_pkg')
     real_config = os.path.join(bringup_share, 'config', 'real')
-    handeye_path = _resolve_handeye_calibration(
+    helpers = _real_mission_helpers(launch_dir)
+    handeye_path = helpers._resolve_handeye_calibration(
         LaunchConfiguration('handeye_calibration').perform(context))
-    c10_xyz, c10_rpy = _load_calibrated_mount(handeye_path)
+    c10_xyz, c10_rpy = helpers._load_calibrated_mount(handeye_path)
     # This standalone test intentionally treats tool0 as the spray centerline.
     # Keep the URDF nozzle link at the identity transform for shared launch
     # compatibility, but aim and plan from tool0 itself.
@@ -232,8 +237,8 @@ def generate_launch_description():
             default_value=os.path.join(
                 vision_share, 'config', 'vision_real_detect.yaml'),
             description=(
-                'Perception YAML. Override with vision_real.yaml to use the '
-                'segment backend.')),
+                'Single-class best.pt detection configuration used by the '
+                'real arm spray test.')),
         DeclareLaunchArgument('use_moveit_rviz', default_value='false'),
         DeclareLaunchArgument('use_qt_gui', default_value='true'),
         OpaqueFunction(function=partial(_launch, launch_dir=launch_dir)),

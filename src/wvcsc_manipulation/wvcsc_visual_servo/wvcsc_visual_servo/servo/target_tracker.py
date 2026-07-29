@@ -1,5 +1,3 @@
-# 中文说明：Target2D 输入校验与单目标图像跟踪。
-# 目标 ID、置信度、像素范围和连续帧稳定性在这里归一化，异常输入不能生成运动命令。
 """Target-message validation and per-goal image tracking."""
 
 from dataclasses import dataclass

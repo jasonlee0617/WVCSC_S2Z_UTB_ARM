@@ -1,5 +1,3 @@
-# 中文说明：标定包提供的实机视觉测试兼容入口。
-# 实际感知节点统一由 wvcsc_rgb_vision/perception_pipeline 启动，本文件只转发既有参数。
 """Compatibility wrapper for the canonical RGB-vision test launch."""
 
 import os

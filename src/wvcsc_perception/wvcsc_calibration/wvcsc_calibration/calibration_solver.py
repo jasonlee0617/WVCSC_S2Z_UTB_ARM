@@ -1,5 +1,3 @@
-# 中文说明：OpenCV 手眼求解和 ROS TF/标记位姿坐标转换模块。
-# 求解只产生候选外参；是否部署由质量门控和人工验收决定，不由本模块直接写入运行配置。
 """OpenCV hand-eye solving with explicit ROS-TF to OpenCV conversion.
 
 The ROS C10 workflow stores ``base -> tool0`` and

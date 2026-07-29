@@ -1,10 +1,8 @@
-# 中文说明：单个 ExecuteSpray Goal 的可变工作流状态。
-# 该模块只保存目标账本、计数和阶段数据，不创建 ROS 通信，也不直接控制机械臂。
 """Per-goal mutable state for the spray workflow."""
 
 from dataclasses import dataclass, field
 
-from .target_ledger import spray_summary, target_accounting
+from .target_flow import spray_summary, target_accounting
 
 
 @dataclass

@@ -1,5 +1,3 @@
-# 中文说明：通用 MoveIt 轨迹重定时服务的 C++ 构建入口。
-# 服务只调整轨迹时间参数，不拥有机械臂任务状态、喷洒继电器或视觉伺服门控。
 cmake_minimum_required(VERSION 3.8)
 project(trajectory_retime_server)
 

@@ -1,5 +1,3 @@
-# 中文说明：C10 内参标定启动入口。
-# 它启动相机和标定所需图像流，不参与树/病态目标推理，也不触发机械臂喷洒。
 """C10 8x6, 25 mm checkerboard intrinsic calibration session."""
 
 import os

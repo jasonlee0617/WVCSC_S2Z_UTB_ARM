@@ -1,5 +1,3 @@
-# 中文说明：WVCSC ROS 2 消息、服务和 Action 的接口生成入口。
-# 字段顺序、类型和常量值属于 DDS wire contract；这里只维护生成依赖与安装声明。
 cmake_minimum_required(VERSION 3.8)
 project(wvcsc_interfaces)
 

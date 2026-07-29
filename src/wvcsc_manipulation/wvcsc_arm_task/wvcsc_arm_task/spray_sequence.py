@@ -1,4 +1,12 @@
-"""ExecuteSpray 状态机及其失败恢复策略。"""
+"""ExecuteSpray 状态机及其失败恢复策略。
+
+joint_presets 的整株发现遵循单视角策略：当前固定视角在 ``n`` 秒内用最近
+``m`` 秒出现率确认目标；两个稳定目标立即冻结，一个稳定目标在时间到时冻结，
+零目标才切换下一个固定视角。冻结后目标账本不可扩张。
+
+IK 保留多视角发现：先扫描中心和扇形候选，利用树平面坐标跨视角去重，再冻结
+最多两个目标。两种模式冻结后共享锁定、重心、视觉伺服、喷洒、复检和 HOME。
+"""
 
 import time
 
@@ -6,11 +14,9 @@ from wvcsc_interfaces.action import AlignTarget, ExecuteSpray
 
 from .spray_workflow import SpraySession
 from .target_flow import (
+    TargetAttempt,
     completion_feedback_allowed,
     final_spray_outcome,
-)
-from .target_ledger import (
-    TargetAttempt,
     limit_targets_per_tree,
     target_accounting_is_complete,
 )
@@ -25,6 +31,7 @@ class SpraySequenceMixin:
         按几何关系跨轮合并；循环退出前强制满足
         ``detected == sprayed + unresolved``，从而禁止病果静默丢失。
         """
+        self._active_mission = str(request.mission_id).strip()
         self.get_logger().info(
             f'[ARM] GOAL_ACCEPTED mission={request.mission_id.strip()} '
             f'spray_duration={request.spray_duration:.1f}s')
@@ -51,7 +58,7 @@ class SpraySequenceMixin:
         session = SpraySession()
 
         def relay_alignment_feedback(message):
-            """Keep the parent Action alive while the child Servo is active."""
+            """视觉伺服运行时周期转发反馈，保持父 Action 活跃。"""
             now = time.monotonic()
             if now - session.last_alignment_feedback_at < 1.0:
                 return
@@ -92,11 +99,10 @@ class SpraySequenceMixin:
                 f'timeout={self.config.detection_timeout:.1f}s '
                 f'confirmation={self.config.confirmation_frames}')
 
-            # 等待 YOLO 返回稳定的病态目标检测帧
-            frame_candidates = (
-                self._wait_for_discovery_targets(cancel_requested)
-                if not session.known_targets else
-                self._wait_for_fruits(cancel_requested))
+            # 首次发现使用 n 秒/最近 m 秒概率门控；冻结后只做短窗口重关联。
+            self._target_discovery_active = not session.known_targets
+            frame_candidates = self._wait_for_fruits(cancel_requested)
+            self._target_discovery_active = False
             if frame_candidates is None:
                 return self._recover_failure(
                     ExecuteSpray.Result.VISION_FAILED,
@@ -507,6 +513,7 @@ class SpraySequenceMixin:
 
     def _recover_failure(self, result_code, message, cancel_requested,
                          home_failure_message=None):
+        """普通任务失败后先安全返回 HOME，再返回指定错误结果。"""
         if self._aborted(cancel_requested):
             return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
         if not self._return_home(cancel_requested):
@@ -516,7 +523,7 @@ class SpraySequenceMixin:
 
     def _wait_post_spray_home_delay(
             self, sprayed, cancel_requested, feedback):
-        """Keep the completed tree at observation pose before the final HOME."""
+        """完成整株处理后在观察位停留配置时间，再返回 HOME。"""
         delay = float(getattr(self.config, 'post_spray_home_delay', 0.0))
         if sprayed <= 0 or delay <= 0.0:
             return not self._aborted(cancel_requested)
@@ -531,10 +538,12 @@ class SpraySequenceMixin:
         return not self._aborted(cancel_requested)
 
     def _alignment_retry_allowed(self, attempt_count):
+        """判断当前目标是否仍允许再次执行视觉对准。"""
         return attempt_count < int(self.get_parameter('max_alignment_attempts').value)
 
     @staticmethod
     def _alignment_code_allows_endpoint_spray(align_code):
+        """判断伺服错误是否允许从当前末端位置执行回退喷洒。"""
         return align_code in {
             AlignTarget.Result.TIMEOUT,
             AlignTarget.Result.TARGET_STALE,
@@ -543,6 +552,7 @@ class SpraySequenceMixin:
 
     @staticmethod
     def _alignment_code_allows_fallback(align_code):
+        """判断伺服错误是否允许返回安全观察位后回退喷洒。"""
         return align_code in {
             AlignTarget.Result.TIMEOUT,
             AlignTarget.Result.TARGET_STALE,
@@ -551,6 +561,7 @@ class SpraySequenceMixin:
 
     @staticmethod
     def _is_recoverable_alignment_code(align_code):
+        """判断伺服错误是否可以通过切换安全观察位恢复。"""
         return align_code in {
             AlignTarget.Result.TIMEOUT,
             AlignTarget.Result.TARGET_STALE,
@@ -560,6 +571,7 @@ class SpraySequenceMixin:
         }
 
     def _alignment_fallback_target(self, target, cancel_requested):
+        """返回安全观察位并重新确认可用于回退喷洒的目标。"""
         if not self._spray_on_alignment_failure:
             return None, 'alignment fallback is disabled'
         if target is None:
@@ -592,6 +604,7 @@ class SpraySequenceMixin:
         return confirmed, ''
 
     def _rewind_for_untried_observation(self, attempt):
+        """候选走到末尾时回绕到尚未尝试的安全观察位。"""
         current = self._observation_candidate_index
         if current + 1 < len(self._observation_candidates):
             return
@@ -601,6 +614,7 @@ class SpraySequenceMixin:
 
     def _recover_missing_target(self, target, pending_attempt, attempts,
                                 cancel_requested, feedback):
+        """优先回目标发现视角，再用其他安全视角恢复丢失目标。"""
         attempt = pending_attempt or self._attempt_for(target, attempts)
         if attempt is None:
             attempt = TargetAttempt(target, ledger_target=target)
@@ -630,11 +644,13 @@ class SpraySequenceMixin:
         return attempt, recovered, moved
 
     def _discover_ik_targets(self, cancel_requested, feedback):
-        """Survey center and fan views before IK starts any physical spraying."""
+        """在 IK 喷洒前扫描中心和扇形视角并冻结整株候选。"""
         discovered = []
         while True:
             self._set_inference_mode('disease')
-            candidates = self._wait_for_discovery_targets(cancel_requested)
+            self._target_discovery_active = True
+            candidates = self._wait_for_fruits(cancel_requested)
+            self._target_discovery_active = False
             if candidates is None:
                 return None
             self._merge_discovered_targets(discovered, candidates)
@@ -653,6 +669,7 @@ class SpraySequenceMixin:
 
     def _recover_to_next_observation(self, cancel_requested, feedback,
                                      excluded_indices=None):
+        """移动到下一个未排除观察位并请求重新检测。"""
         moved = False
         while not self._aborted(cancel_requested):
             feedback(ExecuteSpray.Feedback.RETURNING_TO_OBSERVE, 0.40,
@@ -670,6 +687,7 @@ class SpraySequenceMixin:
         return False, moved
 
     def _alignment_recovery_failure(self, message, cancel_requested):
+        """对准恢复耗尽后返回 HOME，并生成对应失败结果。"""
         if self._aborted(cancel_requested):
             return ExecuteSpray.Result.CANCELED, 'spray goal canceled'
         self._set_inference_mode('idle')
@@ -682,4 +700,5 @@ class SpraySequenceMixin:
         return ExecuteSpray.Result.HOME_FAILED, locked_message
 
     def _return_home(self, cancel_requested):
+        """在未取消时命令机械臂移动到配置的 HOME 关节位。"""
         return not self._aborted(cancel_requested) and self.arm.move_joints(self._home)

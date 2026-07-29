@@ -1,6 +1,3 @@
-# 中文说明：独立 Qt 导航/手动录点入口。
-# 它只编排导航可视化、Qt 路线编辑器和 MissionManager，不直接实现 Nav2 或喷洒算法。
-# `--show-args` 显示的参数是操作员调试和实机/仿真 launch 复用的公开契约。
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration

@@ -1,4 +1,3 @@
-# 中文说明：仿真辅助节点和纯 Ackermann 几何模块入口。
 """WVCSC Gazebo simulation helpers.
 
 ``data_acquisition`` is installed beside this package because its capture

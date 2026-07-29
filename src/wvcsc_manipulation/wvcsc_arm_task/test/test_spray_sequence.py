@@ -72,9 +72,6 @@ class _IkDiscoveryHarness:
     def _wait_for_fruits(self, _cancel_requested):
         return self._views[self._view_index]
 
-    def _wait_for_discovery_targets(self, cancel_requested):
-        return self._wait_for_fruits(cancel_requested)
-
     def _move_to_next_fan_observation(self):
         if self._view_index + 1 >= len(self._views):
             return False
@@ -198,22 +195,46 @@ def test_target_accounting_requires_every_detection_to_be_resolved():
     assert not target_accounting_is_complete(2, 1, 0)
 
 
-def test_presence_stability_counts_empty_inference_frames():
+def test_presence_stability_uses_all_valid_frames_as_probability_denominator():
     target = _target('target-a', 640.0, 360.0, confidence=0.80)
     frames = [[target], [], [target], [], [target], [], [target], [], [target], []]
 
-    stable = stable_candidates_by_presence(frames, 0.50, 5, 0.30, 18.0)
+    stable = stable_candidates_by_presence(
+        frames, 0.50, 5, 0.30, 18.0)
 
-    assert stable == [target]
+    assert len(stable) == 1
+    assert stable[0].target_id == 'target-a'
 
 
-def test_presence_stability_rejects_insufficient_frames_and_low_ratio():
-    target = _target('target-a', 640.0, 360.0, confidence=0.80)
+def test_presence_stability_rejects_ratio_below_threshold():
+    strong = _target('target-a', 640.0, 360.0, confidence=0.80)
+    weak = _target('target-b', 800.0, 360.0, confidence=0.40)
+    frames = [
+        [strong, weak],
+        [strong, weak],
+        [strong, weak],
+        [strong, weak],
+        [strong],
+        [],
+        [],
+        [],
+        [],
+        [],
+    ]
+
+    stable = stable_candidates_by_presence(
+        frames, 0.50, 5, 0.30, 18.0)
+
+    assert [target.target_id for target in stable] == ['target-a']
+    assert stable[0].confidence == 0.80
+
+
+def test_presence_stability_requires_minimum_valid_inference_frames():
+    target = _target('target-a', 640.0, 360.0, confidence=0.90)
 
     assert stable_candidates_by_presence(
-        [[target]] * 4, 0.50, 5, 0.30, 18.0) == []
-    assert stable_candidates_by_presence(
-        [[target], [], [], [], []], 0.50, 5, 0.30, 18.0) == []
+        [[target], [target], [target], [target]],
+        0.50, 5, 0.30, 18.0) == []
 
 
 def test_target_accounting_merges_transitive_recovery_snapshots():
@@ -233,7 +254,7 @@ def test_iou_is_zero_for_disjoint_targets():
     assert _target('a', 100.0, 100.0).iou(_target('b', 300.0, 300.0)) == 0.0
 
 
-def test_diseased_target_below_point_one_never_enters_the_queue():
+def test_spray_task_trusts_single_class_perception_output():
     def detection(score):
         return SimpleNamespace(
             id='fruit',
@@ -244,10 +265,8 @@ def test_diseased_target_below_point_one_never_enters_the_queue():
                 size_x=40.0, size_y=40.0),
         )
 
-    assert detection_candidates(
-        SimpleNamespace(detections=[detection(0.099)]), 'diseased_target', 0.10) == []
     assert len(detection_candidates(
-        SimpleNamespace(detections=[detection(0.10)]), 'diseased_target', 0.10)) == 1
+        SimpleNamespace(detections=[detection(0.01)]))) == 1
 
 
 class _FruitCollectionHarness:
@@ -419,6 +438,7 @@ class _ClosedLoopSequenceHarness:
     def __init__(self, *, alignment_ok=True, fallback_enabled=True,
                  recenter_ok=True, alignment_code=None, targets=None,
                  failed_target_ids=()):
+        self._active_mission = ''
         self._spray_on_alignment_failure = fallback_enabled
         self._observation_mode = 'joint_presets'
         self._observation_candidate_index = 0
@@ -481,9 +501,6 @@ class _ClosedLoopSequenceHarness:
     def _wait_for_fruits(self, _cancel_requested):
         self._fruit_calls += 1
         return self._observed_targets if self._fruit_calls <= 2 else []
-
-    def _wait_for_discovery_targets(self, cancel_requested):
-        return self._wait_for_fruits(cancel_requested)
 
     def _request_spray_aim(self, _cancel_requested):
         self.calls.append('request_aim')

@@ -1,5 +1,3 @@
-# 中文说明：基于图像误差生成角速度/速度命令的纯控制器。
-# 输入是目标像素与当前图像尺寸，输出经过限幅和平滑所需的控制量，不直接发布 ROS 消息。
 """Pure angular image-based visual-servo command synthesis."""
 
 from dataclasses import dataclass

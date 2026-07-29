@@ -1,5 +1,3 @@
-# 中文说明：病态目标模板跟踪和跨帧/跨视角关联辅助模块。
-# 目标账本的逻辑 ID 优先于 YOLO 临时 ID；关联不可靠时必须返回失败，禁止猜测重复喷洒。
 """Pure target-template tracking and cross-frame association."""
 
 from dataclasses import dataclass, replace
@@ -100,8 +98,6 @@ def track_matches(instances, tracks, iou_threshold, center_distance_px):
     candidates = []
     for instance_index, instance in enumerate(instances):
         for track_index, track in enumerate(tracks):
-            if instance.class_name != track.instance.class_name:
-                continue
             iou = instance.iou(track.instance)
             distance = instance.distance_to(track.instance)
             if iou >= iou_threshold or distance <= center_distance_px:
@@ -125,13 +121,10 @@ def track_matches(instances, tracks, iou_threshold, center_distance_px):
 def reassociation_candidate(
         reference, instances, iou_threshold, center_distance_px,
         iou_margin, distance_margin_px, equivalent_aim_distance_px,
-        canonical_target_class_name='diseased_target',
         allow_ambiguous_nearest=False):
     """Resolve a selected logical target after detector track-ID churn."""
     scored = []
     for instance in instances:
-        if instance.class_name != canonical_target_class_name:
-            continue
         iou = instance.iou(reference)
         distance = instance.distance_to(reference)
         if iou >= iou_threshold or distance <= center_distance_px:

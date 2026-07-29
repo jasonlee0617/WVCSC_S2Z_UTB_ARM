@@ -1,6 +1,8 @@
-# 中文说明：喷洒任务参数声明、读取和合法性校验模块。
-# 这里集中定义单位、范围和模式默认值，避免 SprayTask 在流程代码中散落参数约束。
-"""Spray task parameter declaration, parsing and validation."""
+"""喷洒任务参数声明、解析与校验。
+
+目标发现参数把“观察位总检测时间 n”和“目标出现率窗口 m”明确分开。配置加载时
+强制检查 ``0 < m <= n``、出现率范围和最小有效帧数，避免无效门控进入实机任务。
+"""
 
 import math
 from dataclasses import dataclass
@@ -19,7 +21,7 @@ DEFAULT_JOINT_PRESETS_DEG = {
 
 
 def parameter_defaults():
-    """Return fresh ROS parameter defaults for one node instance."""
+    """为每个喷洒节点实例返回一份独立的 ROS 参数默认值。"""
     return {
         'home_pose': [0.0] * 6,
         'min_spray_duration': 0.2,
@@ -38,8 +40,6 @@ def parameter_defaults():
         'selected_target_topic': '/vision/selected_target_id',
         'inference_mode_topic': '/vision/inference_mode',
         'motion_locked_topic': '/motion_control/locked',
-        'disease_confidence': 0.20,
-        'target_class_name': 'diseased_target',
         'max_targets_per_tree': 0,
         'spray_on_alignment_failure': False,
         'observation_mode': 'ik',
@@ -58,8 +58,6 @@ def parameter_defaults():
         'confirmation_frames': 3,
         'detection_timeout_sec': 2.0,
         'fruit_collection_settle_sec': 1.00,
-        # Initial discovery at one static observation pose.  Empty inference
-        # frames are deliberately retained in the presence-rate denominator.
         'view_detection_duration_sec': 5.0,
         'target_presence_window_sec': 1.0,
         'target_presence_ratio': 0.50,
@@ -119,15 +117,18 @@ def parameter_defaults():
 
 
 def declare_spray_parameters(node):
+    """在指定 ROS 节点上声明全部喷洒任务参数。"""
     for name, default in parameter_defaults().items():
         node.declare_parameter(name, default)
 
 
 def _value(node, name):
+    """读取指定 ROS 参数的原始值。"""
     return node.get_parameter(name).value
 
 
 def joint_parameter(node, name):
+    """读取并校验一个包含六个有限数值的关节参数。"""
     values = tuple(float(value) for value in _value(node, name))
     if len(values) != 6 or not all(math.isfinite(value) for value in values):
         raise ValueError(f'{name} must contain six finite joint positions')
@@ -135,6 +136,7 @@ def joint_parameter(node, name):
 
 
 def observation_parameters(node):
+    """读取并校验动态 IK 观察位生成参数。"""
     values = {
         'camera_reach_min_m': float(
             _value(node, 'observation_camera_reach_min_m')),
@@ -197,6 +199,7 @@ def observation_parameters(node):
 
 
 def target_recenter_parameters(node):
+    """读取并校验目标粗重心和视觉伺服交接参数。"""
     values = {
         'trigger_px': float(_value(node, 'target_recenter_trigger_px')),
         'servo_entry_px': float(
@@ -253,6 +256,7 @@ def target_recenter_parameters(node):
 
 
 def joint_preset_parameters(node):
+    """读取观察模式及左右两侧固定关节预设。"""
     mode = str(_value(node, 'observation_mode')).strip().lower()
     if mode not in {'ik', 'joint_presets'}:
         raise ValueError('observation_mode must be ik or joint_presets')
@@ -309,8 +313,6 @@ class SprayConfig:
     recenter: Mapping
     max_alignment_attempts: int
     max_targets_per_tree: int
-    disease_confidence: float
-    target_class_name: str
     confirmation_frames: int
     detection_timeout: float
     fruit_collection_settle: float
@@ -341,12 +343,10 @@ class SprayConfig:
 
     @classmethod
     def from_node(cls, node):
+        """从 ROS 参数创建经过完整合法性校验的不可变配置。"""
         observation = observation_parameters(node)
         recenter = target_recenter_parameters(node)
         observation_mode, presets = joint_preset_parameters(node)
-        target_class_name = str(_value(node, 'target_class_name')).strip()
-        if not target_class_name:
-            raise ValueError('target_class_name must be non-empty')
         max_alignment_attempts = int(
             _value(node, 'max_alignment_attempts'))
         max_targets_per_tree = int(_value(node, 'max_targets_per_tree'))
@@ -382,9 +382,9 @@ class SprayConfig:
                 'target_presence_window_sec must be positive and no greater '
                 'than view_detection_duration_sec')
         if (not math.isfinite(target_presence_ratio) or
-                not 0.0 < target_presence_ratio <= 1.0):
+                not 0.0 <= target_presence_ratio <= 1.0):
             raise ValueError(
-                'target_presence_ratio must be in (0, 1]')
+                'target_presence_ratio must be between zero and one')
         if target_presence_min_frames <= 0:
             raise ValueError('target_presence_min_frames must be positive')
         return cls(
@@ -408,8 +408,6 @@ class SprayConfig:
             recenter=MappingProxyType(recenter),
             max_alignment_attempts=max_alignment_attempts,
             max_targets_per_tree=max_targets_per_tree,
-            disease_confidence=float(_value(node, 'disease_confidence')),
-            target_class_name=target_class_name,
             confirmation_frames=int(_value(node, 'confirmation_frames')),
             detection_timeout=float(_value(node, 'detection_timeout_sec')),
             fruit_collection_settle=float(

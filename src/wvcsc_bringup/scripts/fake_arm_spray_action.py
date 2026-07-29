@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# 中文说明：实车导航/继电器集成测试使用的假机械臂 Action 服务端。
-# 它只验证通道 2 继电器和任务管理器数据流，不启动 MoveIt、不移动真实机械臂。
-# 该脚本不能作为真实喷洒入口，也不能替代 SprayTask 的安全状态机。
 """Simulate the arm spray Action while exercising the physical relay.
 
 This node is only for the real five-point navigation/relay integration test.

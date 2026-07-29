@@ -1,5 +1,3 @@
-# 中文说明：MoveIt Servo 输出与关节响应监控模块。
-# 它把“命令已发送”和“关节实际响应”分开统计，用于识别输出停滞；不改变硬安全停止规则。
 """Downstream MoveIt Servo output and joint-response monitoring."""
 
 from dataclasses import dataclass

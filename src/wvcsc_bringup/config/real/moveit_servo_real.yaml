@@ -1,6 +1,3 @@
-# 中文说明：实机 MoveIt Servo 参数，供视觉伺服节点建立受限的速度控制环。
-# 关键约束是碰撞检测、关节限位和奇异性硬门控；本文件不触发喷洒继电器。
-# 速度、加速度和看门狗参数的单位分别由 MoveIt Servo/节点契约定义，修改前需回归实机。
 # Alicia-M real-hardware Servo profile.  Unlike simulation, collision checking
 # is mandatory.  Initial speeds remain conservative until hand-eye validation.
 use_gazebo: false

@@ -180,6 +180,7 @@ class SprayTask(
         self._camera_model = None
         self._joint_positions = None
         self._joint_state_sequence = 0
+        self._active_mission = ''
         self._active_aim = None
         self._working_range_override = 0.0
 
@@ -281,6 +282,7 @@ class SprayTask(
             self._working_range_override = previous_working_range
             self._select_target('')
             self._set_inference_mode('idle')
+            self._active_mission = ''
             self._release()
 
     # ---------- ROS 状态与发布工具 ----------

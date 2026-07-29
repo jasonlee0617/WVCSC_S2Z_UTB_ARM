@@ -1,5 +1,4 @@
 <?xml version="1.0"?>
-<!-- 中文说明：轨迹重定时服务包的构建依赖与运行时接口声明。 -->
 <package format="3">
   <name>trajectory_retime_server</name>
   <version>0.1.0</version>

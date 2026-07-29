@@ -1,6 +1,3 @@
-# 中文说明：实车 Qt 路线与继电器验证入口，机械臂使用假 Action 服务端。
-# 该测试用于验证导航点、车辆运动期间通道 1 和停止后的继电器清理，不执行真实机械臂运动。
-# 只有显式测试链路才允许使用 fake arm，不能被完整任务入口隐式复用。
 """Qt-selected route validation with real vehicle/relay and a fake arm."""
 
 import math

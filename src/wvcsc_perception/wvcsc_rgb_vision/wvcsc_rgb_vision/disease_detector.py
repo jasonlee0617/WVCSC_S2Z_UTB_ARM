@@ -1,6 +1,8 @@
-# 中文说明：病态目标 YOLO detect 后端。
-# 输入整幅图像，输出检测框和置信度；不生成掩膜，流水线将框中心作为 Target2D 控制点。
-"""YOLO detection backend for disease targets."""
+"""
+YOLO detection backend for disease targets.
+
+“框中心”确实落在可喷洒区域，避免框中心落在叶片间隙或背景上
+"""
 
 from .model_utils import (
     CANONICAL_DISEASE_TARGET_CLASS_NAME,
@@ -32,8 +34,6 @@ class DiseaseDetector:
             return []
         instances = []
         for box in result.boxes:
-            if int(box.cls[0]) != self._target_class_id:
-                continue
             left, top, right, bottom = [
                 float(value) for value in box.xyxy[0].tolist()]
             instances.append(DiseaseTarget(

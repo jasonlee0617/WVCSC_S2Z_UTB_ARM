@@ -1,6 +1,3 @@
-# 中文说明：车辆与 Alicia-M 控制器管理器参数。
-# 控制器加载顺序由对应 launch 负责；本文件只声明更新频率和控制器类型。
-# 修改关节名或控制器类型会影响实机与仿真启动，应与 URDF 和 MoveIt 配置同步。
 controller_manager:
   ros__parameters:
     update_rate: 100

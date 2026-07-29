@@ -1,6 +1,3 @@
-# 中文说明：bringup 包的构建与安装入口，负责安装启动文件、Qt 脚本和运行配置。
-# 本文件不实现任务逻辑；配置的实际含义由各 launch 和节点负责。
-# 修改依赖或安装路径时必须保持实机启动链与仿真/测试入口可发现。
 cmake_minimum_required(VERSION 3.8)
 project(wvcsc_bringup)
 

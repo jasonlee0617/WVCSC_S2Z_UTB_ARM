@@ -12,7 +12,6 @@ wvcsc_perception_pipeline:
     disease_model_backend: segment
     disease_model_path: yolov8s_seg_real.pt
     target_class_id: 0
-    target_class_name: diseased_target
     model_target_class_name: disease_leaf
     # 实机权重原生为 segment:{0: disease_leaf}，ROS 输出统一为 diseased_target。
     strict_model_classes: true

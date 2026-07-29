@@ -1,6 +1,3 @@
-# 中文说明：实机感知、机械臂、继电器与 MissionManager 的组合入口。
-# 它只负责节点拓扑、参数和启动顺序；导航目标仍由完整任务入口提交。
-# 任何节点启动失败都必须保持现有的安全退出和继电器清理行为。
 """Real perception, arm task, relay and Qt mission-manager orchestration."""
 
 import os
@@ -160,10 +157,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'vision_config_file',
             default_value=os.path.join(
-                vision_share, 'config', 'vision_real_detect.yaml'),
+                vision_share, 'config', 'vision_real.yaml'),
             description=(
-                'Perception YAML. Override with vision_real.yaml to use the '
-                'segment backend.')),
+                'Perception YAML. Override this to evaluate a detect backend '
+                'without changing the default segment configuration.')),
         DeclareLaunchArgument('use_keyboard', default_value='false'),
         DeclareLaunchArgument('map', default_value=latest_map_yaml()),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),

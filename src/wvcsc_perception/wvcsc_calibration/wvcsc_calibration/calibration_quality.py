@@ -1,5 +1,3 @@
-# 中文说明：手眼标定质量门控的纯计算模块。
-# 输入是采样残差/一致性统计，输出是是否满足配置阈值；不修改标定结果和设备状态。
 """Pure quality gates for Alicia-M automatic hand-eye calibration."""
 
 from dataclasses import dataclass
