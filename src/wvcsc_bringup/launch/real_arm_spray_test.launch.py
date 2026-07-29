@@ -230,10 +230,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'vision_config_file',
             default_value=os.path.join(
-                vision_share, 'config', 'vision_real.yaml'),
+                vision_share, 'config', 'vision_real_detect.yaml'),
             description=(
-                'Perception YAML. Override this to evaluate a detect backend '
-                'without changing the default segment configuration.')),
+                'Perception YAML. Override with vision_real.yaml to use the '
+                'segment backend.')),
         DeclareLaunchArgument('use_moveit_rviz', default_value='false'),
         DeclareLaunchArgument('use_qt_gui', default_value='true'),
         OpaqueFunction(function=partial(_launch, launch_dir=launch_dir)),

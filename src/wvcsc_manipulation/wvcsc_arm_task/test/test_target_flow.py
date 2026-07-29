@@ -1,7 +1,8 @@
 import pytest
 
 from wvcsc_arm_task.target_flow import (
-    FruitTarget, associate_known_targets, target_on_tree_plane)
+    FruitTarget, associate_known_targets, stable_candidates_by_presence,
+    target_on_tree_plane)
 from wvcsc_arm_task.target_ledger import FruitTarget as LedgerFruitTarget
 
 
@@ -15,6 +16,7 @@ def _same_target(left, right):
 
 def test_target_flow_keeps_the_legacy_pure_target_import_path():
     assert FruitTarget is LedgerFruitTarget
+    assert callable(stable_candidates_by_presence)
 
 
 def test_cross_view_association_preserves_a_logical_target_after_recenter():

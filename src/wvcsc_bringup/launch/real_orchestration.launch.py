@@ -160,10 +160,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'vision_config_file',
             default_value=os.path.join(
-                vision_share, 'config', 'vision_real.yaml'),
+                vision_share, 'config', 'vision_real_detect.yaml'),
             description=(
-                'Perception YAML. Override this to evaluate a detect backend '
-                'without changing the default segment configuration.')),
+                'Perception YAML. Override with vision_real.yaml to use the '
+                'segment backend.')),
         DeclareLaunchArgument('use_keyboard', default_value='false'),
         DeclareLaunchArgument('map', default_value=latest_map_yaml()),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),

@@ -58,6 +58,12 @@ def parameter_defaults():
         'confirmation_frames': 3,
         'detection_timeout_sec': 2.0,
         'fruit_collection_settle_sec': 1.00,
+        # Initial discovery at one static observation pose.  Empty inference
+        # frames are deliberately retained in the presence-rate denominator.
+        'view_detection_duration_sec': 5.0,
+        'target_presence_window_sec': 1.0,
+        'target_presence_ratio': 0.50,
+        'target_presence_min_frames': 5,
         'max_alignment_attempts': 2,
         'target_recenter_trigger_px': 48.0,
         'visual_servo_entry_max_error_px': 48.0,
@@ -308,6 +314,10 @@ class SprayConfig:
     confirmation_frames: int
     detection_timeout: float
     fruit_collection_settle: float
+    view_detection_duration: float
+    target_presence_window: float
+    target_presence_ratio: float
+    target_presence_min_frames: int
     processed_iou_threshold: float
     processed_center_distance_px: float
     cross_view_reassociation_max_distance_px: float
@@ -354,6 +364,29 @@ class SprayConfig:
                 post_spray_home_delay < 0.0):
             raise ValueError(
                 'post_spray_home_delay_sec must be finite and non-negative')
+        view_detection_duration = float(
+            _value(node, 'view_detection_duration_sec'))
+        target_presence_window = float(
+            _value(node, 'target_presence_window_sec'))
+        target_presence_ratio = float(
+            _value(node, 'target_presence_ratio'))
+        target_presence_min_frames = int(
+            _value(node, 'target_presence_min_frames'))
+        if (not math.isfinite(view_detection_duration) or
+                view_detection_duration <= 0.0):
+            raise ValueError(
+                'view_detection_duration_sec must be finite and positive')
+        if (not math.isfinite(target_presence_window) or
+                not 0.0 < target_presence_window <= view_detection_duration):
+            raise ValueError(
+                'target_presence_window_sec must be positive and no greater '
+                'than view_detection_duration_sec')
+        if (not math.isfinite(target_presence_ratio) or
+                not 0.0 < target_presence_ratio <= 1.0):
+            raise ValueError(
+                'target_presence_ratio must be in (0, 1]')
+        if target_presence_min_frames <= 0:
+            raise ValueError('target_presence_min_frames must be positive')
         return cls(
             home=joint_parameter(node, 'home_pose'),
             min_duration=float(_value(node, 'min_spray_duration')),
@@ -381,6 +414,10 @@ class SprayConfig:
             detection_timeout=float(_value(node, 'detection_timeout_sec')),
             fruit_collection_settle=float(
                 _value(node, 'fruit_collection_settle_sec')),
+            view_detection_duration=view_detection_duration,
+            target_presence_window=target_presence_window,
+            target_presence_ratio=target_presence_ratio,
+            target_presence_min_frames=target_presence_min_frames,
             processed_iou_threshold=float(
                 _value(node, 'processed_iou_threshold')),
             processed_center_distance_px=float(

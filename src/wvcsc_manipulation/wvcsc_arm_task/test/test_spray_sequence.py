@@ -14,7 +14,8 @@ from wvcsc_arm_task.target_flow import (
     associate_known_targets,
     deduplicate_candidates, detection_candidates, final_spray_outcome,
     limit_targets_per_tree, spray_summary, target_accounting,
-    stable_candidates_from_frames, target_accounting_is_complete,
+    stable_candidates_by_presence, stable_candidates_from_frames,
+    target_accounting_is_complete,
     target_requires_recenter)
 from wvcsc_arm_task.observation.candidate import ObservationCandidate
 
@@ -70,6 +71,9 @@ class _IkDiscoveryHarness:
 
     def _wait_for_fruits(self, _cancel_requested):
         return self._views[self._view_index]
+
+    def _wait_for_discovery_targets(self, cancel_requested):
+        return self._wait_for_fruits(cancel_requested)
 
     def _move_to_next_fan_observation(self):
         if self._view_index + 1 >= len(self._views):
@@ -192,6 +196,24 @@ def test_disappeared_pending_target_is_not_silently_completed():
 def test_target_accounting_requires_every_detection_to_be_resolved():
     assert target_accounting_is_complete(2, 1, 1)
     assert not target_accounting_is_complete(2, 1, 0)
+
+
+def test_presence_stability_counts_empty_inference_frames():
+    target = _target('target-a', 640.0, 360.0, confidence=0.80)
+    frames = [[target], [], [target], [], [target], [], [target], [], [target], []]
+
+    stable = stable_candidates_by_presence(frames, 0.50, 5, 0.30, 18.0)
+
+    assert stable == [target]
+
+
+def test_presence_stability_rejects_insufficient_frames_and_low_ratio():
+    target = _target('target-a', 640.0, 360.0, confidence=0.80)
+
+    assert stable_candidates_by_presence(
+        [[target]] * 4, 0.50, 5, 0.30, 18.0) == []
+    assert stable_candidates_by_presence(
+        [[target], [], [], [], []], 0.50, 5, 0.30, 18.0) == []
 
 
 def test_target_accounting_merges_transitive_recovery_snapshots():
@@ -459,6 +481,9 @@ class _ClosedLoopSequenceHarness:
     def _wait_for_fruits(self, _cancel_requested):
         self._fruit_calls += 1
         return self._observed_targets if self._fruit_calls <= 2 else []
+
+    def _wait_for_discovery_targets(self, cancel_requested):
+        return self._wait_for_fruits(cancel_requested)
 
     def _request_spray_aim(self, _cancel_requested):
         self.calls.append('request_aim')

@@ -18,6 +18,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         (os.path.join('share', package_name, 'models'), [
+            'models/best.pt',
             'models/yolov8s_seg_real.pt',
             'models/yolov8s_seg_sim.pt',
         ]),

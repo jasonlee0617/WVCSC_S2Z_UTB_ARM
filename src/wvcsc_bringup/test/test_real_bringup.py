@@ -170,7 +170,7 @@ def test_real_system_rviz_processes_have_separate_explicit_controls_and_names():
 def test_real_orchestration_uses_the_qt_mission_manager_only():
     source = _source('real_orchestration.launch.py')
     vision_path = (PERCEPTION / 'wvcsc_rgb_vision' / 'config' /
-                   'vision_real.yaml')
+                   'vision_real_detect.yaml')
     vision = vision_path.read_text(encoding='utf-8')
     vision_parameters = yaml.safe_load(vision)[
         'wvcsc_perception_pipeline']['ros__parameters']
@@ -184,17 +184,40 @@ def test_real_orchestration_uses_the_qt_mission_manager_only():
     assert "'wide_relay_channel': 1" in source
     assert "'arm_relay_channel': 2" in source
     assert "'arm_base_yaw_rad': 3.141592653589793" in source
-    assert 'vision_real.yaml' in source
-    assert 'yolov8s_seg_real.pt' in vision
-    assert vision_parameters['disease_model_backend'] == 'segment'
+    assert 'vision_real_detect.yaml' in source
+    assert 'best.pt' in vision
+    assert vision_parameters['disease_model_backend'] == 'detect'
     assert 'target_class_name: diseased_target' in vision
-    assert vision_parameters['model_target_class_name'] == 'disease_leaf'
+    assert vision_parameters['model_target_class_name'] == 'illness'
     assert 'strict_model_classes: true' in vision
-    assert vision_parameters['max_diseased_targets'] == 2
+    assert vision_parameters['max_diseased_targets'] == 0
     assert "LaunchConfiguration('vision_config_file')" in source
     assert "get_package_share_directory('controller_pkg')" in source
     assert 'spray_actuator_real.yaml' in source
     assert "'relay_config_file'" in source
+
+
+@pytest.mark.parametrize(
+    'launch_name', (
+        'real_system_mission.launch.py',
+        'real_orchestration.launch.py',
+        'real_arm_spray_test.launch.py',
+    ))
+def test_all_real_task_entrypoints_default_to_the_detect_configuration(launch_name):
+    source = _source(launch_name)
+    assert "'config', 'vision_real_detect.yaml'" in source
+    assert 'vision_real.yaml' in source  # explicit segment rollback remains available
+
+
+def test_real_arm_presence_gate_matches_the_field_discovery_contract():
+    config = yaml.safe_load(
+        (PACKAGE / 'config' / 'real' / 'arm_task_real.yaml').read_text(
+            encoding='utf-8'))['wvcsc_spray_task']['ros__parameters']
+    assert config['max_targets_per_tree'] == 2
+    assert config['view_detection_duration_sec'] == pytest.approx(7.0)
+    assert config['target_presence_window_sec'] == pytest.approx(2.0)
+    assert config['target_presence_ratio'] == pytest.approx(0.50)
+    assert config['target_presence_min_frames'] == 5
 
 
 def test_qt_real_mode_uses_qt_task_autostart_without_manager_auto_start():
@@ -262,7 +285,7 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
     assert 'latest_real' in source
     assert 'nozzle_xyz = (0.0, 0.0, 0.0)' in source
     assert 'c10_camera.launch.py' in source
-    assert 'vision_real.yaml' in source
+    assert 'vision_real_detect.yaml' in source
     assert "LaunchConfiguration('vision_config_file')" in source
     assert "executable='spray_task'" in source
     assert "executable='spray_actuator'" in source

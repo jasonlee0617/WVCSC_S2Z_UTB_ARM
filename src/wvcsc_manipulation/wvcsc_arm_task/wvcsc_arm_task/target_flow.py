@@ -20,6 +20,7 @@ from .target_ledger import (
     detection_candidates,
     limit_targets_per_tree,
     spray_summary,
+    stable_candidates_by_presence,
     stable_candidates_from_frames,
     target_accounting,
     target_accounting_is_complete,
@@ -171,6 +172,50 @@ class TargetFlowMixin:
             result = [] if self._fruit_frames else None
         return (None if result is None else
                 self._anchor_targets_to_tree_plane(result))
+
+    def _wait_for_discovery_targets(self, cancel_requested):
+        """Freeze stable targets after an explicit static-view presence scan.
+
+        This discovery gate is intentionally separate from the short recheck
+        used after the ledger is frozen.  A complete window counts every valid
+        YOLO frame, including frames without a box, as its denominator.
+        """
+        started = time.monotonic()
+        duration = self.config.view_detection_duration
+        presence_window = self.config.target_presence_window
+        presence_ratio = self.config.target_presence_ratio
+        minimum_frames = self.config.target_presence_min_frames
+        maximum = self.config.max_targets_per_tree
+        deadline = started + duration
+        latest_stable = []
+
+        while time.monotonic() < deadline:
+            if self._aborted(cancel_requested):
+                return None
+            now = time.monotonic()
+            window_start = max(started, now - presence_window)
+            with self._vision_mutex:
+                frames = [
+                    candidates for stamp, candidates in self._fruit_history
+                    if window_start <= stamp <= now]
+            if now - started >= presence_window:
+                latest_stable = stable_candidates_by_presence(
+                    frames, presence_ratio, minimum_frames,
+                    self.config.processed_iou_threshold,
+                    self.config.processed_center_distance_px)
+                if maximum > 0 and len(latest_stable) >= maximum:
+                    return self._anchor_targets_to_tree_plane(
+                        latest_stable[:maximum])
+            time.sleep(0.02)
+
+        with self._vision_mutex:
+            received_frames = any(
+                stamp >= started for stamp, _candidates in self._fruit_history)
+        if not received_frames:
+            return None
+        if maximum > 0:
+            latest_stable = latest_stable[:maximum]
+        return self._anchor_targets_to_tree_plane(latest_stable)
 
     def _reset_target_confirmation(self, target_id, *, clear_latest=True):
         """Reset one selected-target confirmation window."""

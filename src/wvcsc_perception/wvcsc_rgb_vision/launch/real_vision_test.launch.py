@@ -40,7 +40,8 @@ def generate_launch_description():
             description='Process frames without /mission/status or a robot.'),
         DeclareLaunchArgument(
             'vision_config_file',
-            default_value=os.path.join(vision_share, 'config', 'vision_real.yaml'),
+            default_value=os.path.join(
+                vision_share, 'config', 'vision_real_detect.yaml'),
             description='Perception YAML, including model backend and class contract.'),
 
         IncludeLaunchDescription(

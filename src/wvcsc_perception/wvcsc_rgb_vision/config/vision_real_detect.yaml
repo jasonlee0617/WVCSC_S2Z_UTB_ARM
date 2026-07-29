@@ -1,0 +1,38 @@
+wvcsc_perception_pipeline:
+  ros__parameters:
+    # C10 real-camera stream and the unchanged ROS task contract.
+    image_topic: /camera/color/image_raw
+    selected_target_topic: /vision/selected_target_id
+    diseased_target_detections_topic: /vision/diseased_target_detections
+    target_topic: /vision/target
+    diseased_target_visualization_topic: /vision/diseased_target_debug_image
+    inference_mode_topic: /vision/inference_mode
+
+    # best.pt is a detect checkpoint with model class names={0: illness}.
+    # The ROS class remains the common task contract: diseased_target.
+    disease_model_backend: detect
+    disease_model_path: best.pt
+    target_class_id: 0
+    target_class_name: diseased_target
+    model_target_class_name: illness
+    strict_model_classes: true
+
+    # Keep all valid detector boxes visible and let SprayTask freeze the two
+    # stable task targets after its presence-rate check.
+    disease_confidence: 0.5
+    max_diseased_targets: 0
+    track_iou_threshold: 0.20
+    track_center_distance_px: 50.0
+    track_max_missed_frames: 5
+    target_reassociation_distance_px: 160.0
+    target_reassociation_iou_margin: 0.10
+    target_reassociation_distance_margin_px: 8.0
+    target_equivalent_aim_distance_px: 8.0
+    target_lock_ema_alpha: 0.20
+    target_template_tracking_enabled: true
+    target_template_update_min_confidence: 0.30
+    target_template_padding_ratio: 0.50
+    target_template_min_padding_px: 6.0
+    target_template_search_radius_px: 80
+    target_template_min_score: 0.55
+    publish_visualization: true

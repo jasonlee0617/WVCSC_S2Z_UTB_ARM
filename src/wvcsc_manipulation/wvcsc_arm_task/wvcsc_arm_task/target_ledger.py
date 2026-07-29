@@ -207,6 +207,53 @@ def stable_candidates_from_frames(
             if cluster['frames'] >= required]
 
 
+def stable_candidates_by_presence(
+        frames, minimum_presence_ratio, minimum_valid_frames,
+        iou_threshold=0.30, center_distance_px=18.0):
+    """Return targets stable over a window of all valid inference frames.
+
+    ``frames`` includes empty frames.  A target contributes at most once to a
+    frame, so duplicate detector boxes cannot inflate its appearance rate.
+    The latest valid geometry is returned because it is the correct snapshot
+    to aim from; confidence is already filtered per frame by the ROS layer.
+    """
+    valid_frame_count = len(frames)
+    if valid_frame_count < max(1, int(minimum_valid_frames)):
+        return []
+
+    clusters = []
+    for frame in frames:
+        assigned = set()
+        for candidate in deduplicate_candidates(
+                frame, iou_threshold, center_distance_px):
+            matches = []
+            for index, cluster in enumerate(clusters):
+                if index in assigned:
+                    continue
+                previous = cluster['latest']
+                overlap = candidate.iou(previous)
+                distance = candidate.distance_to(previous)
+                if overlap >= iou_threshold or distance <= center_distance_px:
+                    matches.append((
+                        0 if overlap >= iou_threshold else 1,
+                        -overlap, distance, index))
+            if matches:
+                index = min(matches)[3]
+                clusters[index]['latest'] = candidate
+                clusters[index]['hits'] += 1
+                assigned.add(index)
+            else:
+                clusters.append({'latest': candidate, 'hits': 1})
+                assigned.add(len(clusters) - 1)
+
+    threshold = float(minimum_presence_ratio)
+    return sorted(
+        (cluster['latest'] for cluster in clusters
+         if cluster['hits'] / valid_frame_count >= threshold),
+        key=lambda item: item.confidence,
+        reverse=True)
+
+
 def associate_known_targets(
         known, candidates, same_target, max_cross_view_distance_px):
     """Associate detections one-to-one with immutable logical targets."""

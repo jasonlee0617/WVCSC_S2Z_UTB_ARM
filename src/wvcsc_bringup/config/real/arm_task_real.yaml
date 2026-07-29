@@ -5,6 +5,12 @@ wvcsc_spray_task:
     disease_confidence: 0.25
     # One real-tree task may spray only the two highest-confidence leaves.
     max_targets_per_tree: 2
+    # One static real-world observation must persist across a full sliding
+    # window before it enters the frozen two-target ledger.
+    view_detection_duration_sec: 7.0
+    target_presence_window_sec: 2.0
+    target_presence_ratio: 0.50
+    target_presence_min_frames: 5
     post_spray_home_delay_sec: 2.0
     target_post_recenter_min_confidence: 0.30
     # Real hardware follows the same coarse-MoveIt + Visual Servo path as

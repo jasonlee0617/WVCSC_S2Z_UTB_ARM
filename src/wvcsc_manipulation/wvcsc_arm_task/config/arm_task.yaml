@@ -78,9 +78,14 @@ wvcsc_spray_task:
     # 视觉确认帧数：连续 3 帧满足条件，才认为目标有效，防止单帧误检。
     confirmation_frames: 1
 
-    # 在不同视觉状态下等待检测结果的最长超时时间。
-    detection_timeout_sec: 4.0            # 果实检测阶段超时
-    fruit_collection_settle_sec: 1.00     # 果实队列稳定等待时间
+    # 冻结账本后复检当前目标的最长时间与短稳定窗口。
+    detection_timeout_sec: 4.0
+    fruit_collection_settle_sec: 1.00
+    # 一个静止观察位上的初始目标发现：在最近窗口内达到出现率才入账。
+    view_detection_duration_sec: 5.0
+    target_presence_window_sec: 1.0
+    target_presence_ratio: 0.50
+    target_presence_min_frames: 5
 
     # 单颗病果最多尝试对准的次数。
     max_alignment_attempts: 2

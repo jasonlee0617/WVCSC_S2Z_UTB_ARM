@@ -289,10 +289,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'vision_config_file',
             default_value=os.path.join(
-                vision_share, 'config', 'vision_real.yaml'),
+                vision_share, 'config', 'vision_real_detect.yaml'),
             description=(
-                'Perception YAML forwarded to real_orchestration. Use a '
-                'separate file for detect experiments.')),
+                'Perception YAML forwarded to real_orchestration. Override '
+                'with vision_real.yaml to use the segment backend.')),
         # Qt route editing needs the navigation RViz for 2D Pose Estimate and
         # 2D Goal.  MoveIt RViz remains opt-in to avoid a second RViz window.
         DeclareLaunchArgument('use_nav_rviz', default_value='true'),

@@ -93,7 +93,10 @@ class SpraySequenceMixin:
                 f'confirmation={self.config.confirmation_frames}')
 
             # 等待 YOLO 返回稳定的病态目标检测帧
-            frame_candidates = self._wait_for_fruits(cancel_requested)
+            frame_candidates = (
+                self._wait_for_discovery_targets(cancel_requested)
+                if not session.known_targets else
+                self._wait_for_fruits(cancel_requested))
             if frame_candidates is None:
                 return self._recover_failure(
                     ExecuteSpray.Result.VISION_FAILED,
@@ -631,7 +634,7 @@ class SpraySequenceMixin:
         discovered = []
         while True:
             self._set_inference_mode('disease')
-            candidates = self._wait_for_fruits(cancel_requested)
+            candidates = self._wait_for_discovery_targets(cancel_requested)
             if candidates is None:
                 return None
             self._merge_discovered_targets(discovered, candidates)
