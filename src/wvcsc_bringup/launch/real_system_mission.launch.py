@@ -4,7 +4,6 @@ import os
 from functools import partial
 import math
 from pathlib import Path
-import re
 
 import yaml
 
@@ -26,6 +25,10 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 
+from wvcsc_bringup.handeye_calibration_paths import (
+    expanded_path,
+    resolve_handeye_calibration,
+)
 from wvcsc_bringup.path_defaults import latest_map_yaml
 
 
@@ -37,34 +40,7 @@ def _include(launch_dir, filename, arguments=None):
 
 
 def _expand_path(path):
-    return os.path.expanduser(os.path.expandvars(os.fspath(path)))
-
-
-def _latest_handeye_calibration(simulation=False):
-    directory = (Path.home() / 'WVCSC_S2Z_UTB_ARM' / 'src' /
-                 'wvcsc_perception' / 'wvcsc_calibration' / 'config')
-    prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
-    pattern = re.compile(
-        rf'^{re.escape(prefix)}_(\d{{8}}_\d{{6}})\.calib$')
-    candidates = []
-    for path in directory.glob(f'{prefix}_*.calib'):
-        match = pattern.fullmatch(path.name)
-        if match:
-            candidates.append((match.group(1), path.name, path))
-    if not candidates:
-        role = 'simulation' if simulation else 'real'
-        raise RuntimeError(
-            f'no timestamped {role} C10 hand-eye calibration in {directory}')
-    return str(max(candidates, key=lambda item: (item[0], item[1]))[2])
-
-
-def _resolve_handeye_calibration(value, *, simulation=False):
-    value = os.fspath(value)
-    if value in ('', 'latest', 'latest_real'):
-        return _latest_handeye_calibration(simulation=simulation)
-    if value == 'latest_sim':
-        return _latest_handeye_calibration(simulation=True)
-    return _expand_path(value)
+    return str(expanded_path(path))
 
 
 def _rpy_matrix(roll, pitch, yaw):
@@ -198,8 +174,8 @@ def _resolve_calibrations(context, *, launch_dir):
 
     initial_actions = []
     # --- hand-eye calibration ---
-    calibration_path = _resolve_handeye_calibration(
-        LaunchConfiguration('handeye_calibration').perform(context))
+    calibration_path = str(resolve_handeye_calibration(
+        LaunchConfiguration('handeye_calibration').perform(context)))
     if not os.path.isfile(calibration_path):
         raise RuntimeError(
             f'hand-eye calibration is required but not found: {calibration_path}')

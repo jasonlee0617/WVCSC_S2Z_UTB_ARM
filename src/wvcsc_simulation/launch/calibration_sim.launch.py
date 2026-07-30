@@ -19,6 +19,7 @@ from launch.actions import (
 )
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from tf_transformations import (
@@ -29,8 +30,6 @@ from tf_transformations import (
     translation_from_matrix,
     translation_matrix,
 )
-
-
 def _load_yaml(package_name, relative_path):
     path = os.path.join(get_package_share_directory(package_name), relative_path)
     with open(path, encoding='utf-8') as stream:
@@ -193,7 +192,7 @@ def generate_launch_description():
     ]
 
     simulation_parameters = _load_yaml(
-        'wvcsc_calibration', 'config/auto_handeye_alicia_sim.yaml')[
+        'wvcsc_calibration', 'config/sim/auto_handeye_alicia_sim.yaml')[
             'auto_calibration_collector']['ros__parameters']
     marker_position = _marker_position(simulation_parameters)
     marker_xyz, marker_rpy = _marker_spawn_pose(urdf, marker_position)
@@ -334,13 +333,16 @@ def generate_launch_description():
             'use_sim_time': True,
         }],
         output='both')
-    collector = Node(
-        package='wvcsc_calibration', executable='auto_calibration_collector',
+    calibration_qt = Node(
+        package='wvcsc_calibration', executable='calibration_qt',
         parameters=[
-            os.path.join(calibration_share, 'config', 'auto_handeye_alicia.yaml'),
             os.path.join(
-                calibration_share, 'config', 'auto_handeye_alicia_sim.yaml'),
+                calibration_share, 'config', 'real', 'auto_handeye_alicia.yaml'),
+            os.path.join(
+                calibration_share, 'config', 'sim', 'auto_handeye_alicia_sim.yaml'),
+            {'use_sim_time': True},
         ],
+        condition=IfCondition(LaunchConfiguration('use_calibration_qt')),
         output='both')
 
     # Gazebo starts paused to make both vehicle and marker spawn deterministic.
@@ -377,11 +379,12 @@ def generate_launch_description():
             _after_success, process_name='gripper_controller spawner',
             success_actions=[
                 motion_control, aruco, aruco_overlay, marker_tf,
-                handeye_server, collector,
+                handeye_server, calibration_qt,
             ])))
 
     return LaunchDescription([
         DeclareLaunchArgument('gui', default_value='true'),
+        DeclareLaunchArgument('use_calibration_qt', default_value='true'),
         SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
         SetEnvironmentVariable('GAZEBO_MODEL_PATH', gazebo_model_path),
         SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', gazebo_resource_path),

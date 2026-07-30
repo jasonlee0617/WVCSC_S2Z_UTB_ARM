@@ -19,7 +19,6 @@ import cv2
 from cv_bridge import CvBridge
 from easy_handeye2_msgs.srv import (
     RemoveSample,
-    SaveSamples,
     TakeSample,
 )
 from moveit_msgs.action import ExecuteTrajectory
@@ -33,8 +32,10 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
+from rosidl_runtime_py.convert import message_to_yaml
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CameraInfo, Image, JointState
+from std_srvs.srv import Trigger
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -49,10 +50,13 @@ from .calibration_io import (
     calibration_config_dir,
     timestamped_calibration_paths,
     write_calibration_outputs,
+    write_sample_archive,
 )
 from .calibration_quality import (
     MarkerObservation,
     calibration_consensus,
+    mean_marker_side_px,
+    median_marker_corners,
     marker_pose_rms,
     marker_pose_residuals,
     pose_is_diverse,
@@ -128,7 +132,7 @@ def estimate_refined_aruco_pose(corners, marker_size_m, camera_matrix, distortio
 class AutoCalibrationCollector(Node):
     """Execute the official fixed sequence through WVCSC safety gates."""
 
-    def __init__(self):
+    def __init__(self, *, enable_keyboard=True):
         super().__init__('auto_calibration_collector')
         self._declare_parameters()
         self._group = ReentrantCallbackGroup()
@@ -142,6 +146,10 @@ class AutoCalibrationCollector(Node):
         self._session_thread = None
         self._session_cancel = threading.Event()
         self._session_invalid = threading.Event()
+        self._session_output_paths = None
+        self._calibration_state = 'IDLE'
+        self._moved_from_home = False
+        self._keyboard_enabled = bool(enable_keyboard)
         self._auto_start_pending = bool(self.get_parameter('auto_start').value)
         self._external_locked = False
         self._joint_positions = None
@@ -195,6 +203,15 @@ class AutoCalibrationCollector(Node):
         self.create_subscription(
             String, str(self.get_parameter('motion_state_topic').value),
             self._on_motion_state, latched, callback_group=self._group)
+        self._calibration_state_publisher = self.create_publisher(
+            String, '/calibration/state', latched)
+        self.create_service(
+            Trigger, '/calibration/prepare', self._on_prepare,
+            callback_group=self._group)
+        self.create_service(
+            Trigger, '/calibration/collect', self._on_collect,
+            callback_group=self._group)
+        self._publish_calibration_state()
 
         # 日常标定仍坚持由独立终端的 s/Enter 启动，避免机械臂在操作者
         # 未确认工作区安全时自行运动。``auto_start`` 只用于无 TTY 的
@@ -202,13 +219,14 @@ class AutoCalibrationCollector(Node):
         if self._auto_start_pending:
             self._auto_start_timer = self.create_timer(
                 0.1, self._start_automatic_session, callback_group=self._group)
-        else:
+        elif self._keyboard_enabled:
             self._keyboard_thread = threading.Thread(
                 target=self._keyboard_loop, daemon=True)
             self._keyboard_thread.start()
         self.get_logger().info(
-            '[CALIBRATION] Alicia-M collector ready: s/Enter=start, q=cancel. '
-            'Use motion_control_keyboard for SPACE/h/r arm control.')
+            '[CALIBRATION] Alicia-M collector ready: '
+            'prepare=/calibration/prepare collect=/calibration/collect '
+            's/Enter=prepare+collect q=cancel.')
 
     def _declare_parameters(self):
         values = {
@@ -222,6 +240,7 @@ class AutoCalibrationCollector(Node):
             'aruco_dictionary': 'DICT_5X5_250',
             'image_topic': '/camera/color/image_raw',
             'camera_info_topic': '/camera/color/camera_info',
+            'camera_intrinsics_source': 'k',
             'joint_state_topic': '/joint_states',
             'motion_locked_topic': '/motion_control/locked',
             'motion_state_topic': '/motion_control/state',
@@ -318,6 +337,9 @@ class AutoCalibrationCollector(Node):
         if not all(math.isfinite(value) and value > 0.0
                    for value in stationary_values):
             raise ValueError('joint stationary parameters must be finite and positive')
+        if str(self.get_parameter('camera_intrinsics_source').value).lower() not in {
+                'k', 'p'}:
+            raise ValueError('camera_intrinsics_source must be k or p')
         quality_limits = (
             float(self.get_parameter(
                 'maximum_algorithm_translation_delta_m').value),
@@ -352,8 +374,6 @@ class AutoCalibrationCollector(Node):
             'get': (TakeSample, '/easy_handeye2/calibration/get_sample_list'),
             'remove': (
                 RemoveSample, '/easy_handeye2/calibration/remove_sample'),
-            'save_samples': (
-                SaveSamples, '/easy_handeye2/calibration/save_samples'),
         }
         return {
             name: self.create_client(interface, service, callback_group=self._group)
@@ -457,7 +477,11 @@ class AutoCalibrationCollector(Node):
     def _on_camera_info(self, message):
         if message.width <= 0 or message.height <= 0:
             return
-        camera = np.asarray(message.k, dtype=float).reshape(3, 3)
+        source = str(self.get_parameter('camera_intrinsics_source').value).lower()
+        if source == 'p':
+            camera = np.asarray(message.p, dtype=float).reshape(3, 4)[:, :3]
+        else:
+            camera = np.asarray(message.k, dtype=float).reshape(3, 3)
         if camera[0, 0] <= 0.0 or camera[1, 1] <= 0.0:
             return
         distortion = np.asarray(
@@ -504,18 +528,16 @@ class AutoCalibrationCollector(Node):
                 float(np.min(marker_corners[:, 1])),
                 float(width - np.max(marker_corners[:, 0])),
                 float(height - np.max(marker_corners[:, 1])))
-            side_px = float(np.mean([
-                np.linalg.norm(
-                    marker_corners[(index + 1) % 4] - marker_corners[index])
-                for index in range(4)
-            ]))
+            side_px = mean_marker_side_px(marker_corners)
             observation = MarkerObservation(
                 center_px=(float(centre[0]), float(centre[1])),
                 margin_px=margin,
                 side_px=side_px,
                 translation=tuple(float(value) for value in translation),
                 rotation_vector=tuple(float(value) for value in rotation_vector.reshape(3)),
-                received_monotonic=time.monotonic())
+                received_monotonic=time.monotonic(),
+                corners=tuple(tuple(float(value) for value in corner)
+                              for corner in marker_corners))
             with self._data_lock:
                 self._observations.append(observation)
         except (ValueError, cv2.error):
@@ -527,6 +549,7 @@ class AutoCalibrationCollector(Node):
         self._session_cancel.set()
         self._state.stop()
         self._arm.cancel()
+        self._set_calibration_state('IDLE')
         self.get_logger().warn(
             f'[CALIBRATION] session invalidated by motion state: {reason}')
 
@@ -559,7 +582,7 @@ class AutoCalibrationCollector(Node):
                 return
             command = command.strip().lower()
             if command in {'', 's'}:
-                self._start_session()
+                self._start_prepare(collect_after_prepare=True)
             elif command == 'q':
                 self._request_session_stop('operator q')
 
@@ -571,22 +594,67 @@ class AutoCalibrationCollector(Node):
         self.destroy_timer(self._auto_start_timer)
         self.get_logger().info(
             '[CALIBRATION] auto_start=true; starting simulation session')
-        self._start_session()
+        self._start_prepare(collect_after_prepare=True)
 
-    def _start_session(self):
+    @property
+    def moved_from_home(self):
+        return self._moved_from_home
+
+    def mark_home(self):
+        self._moved_from_home = False
+
+    @property
+    def calibration_state(self):
+        return self._calibration_state
+
+    def _publish_calibration_state(self):
+        self._calibration_state_publisher.publish(
+            String(data=self._calibration_state))
+
+    def _set_calibration_state(self, state):
+        self._calibration_state = str(state)
+        self._publish_calibration_state()
+
+    def _on_prepare(self, _request, response):
+        started, message = self._start_prepare()
+        response.success = started
+        response.message = message
+        return response
+
+    def _on_collect(self, _request, response):
+        started, message = self._start_collection()
+        response.success = started
+        response.message = message
+        return response
+
+    def _begin_session(self, target, state):
         with self._session_lock:
             if self._session_thread is not None and self._session_thread.is_alive():
-                self.get_logger().warn('[CALIBRATION] a collection session is active')
-                return
+                return False, 'a calibration action is already active'
             if self._external_locked or self._state.locked:
-                self.get_logger().error(
-                    '[CALIBRATION] motion is locked; wait for reset HOME to return RUNNING')
-                return
+                return False, 'motion is locked; wait for reset HOME to return RUNNING'
             self._session_cancel.clear()
             self._session_invalid.clear()
+            self._session_output_paths = None
+            self._set_calibration_state(state)
             self._session_thread = threading.Thread(
-                target=self._run_session_guarded, daemon=True)
+                target=target, daemon=True)
             self._session_thread.start()
+        return True, state.lower()
+
+    def _start_prepare(self, collect_after_prepare=False):
+        if self._calibration_state == 'READY':
+            if collect_after_prepare:
+                return self._start_collection()
+            return False, 'calibration initial pose is already ready'
+        return self._begin_session(
+            lambda: self._run_prepare_guarded(collect_after_prepare),
+            'PREPARING')
+
+    def _start_collection(self):
+        if self._calibration_state != 'READY':
+            return False, 'move to the calibration initial pose first'
+        return self._begin_session(self._run_collection_guarded, 'COLLECTING')
 
     def _request_session_stop(self, reason):
         # During SIGINT rclpy may have already invalidated rosout.  The caller
@@ -604,25 +672,63 @@ class AutoCalibrationCollector(Node):
         except Exception:
             pass
 
-    def _run_session_guarded(self):
-        seed = None
+    def _run_prepare_guarded(self, collect_after_prepare):
         try:
-            # Preserve the real start joints for the existing safe return
-            # behavior.  The actual session separately requires marker TF
-            # before it attempts the first fixed official pose.
-            seed, _camera, _transforms = self._wait_robot_inputs()
+            self._wait_moveit_services()
+            self._wait_robot_inputs()
+            initial_joints = fixed_joint_samples()[0]
+            optimizer = self._optimizer()
+            safe, reason, condition, margin = self._fixed_joint_safety(
+                initial_joints, optimizer)
+            if not safe:
+                raise RuntimeError(
+                    f'initial pose rejected: {reason} '
+                    f'condition={condition:.2f} margin={margin:.3f}rad')
+            self._clear_joint_stationary_history()
+            if not self._arm.move_joints(initial_joints):
+                raise RuntimeError('MoveIt could not reach the calibration initial pose')
+            self._moved_from_home = True
+            time.sleep(float(self.get_parameter('settle_time_sec').value))
+            stationary, reason = self._wait_for_joint_stationary()
+            if not stationary:
+                raise RuntimeError(f'initial pose did not settle: {reason}')
+            if self._session_cancel.is_set() or self._session_invalid.is_set():
+                raise RuntimeError('session canceled or invalidated')
+            self._set_calibration_state('READY')
+            self.get_logger().info(
+                '[CALIBRATION] initial pose READY; press Collect to record samples')
+            if collect_after_prepare:
+                self._set_calibration_state('COLLECTING')
+                self._run_collection_guarded()
+        except Exception as error:
+            if not self._session_cancel.is_set():
+                self.get_logger().error(f'[CALIBRATION] initial pose failed: {error}')
+            self._set_calibration_state('IDLE')
+
+    def _run_collection_guarded(self):
+        try:
             self._run_session()
         except Exception as error:
-            self.get_logger().error(f'[CALIBRATION] session failed: {error}')
+            if self._session_cancel.is_set() or self._session_invalid.is_set():
+                self.get_logger().warn('[CALIBRATION] session canceled; no files saved')
+            else:
+                self.get_logger().error(f'[CALIBRATION] session failed: {error}')
+                self._save_failed_samples()
         finally:
-            if (seed is not None and not self._session_invalid.is_set()
+            if (not self._session_cancel.is_set()
+                    and not self._session_invalid.is_set()
                     and not self._state.locked):
-                self.get_logger().info('[CALIBRATION] returning to session start joints')
-                if not self._arm.move_joints(seed):
+                self._set_calibration_state('RETURNING')
+                self.get_logger().info(
+                    '[CALIBRATION] returning to the calibration initial pose')
+                if not self._arm.move_joints(fixed_joint_samples()[0]):
                     self.get_logger().error(
-                        '[CALIBRATION] failed to return to session start joints')
+                        '[CALIBRATION] failed to return to the calibration initial pose')
+                self._set_calibration_state('READY')
+            else:
+                self._set_calibration_state('IDLE')
             self.get_logger().info(
-                '[CALIBRATION] session ended; press s to start a new session')
+                '[CALIBRATION] session ended; press s/Enter to prepare and collect again')
 
     def _parameter_string(self, node_name, parameter_name):
         service_name = (
@@ -819,12 +925,23 @@ class AutoCalibrationCollector(Node):
         """
         if not frames:
             raise RuntimeError('cannot publish an empty marker sample window')
-        poses = []
-        for frame in frames:
-            matrix, _jacobian = cv2.Rodrigues(
-                np.asarray(frame.rotation_vector, dtype=float))
-            poses.append((frame.translation, matrix_quaternion(matrix)))
-        translation, quaternion = average_marker_pose(poses)
+        corners = median_marker_corners(frames)
+        with self._data_lock:
+            camera_info = self._camera_info
+        if corners is not None and camera_info is not None:
+            camera, distortion, _width, _height = camera_info
+            rotation, translation = estimate_refined_aruco_pose(
+                corners, float(self.get_parameter('marker_size_m').value),
+                camera, distortion)
+            matrix, _jacobian = cv2.Rodrigues(rotation)
+            quaternion = matrix_quaternion(matrix)
+        else:
+            poses = []
+            for frame in frames:
+                matrix, _jacobian = cv2.Rodrigues(
+                    np.asarray(frame.rotation_vector, dtype=float))
+                poses.append((frame.translation, matrix_quaternion(matrix)))
+            translation, quaternion = average_marker_pose(poses)
         message = PoseStamped()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = str(self.get_parameter('camera_frame').value)
@@ -838,6 +955,24 @@ class AutoCalibrationCollector(Node):
         self._stable_marker_publisher.publish(message)
         time.sleep(float(self.get_parameter('stable_tf_settle_sec').value))
         return translation, quaternion
+
+    @staticmethod
+    def _marker_quality_summary(frames):
+        centers = np.asarray([frame.center_px for frame in frames], dtype=float)
+        depths = np.asarray([frame.translation[2] for frame in frames], dtype=float)
+        rotations = np.asarray(
+            [frame.rotation_vector for frame in frames], dtype=float)
+        center_std = float(np.max(np.std(centers, axis=0)))
+        depth_std = float(np.std(depths))
+        mean_rotation = np.mean(rotations, axis=0)
+        angle_std = math.degrees(float(np.sqrt(np.mean(np.sum(
+            (rotations - mean_rotation) ** 2, axis=1)))))
+        return (
+            f'frames={len(frames)} image_margin='
+            f'{min(frame.margin_px for frame in frames):.1f}px '
+            f'marker_side={min(frame.side_px for frame in frames):.1f}px '
+            f'center_std={center_std:.3f}px depth_std={depth_std:.6f}m '
+            f'angle_std={angle_std:.3f}deg')
 
     def _call(self, name, request):
         client = self._easy_clients[name]
@@ -877,6 +1012,37 @@ class AutoCalibrationCollector(Node):
         if verified.samples.samples:
             raise RuntimeError('easy_handeye2 sample reset verification failed')
 
+    def _output_paths(self):
+        if self._session_output_paths is not None:
+            return self._session_output_paths
+        output_dir = str(self.get_parameter('calibration_output_dir').value)
+        simulation = bool(self.get_parameter('calibration_simulation').value)
+        prefix = str(self.get_parameter('calibration_file_prefix').value).strip()
+        expected_prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
+        if prefix != expected_prefix:
+            raise RuntimeError(
+                f'calibration_file_prefix must be {expected_prefix!r}')
+        self._session_output_paths = timestamped_calibration_paths(
+            output_dir, simulation=simulation)
+        return self._session_output_paths
+
+    def _save_failed_samples(self):
+        """Archive valid partial samples without creating a failed ``.calib``."""
+        try:
+            samples = self._call('get', TakeSample.Request()).samples
+            if not samples.samples:
+                self.get_logger().info(
+                    '[CALIBRATION] no valid samples were collected; nothing to save')
+                return
+            _calibration_path, samples_path = self._output_paths()
+            output = write_sample_archive(message_to_yaml(samples), samples_path)
+            self.get_logger().info(
+                '[CALIBRATION] failed run samples saved '
+                f'samples={len(samples.samples)} output={output}')
+        except Exception as error:
+            self.get_logger().error(
+                f'[CALIBRATION] failed to save partial samples: {error}')
+
     def _run_session(self):
         self._wait_moveit_services()
         self._install_calibration_surface()
@@ -897,8 +1063,6 @@ class AutoCalibrationCollector(Node):
             '[CALIBRATION] fixed_joint_sequence='
             f'{len(fixed_samples)} minimum_samples={minimum_samples}')
         for index, joints in enumerate(fixed_samples, start=1):
-            if sample_count >= minimum_samples:
-                break
             if self._session_cancel.is_set() or self._session_invalid.is_set():
                 raise RuntimeError('session canceled or invalidated')
             safe, reason, condition, margin = self._fixed_joint_safety(
@@ -962,9 +1126,10 @@ class AutoCalibrationCollector(Node):
             sample_count = new_count
             accepted_poses.append(pose)
             self.get_logger().info(
-                f'[CALIBRATION] sample={sample_count}/{minimum_samples} '
+                f'[CALIBRATION] sample={sample_count} minimum={minimum_samples} '
                 f'fixed_index={index}/{len(fixed_samples)} '
-                f'condition={condition:.2f} margin={margin:.3f}rad')
+                f'condition={condition:.2f} margin={margin:.3f}rad '
+                f'{self._marker_quality_summary(frames)}')
 
         if sample_count < minimum_samples:
             raise RuntimeError(
@@ -1005,14 +1170,14 @@ class AutoCalibrationCollector(Node):
                   and rotation_error <= rotation_limit)
         self.get_logger().info(
             '[CALIBRATION][GROUND_TRUTH] '
-            f'dx={deltas[0] * 1000.0:.2f}mm '
-            f'dy={deltas[1] * 1000.0:.2f}mm '
-            f'dz={deltas[2] * 1000.0:.2f}mm '
-            f'translation_error={translation_error * 1000.0:.2f}mm '
-            f'rotation_error={rotation_error:.2f}deg '
-            f'threshold_translation={translation_limit * 1000.0:.2f}mm '
-            f'threshold_xy={xy_limit * 1000.0:.2f}mm '
-            f'threshold_rotation={rotation_limit:.2f}deg passed={passed}')
+            f'dx={deltas[0] * 1000.0:.3f}mm '
+            f'dy={deltas[1] * 1000.0:.3f}mm '
+            f'dz={deltas[2] * 1000.0:.3f}mm '
+            f'translation_error={translation_error * 1000.0:.3f}mm '
+            f'rotation_error={rotation_error:.3f}deg '
+            f'threshold_translation={translation_limit * 1000.0:.3f}mm '
+            f'threshold_xy={xy_limit * 1000.0:.3f}mm '
+            f'threshold_rotation={rotation_limit:.3f}deg passed={passed}')
         if not passed:
             raise RuntimeError(
                 'simulation ground-truth gate failed; calibration was not saved')
@@ -1025,11 +1190,12 @@ class AutoCalibrationCollector(Node):
             'maximum_marker_position_rms_m').value)
         rotation_limit = float(self.get_parameter(
             'maximum_marker_rotation_rms_deg').value)
+        all_samples = self._call('get', TakeSample.Request()).samples
+        samples = list(all_samples.samples)
 
         while True:
-            solution = self._compute_consensus_solution()
-            (selected_algorithm, handeye, samples, translation_delta,
-             rotation_delta) = solution
+            selected_algorithm, handeye, translation_delta, rotation_delta = \
+                self._compute_consensus_solution(samples)
             marker_position_rms, marker_rotation_rms = marker_pose_rms(
                 samples, handeye)
             quality_ok = (
@@ -1045,10 +1211,11 @@ class AutoCalibrationCollector(Node):
                 raise RuntimeError(
                     'calibration quality gates failed at the minimum '
                     f'{minimum_solution}-sample subset: algorithm_spread='
-                    f'{translation_delta * 1000.0:.2f}mm/'
-                    f'{rotation_delta:.2f}deg marker_rms='
-                    f'{marker_position_rms * 1000.0:.2f}mm/'
-                    f'{marker_rotation_rms:.2f}deg')
+                    f'{translation_delta * 1000.0:.3f}mm/'
+                    f'{rotation_delta:.3f}deg marker_rms='
+                    f'{marker_position_rms * 1000.0:.3f}mm/'
+                    f'{marker_rotation_rms:.3f}deg limits='
+                    f'{position_limit * 1000.0:.3f}mm/{rotation_limit:.3f}deg')
             residuals = marker_pose_residuals(samples, handeye)
             worst_index = max(
                 range(len(residuals)),
@@ -1059,12 +1226,9 @@ class AutoCalibrationCollector(Node):
             self.get_logger().warn(
                 '[CALIBRATION] rejecting outlier '
                 f'index={worst_index} residual='
-                f'{worst[0] * 1000.0:.2f}mm/{worst[1]:.2f}deg '
+                f'{worst[0] * 1000.0:.3f}mm/{worst[1]:.3f}deg '
                 f'samples={len(samples)}->{len(samples) - 1}')
-            removed = self._call(
-                'remove', RemoveSample.Request(sample_index=worst_index))
-            if len(removed.samples.samples) != len(samples) - 1:
-                raise RuntimeError('easy_handeye2 failed to remove outlier sample')
+            samples.pop(worst_index)
 
         retained_robot_poses = [
             transform_components(sample.robot) for sample in samples]
@@ -1078,32 +1242,23 @@ class AutoCalibrationCollector(Node):
                 f'translation={translation_span:.3f}m '
                 f'rotation={rotation_span:.1f}deg')
         self._verify_simulation_ground_truth(handeye)
-        sample_save = self._call('save_samples', SaveSamples.Request())
-        if not sample_save.success:
-            raise RuntimeError('easy_handeye2 sample save failed')
-        output_dir = str(self.get_parameter('calibration_output_dir').value)
-        simulation = bool(self.get_parameter('calibration_simulation').value)
-        prefix = str(self.get_parameter('calibration_file_prefix').value).strip()
-        expected_prefix = 'c10_handeye_sim' if simulation else 'c10_handeye'
-        if prefix != expected_prefix:
-            raise RuntimeError(
-                f'calibration_file_prefix must be {expected_prefix!r}')
-        deployment_path, output_path = timestamped_calibration_paths(
-            output_dir, simulation=simulation)
-        deployment_output, output = write_calibration_outputs(
-            handeye, deployment_path, output_path)
+        archived_samples = type(all_samples)()
+        archived_samples.parameters = all_samples.parameters
+        archived_samples.samples = samples
+        calibration_path, samples_path = self._output_paths()
+        calibration_output, samples_output = write_calibration_outputs(
+            handeye, calibration_path, message_to_yaml(archived_samples), samples_path)
         self.get_logger().info(
             '[CALIBRATION] SUCCESS '
             f'algorithm={selected_algorithm} samples={len(samples)} '
-            f'algorithm_spread={translation_delta * 1000.0:.2f}mm/'
-            f'{rotation_delta:.2f}deg marker_rms='
-            f'{marker_position_rms * 1000.0:.2f}mm/'
-            f'{marker_rotation_rms:.2f}deg output={output}'
-            + (f' deployment={deployment_output}' if deployment_output else ''))
+            f'algorithm_spread={translation_delta * 1000.0:.3f}mm/'
+            f'{rotation_delta:.3f}deg marker_rms='
+            f'{marker_position_rms * 1000.0:.3f}mm/'
+            f'{marker_rotation_rms:.3f}deg calibration={calibration_output} '
+            f'samples={samples_output}')
 
-    def _compute_consensus_solution(self):
+    def _compute_consensus_solution(self, samples):
         """Solve all configured algorithms and select their transform medoid."""
-        samples = self._call('get', TakeSample.Request()).samples.samples
         results_by_algorithm = solve_handeye(
             samples, self.get_parameter('algorithm_names').value)
         results = []
@@ -1134,8 +1289,7 @@ class AutoCalibrationCollector(Node):
             selected = refined
             selected_algorithm = f'{selected_algorithm}+fixed-marker-refine'
         return (
-            selected_algorithm, selected, samples,
-            translation_delta, rotation_delta)
+            selected_algorithm, selected, translation_delta, rotation_delta)
 
     def destroy_node(self):
         self._request_session_stop('node shutdown')

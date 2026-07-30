@@ -3,6 +3,7 @@ from wvcsc_bringup.qt_image_viewer import (
     RosImagePanel,
     image_to_qimage,
     image_topic_names,
+    selected_image_topic,
 )
 import inspect
 from types import SimpleNamespace
@@ -38,3 +39,27 @@ def test_image_panel_can_be_created_inactive_for_the_collapsed_nav_qt_view():
     assert 'def set_active(self, active)' in source
     assert 'self._destroy_subscription()' in source
     assert 'if not self._active:' in source
+
+
+def test_image_topic_selection_promotes_debug_and_keeps_manual_or_missing_choice():
+    debug = '/calibration/aruco_debug_image'
+    raw = '/camera/color/image_raw'
+    preferred = (debug, raw)
+    assert selected_image_topic((raw,), preferred) == raw
+    assert selected_image_topic((debug, raw), preferred, raw) == debug
+    assert selected_image_topic((debug, raw), preferred, raw, True) == raw
+    assert selected_image_topic((raw,), preferred, debug) == debug
+
+
+def test_image_panel_hands_pixmaps_to_the_qt_thread_and_keeps_stale_frames():
+    source = inspect.getsource(RosImagePanel)
+    callback = source.split('    def _on_image(self, message):', 1)[1].split(
+        '    def _display_image(self, image):', 1)[0]
+    display = source.split('    def _display_image(self, image):', 1)[1].split(
+        '    def _display_error(self, message):', 1)[0]
+    assert '_image_ready = pyqtSignal(QImage)' in source
+    assert 'Qt.QueuedConnection' in source
+    assert 'self._image_ready.emit(image)' in callback
+    assert 'QPixmap.fromImage(image)' not in callback
+    assert 'QPixmap.fromImage(image)' in display
+    assert '图像流中断，正在重连' in source

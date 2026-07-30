@@ -13,6 +13,8 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
+from wvcsc_bringup.handeye_calibration_paths import resolve_handeye_calibration
+
 
 def _include(launch_dir, filename, arguments=None):
     return IncludeLaunchDescription(
@@ -37,8 +39,8 @@ def _launch(context, *, launch_dir):
     controller_share = get_package_share_directory('controller_pkg')
     real_config = os.path.join(bringup_share, 'config', 'real')
     helpers = _real_mission_helpers(launch_dir)
-    handeye_path = helpers._resolve_handeye_calibration(
-        LaunchConfiguration('handeye_calibration').perform(context))
+    handeye_path = str(resolve_handeye_calibration(
+        LaunchConfiguration('handeye_calibration').perform(context)))
     c10_xyz, c10_rpy = helpers._load_calibrated_mount(handeye_path)
     # This standalone test intentionally treats tool0 as the spray centerline.
     # Keep the URDF nozzle link at the identity transform for shared launch

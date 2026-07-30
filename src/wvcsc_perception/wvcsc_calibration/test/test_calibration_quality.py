@@ -12,6 +12,8 @@ from wvcsc_calibration.auto_calibration_collector import (
 from wvcsc_calibration.calibration_quality import (
     MarkerObservation,
     calibration_consensus,
+    mean_marker_side_px,
+    median_marker_corners,
     marker_pose_residuals,
     marker_pose_rms,
     pose_is_diverse,
@@ -27,14 +29,15 @@ COLLECTOR_SOURCE = (
 ).read_text(encoding='utf-8')
 
 
-def _observation(index=0, margin=100.0):
+def _observation(index=0, margin=100.0, corners=()):
     return MarkerObservation(
         center_px=(640.0 + 0.1 * index, 360.0 - 0.1 * index),
         margin_px=margin,
         side_px=100.0,
         translation=(0.0, 0.0, 0.50 + 0.0001 * index),
         rotation_vector=(0.0, 0.01, 0.0),
-        received_monotonic=float(index))
+        received_monotonic=float(index),
+        corners=corners)
 
 
 def test_marker_window_enforces_count_edge_and_stability():
@@ -69,6 +72,27 @@ def test_marker_window_rejects_small_marker_images():
         minimum_marker_side_px=90.0, maximum_center_std_px=4.0,
         maximum_depth_std_m=0.003, maximum_angle_std_deg=0.8)
     assert not valid and 'small' in message
+
+
+def test_marker_side_uses_cyclic_edges_not_bounding_box_width():
+    corners = ((0.0, 0.0), (80.0, 0.0), (100.0, 60.0), (20.0, 60.0))
+    assert max(point[0] for point in corners) - min(
+        point[0] for point in corners) == pytest.approx(100.0)
+    assert mean_marker_side_px(corners) == pytest.approx(71.6227766)
+    assert mean_marker_side_px(corners) < 90.0
+
+
+def test_median_marker_corners_reduces_one_frame_jitter():
+    baseline = ((100.0, 200.0), (200.0, 200.0),
+                (200.0, 300.0), (100.0, 300.0))
+    observations = [
+        _observation(index, corners=tuple(
+            (x + offset, y - offset) for x, y in baseline))
+        for index, offset in enumerate((-0.2, 0.0, 4.0, 0.1, -0.1))
+    ]
+    assert np.asarray(median_marker_corners(observations)) == pytest.approx(
+        np.asarray(baseline))
+    assert median_marker_corners([_observation()]) is None
 
 
 def test_marker_window_reports_observed_distance_range():
@@ -146,7 +170,10 @@ def test_fixed_joint_sampler_executes_the_official_order_without_an_anchor_move(
         run_session.index('self._wait_easy_services()') < \
         run_session.index('self._clear_easy_samples()') < \
         run_session.index("self._call('take', TakeSample.Request())")
-    assert 'if sample_count >= minimum_samples:' in run_session
+    assert 'if sample_count >= minimum_samples:' not in run_session
+    assert run_session.index('for index, joints in enumerate(fixed_samples, start=1):') < \
+        run_session.index('if sample_count < minimum_samples:') < \
+        run_session.index('self._solve_and_export()')
     assert '_wait_inputs()' not in run_session
     assert 'FollowJointTrajectory' not in COLLECTOR_SOURCE
 
@@ -207,17 +234,19 @@ def test_collector_keeps_c10_qos_cancel_and_stationary_safety_contracts():
 
 
 def test_simulation_config_keeps_coverage_marker_and_fixed_minimum():
-    config = (Path(__file__).parents[1] / 'config' /
+    config = (Path(__file__).parents[1] / 'config' / 'sim' /
               'auto_handeye_alicia_sim.yaml').read_text(encoding='utf-8')
-    assert 'marker_position_base_m: [0.530, -0.030, 0.002]' in config
-    assert 'minimum_samples: 14' in config
+    assert 'marker_position_base_m: [0.480, 0.010, 0.002]' in config
+    assert 'minimum_samples: 15' in config
     assert 'minimum_solution_samples: 14' in config
     assert 'ground_truth_max_translation_error_m: 0.003' in config
     assert 'ground_truth_max_xy_error_m: 0.002' in config
     assert 'ground_truth_max_rotation_error_deg: 1.0' in config
-    real_config = (Path(__file__).parents[1] / 'config' /
+    assert 'camera_intrinsics_source: p' in config
+    real_config = (Path(__file__).parents[1] / 'config' / 'real' /
                    'auto_handeye_alicia.yaml').read_text(encoding='utf-8')
     assert 'max_condition_number: 35.0' in real_config
+    assert 'camera_intrinsics_source: k' in real_config
     assert 'seed_height_candidates_m' not in config
     assert 'target_samples' not in config
 
@@ -241,13 +270,41 @@ def test_aruco_overlay_does_not_overwrite_rclpy_parameter_storage():
 
 
 def test_collector_uses_wvcsc_opencv_transform_conversion_not_server_solver():
-    solver = COLLECTOR_SOURCE.split('    def _compute_consensus_solution(self):', 1)[1].split(
+    solver = COLLECTOR_SOURCE.split('    def _compute_consensus_solution(', 1)[1].split(
         '    def destroy_node(self):', 1)[0]
     assert 'solve_handeye(' in solver
     assert 'refine_handeye_fixed_marker(' in solver
     assert 'fixed-marker refinement' in solver
     assert "'compute'" not in solver
     assert "'set_algorithm'" not in solver
+
+
+def test_outliers_are_pruned_locally_so_failed_archives_keep_raw_samples():
+    solve_export = COLLECTOR_SOURCE.split('    def _solve_and_export(self):', 1)[1].split(
+        '    def _compute_consensus_solution(', 1)[0]
+    assert "all_samples = self._call('get', TakeSample.Request()).samples" in solve_export
+    assert 'samples.pop(worst_index)' in solve_export
+    assert "'remove', RemoveSample.Request" not in solve_export
+    assert 'archived_samples.samples = samples' in solve_export
+
+
+def test_collector_uses_profile_specific_camera_intrinsics_and_window_corners():
+    camera_info = COLLECTOR_SOURCE.split('    def _on_camera_info(self, message):', 1)[1].split(
+        '    def _on_image(self, message):', 1)[0]
+    marker_pose = COLLECTOR_SOURCE.split(
+        '    def _publish_stable_marker_pose(self, frames):', 1)[1].split(
+            '    @staticmethod\n    def _marker_quality_summary', 1)[0]
+    assert "if source == 'p':" in camera_info
+    assert 'np.asarray(message.p' in camera_info
+    assert 'np.asarray(message.k' in camera_info
+    assert 'median_marker_corners(frames)' in marker_pose
+    assert 'estimate_refined_aruco_pose(' in marker_pose
+
+
+def test_sample_log_does_not_retain_the_removed_projection_audit_variable():
+    session = COLLECTOR_SOURCE.split('    def _run_session(self):', 1)[1].split(
+        '    def _verify_simulation_ground_truth(', 1)[0]
+    assert 'projection_summary' not in session
 
 
 def _transform(translation=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0, 1.0)):

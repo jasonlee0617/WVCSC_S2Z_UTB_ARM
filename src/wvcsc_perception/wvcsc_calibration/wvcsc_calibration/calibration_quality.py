@@ -13,10 +13,35 @@ class MarkerObservation:
     translation: tuple
     rotation_vector: tuple
     received_monotonic: float
+    corners: tuple = ()
 
 
 def _norm(values):
     return math.sqrt(sum(float(value) ** 2 for value in values))
+
+
+def mean_marker_side_px(corners):
+    """Return the mean length of a square marker's four cyclic image edges."""
+    points = tuple((float(point[0]), float(point[1])) for point in corners)
+    if len(points) != 4:
+        raise ValueError('a square marker must have four corners')
+    return statistics.fmean(
+        math.dist(points[index], points[(index + 1) % 4])
+        for index in range(4))
+
+
+def median_marker_corners(observations):
+    """Return the coordinate-wise median corners of a stable marker window."""
+    observations = tuple(observations)
+    if not observations or any(len(observation.corners) != 4
+                               for observation in observations):
+        return None
+    return tuple(tuple(
+        statistics.median(
+            float(observation.corners[corner][axis])
+            for observation in observations)
+        for axis in range(2))
+        for corner in range(4))
 
 
 def quaternion_angle_deg(left, right):

@@ -1,13 +1,18 @@
 import pytest
 import yaml
 
+from wvcsc_bringup import handeye_calibration_paths
 from wvcsc_calibration import calibration_io
 from wvcsc_calibration.calibration_io import (
+    calibration_config_dir,
+    export_calibration,
     latest_calibration_path,
+    native_calibration,
     expanded_path,
     normalized_calibration,
     timestamped_calibration_paths,
     write_calibration_outputs,
+    write_sample_archive,
 )
 
 
@@ -63,21 +68,63 @@ def test_latest_calibration_selects_real_and_simulation_independently(tmp_path):
 
 
 def test_timestamped_paths_share_one_stem(tmp_path):
-    native, normalized = timestamped_calibration_paths(
+    native, samples = timestamped_calibration_paths(
         tmp_path, timestamp='20260724_120000')
     assert native.name == 'c10_handeye_20260724_120000.calib'
-    assert normalized.name == 'c10_handeye_20260724_120000.yaml'
+    assert samples.name == 'c10_handeye_20260724_120000.samples'
 
 
-def test_exported_easy_handeye_and_deployment_files_describe_same_transform(tmp_path):
+def test_default_result_directories_are_isolated_by_role(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        handeye_calibration_paths, 'calibration_root_dir', lambda: tmp_path)
+    assert calibration_config_dir() == tmp_path / 'real'
+    assert calibration_config_dir(simulation=True) == tmp_path / 'sim'
+    real, _real_samples = timestamped_calibration_paths(
+        timestamp='20260724_120000')
+    sim, _sim_samples = timestamped_calibration_paths(
+        simulation=True, timestamp='20260724_120000')
+    assert real.parent == tmp_path / 'real'
+    assert sim.parent == tmp_path / 'sim'
+
+
+def test_export_calibration_uses_shared_latest_selector(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        handeye_calibration_paths, 'calibration_root_dir', lambda: tmp_path)
+    real_dir = tmp_path / 'real'
+    real_dir.mkdir()
+    source = real_dir / 'c10_handeye_20260730_100000.calib'
+    source.write_text(yaml.safe_dump(_valid()), encoding='utf-8')
+    output = tmp_path / 'exported.calib'
+
+    assert export_calibration('latest_real', output) == output
+    assert yaml.safe_load(output.read_text(encoding='utf-8'))[
+        'parameters']['tracking_base_frame'] == 'camera_color_optical_frame'
+
+
+def test_legacy_normalized_calibration_converts_to_native_easy_handeye():
+    legacy = {
+        'calibration': {
+            'type': 'eye_in_hand',
+            'parent_frame': 'tool0',
+            'child_frame': 'camera_color_optical_frame',
+            'translation': {'x': -0.06, 'y': 0.0, 'z': -0.08},
+            'rotation': {'x': 0.0, 'y': 0.0, 'z': -0.7, 'w': 0.7141428429},
+        },
+    }
+    native = native_calibration(legacy)
+    assert native['parameters']['calibration_type'] == 'eye_in_hand'
+    assert native['transform']['translation']['x'] == pytest.approx(-0.06)
+
+
+def test_success_writes_native_calibration_and_samples_with_one_timestamp(tmp_path):
     transform = ((0.01, -0.02, -0.10), (0.0, 0.0, 0.0, 1.0))
-    deployment, normalized = write_calibration_outputs(
+    deployment, samples = write_calibration_outputs(
         transform,
         tmp_path / 'wvcsc_c10.calib',
-        tmp_path / 'c10_handeye.yaml')
+        'samples:\n- robot: {}\n',
+        tmp_path / 'wvcsc_c10.samples')
 
     easy_handeye = yaml.safe_load(deployment.read_text(encoding='utf-8'))
-    deployment_data = yaml.safe_load(normalized.read_text(encoding='utf-8'))
     assert easy_handeye['parameters'] == {
         'name': 'wvcsc_c10',
         'calibration_type': 'eye_in_hand',
@@ -89,25 +136,23 @@ def test_exported_easy_handeye_and_deployment_files_describe_same_transform(tmp_
         'move_group_namespace': '/',
         'move_group': 'arm',
     }
-    assert easy_handeye['transform']['translation'] == \
-        deployment_data['calibration']['translation']
-    assert easy_handeye['transform']['rotation'] == \
-        deployment_data['calibration']['rotation']
+    assert yaml.safe_load(samples.read_text(encoding='utf-8'))['samples'] == [
+        {'robot': {}}]
 
 
 def test_invalid_or_unwritable_export_does_not_replace_existing_calibration(
         monkeypatch, tmp_path):
     deployment = tmp_path / 'wvcsc_c10.calib'
-    normalized = tmp_path / 'c10_handeye.yaml'
+    samples = tmp_path / 'c10_handeye.samples'
     deployment.write_text('old_easy_handeye\n', encoding='utf-8')
-    normalized.write_text('old_deployment\n', encoding='utf-8')
+    samples.write_text('old_samples\n', encoding='utf-8')
 
     with pytest.raises(ValueError, match='camera translation'):
         write_calibration_outputs(
             ((0.60, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
-            deployment, normalized)
+            deployment, 'samples: []\n', samples)
     assert deployment.read_text(encoding='utf-8') == 'old_easy_handeye\n'
-    assert normalized.read_text(encoding='utf-8') == 'old_deployment\n'
+    assert samples.read_text(encoding='utf-8') == 'old_samples\n'
 
     real_stage = calibration_io._stage_bytes
     calls = {'count': 0}
@@ -122,6 +167,12 @@ def test_invalid_or_unwritable_export_does_not_replace_existing_calibration(
     with pytest.raises(OSError, match='staging failure'):
         write_calibration_outputs(
             ((0.01, 0.0, -0.10), (0.0, 0.0, 0.0, 1.0)),
-            deployment, normalized)
+            deployment, 'samples: []\n', samples)
     assert deployment.read_text(encoding='utf-8') == 'old_easy_handeye\n'
-    assert normalized.read_text(encoding='utf-8') == 'old_deployment\n'
+    assert samples.read_text(encoding='utf-8') == 'old_samples\n'
+
+
+def test_failed_run_can_archive_samples_without_creating_a_calibration(tmp_path):
+    archive = write_sample_archive('samples:\n- robot: {}\n', tmp_path / 'run.samples')
+    assert archive.name == 'run.samples'
+    assert not (tmp_path / 'run.calib').exists()

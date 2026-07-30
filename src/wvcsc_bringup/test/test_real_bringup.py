@@ -509,15 +509,20 @@ def test_vehicle_mapping_launch_declares_and_passes_ackermann_switch():
 def test_real_mission_uses_portable_handeye_and_c10_calibration_paths():
     source = _source('real_system_mission.launch.py')
     assert 'def _expand_path(path):' in source
-    assert 'os.path.expandvars' in source
-    assert "def _latest_handeye_calibration" in source
+    assert 'from wvcsc_bringup.handeye_calibration_paths import (' in source
+    assert 'resolve_handeye_calibration(' in source
+    assert "def _latest_handeye_calibration" not in source
     assert "default_value='latest_real'" in source
     assert "c10_share, 'config', 'c10_intrinsics.yaml'" in source
     assert 'latest_field_route' not in source
     assert 'latest_map_yaml' in source
-    assert "'wvcsc_perception' / 'wvcsc_calibration' / 'config'" in source
     assert 'nozzle.example.yaml' in source
     assert '.ros/wvcsc_calibration/nozzle.yaml' not in source
+
+    spray = _source('real_arm_spray_test.launch.py')
+    assert 'from wvcsc_bringup.handeye_calibration_paths import ' \
+        'resolve_handeye_calibration' in spray
+    assert 'helpers._resolve_handeye_calibration' not in spray
 
 
 def test_real_launches_use_timestamped_defaults_not_legacy_paths():

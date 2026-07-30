@@ -20,6 +20,7 @@ def generate_launch_description():
             'video_device',
             default_value='/dev/video2'),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
+        DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(
@@ -53,7 +54,7 @@ def generate_launch_description():
                 bringup_share, 'launch', 'real_arm.launch.py')),
             launch_arguments={
                 'serial_port': LaunchConfiguration('serial_port'),
-                'use_rviz': 'true',
+                'use_rviz': LaunchConfiguration('use_rviz'),
                 'publish_robot_state': 'true',
             }.items()),
         Node(

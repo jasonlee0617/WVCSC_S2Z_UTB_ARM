@@ -7,14 +7,14 @@ parameters:
   tracking_marker_frame: calibration_aruco
   freehand_robot_movement: true
   move_group_namespace: /
-  move_group: manipulator
+  move_group: arm
 transform:
   translation:
-    x: 0.00800774367872284
-    y: -0.02103618159626371
-    z: -0.1032872755182698
+    x: -0.05688430308615222
+    y: 0.0004208464430531188
+    z: -0.09802076784905693
   rotation:
-    x: -0.001451736376425892
-    y: -0.02122934768118767
-    z: -0.5754665662826903
-    w: 0.817548431806541
+    x: -0.0009411527615651758
+    y: 0.002215451099928286
+    z: -0.7074907859761218
+    w: 0.7067184685338234

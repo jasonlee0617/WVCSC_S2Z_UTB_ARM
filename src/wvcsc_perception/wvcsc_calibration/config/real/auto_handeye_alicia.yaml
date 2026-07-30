@@ -13,29 +13,21 @@ auto_calibration_collector:
     acceleration_scaling: 0.10
     planning_time: 5.0
     execution_timeout: 90.0
-
     marker_id: 1
     marker_size_m: 0.070
-    # 每个样本先用本进程的角点亚像素PnP稳定窗口更新marker TF，再调用
-    # easy_handeye2。实机仍使用同一条路径，不引入仿真专用采样逻辑。
     stable_marker_pose_topic: /calibration/stable_marker_pose
     stable_tf_settle_sec: 0.15
     aruco_dictionary: DICT_5X5_250
     image_topic: /camera/color/image_raw
     camera_info_topic: /camera/color/camera_info
+    camera_intrinsics_source: k
     joint_state_topic: /joint_states
     motion_locked_topic: /motion_control/locked
     motion_state_topic: /motion_control/state
-
     minimum_samples: 15
     minimum_solution_samples: 14
-    # 20个官方Alicia-M固定关节样本由统一采集器按既定顺序执行；每点仍需
-    # 通过MoveIt碰撞规划、条件数、关节余量、停稳和C10图像质量门控。
     stable_frames: 10
     settle_time_sec: 1.0
-    # 每次轨迹结束后，连续 0.30 s 内六关节位置最大跨度必须不超过该值，
-    # 才允许把图像 PnP 与最新 tool0 TF 组成手眼样本。位置收敛直接反映
-    # TF 是否仍在运动；不满足时拒绝该候选，不放宽精度。
     joint_stationary_max_position_delta_rad: 0.0005
     joint_stationary_window_sec: 0.30
     joint_stationary_timeout_sec: 5.0
@@ -50,24 +42,21 @@ auto_calibration_collector:
     minimum_rotation_delta_deg: 3.0
     minimum_translation_span_m: 0.04
     minimum_rotation_span_deg: 20.0
-
-    # The official fixed 20-pose sequence evaluates to about 21.5--32.9 in
-    # Alicia-M's URDF Jacobian convention.  Keep a finite calibration safety
-    # gate without rejecting every official sample; task-motion limits remain
-    # independent in wvcsc_arm_task.
     max_condition_number: 35.0
     min_joint_margin_rad: 0.22
-
     algorithm_names: [OpenCV/Park, OpenCV/Horaud, OpenCV/Tsai-Lenz]
     maximum_algorithm_translation_delta_m: 0.010
     maximum_algorithm_rotation_delta_deg: 2.0
     maximum_camera_translation_norm_m: 0.30
     maximum_marker_position_rms_m: 0.005
     maximum_marker_rotation_rms_deg: 1.0
+    fixed_marker_refinement_enabled: true
+    fixed_marker_refinement_translation_sigma_m: 0.001
+    fixed_marker_refinement_rotation_sigma_deg: 1.0
+    fixed_marker_refinement_max_iterations: 25
     easy_service_timeout_sec: 10.0
     startup_service_timeout_sec: 20.0
-    calibration_output_dir: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_calibration/config
+    calibration_output_dir: $HOME/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_calibration/config/real
     calibration_file_prefix: c10_handeye
     calibration_simulation: false
-    # 实机必须由操作者按 s/Enter 确认工作区安全后才开始运动。
     auto_start: false

@@ -12,6 +12,7 @@ from tf_transformations import inverse_matrix, rotation_matrix
 from wvcsc_calibration.alicia_sample_geometry import (
     ALICIA_M_FIXED_JOINT_SAMPLES,
 )
+from wvcsc_calibration.calibration_quality import mean_marker_side_px
 
 
 ROOT = Path(__file__).parents[1]
@@ -46,7 +47,9 @@ def test_launch_uses_vehicle_model_and_full_controller_chain_without_rqt():
     assert "executable='visualize_aruco_marker'" in LAUNCH_SOURCE
     assert "'/calibration/aruco_debug_image'" in LAUNCH_SOURCE
     assert "executable='handeye_server'" in LAUNCH_SOURCE
-    assert "executable='auto_calibration_collector'" in LAUNCH_SOURCE
+    assert "executable='auto_calibration_collector'" not in LAUNCH_SOURCE
+    assert "executable='calibration_qt'" in LAUNCH_SOURCE
+    assert "'use_calibration_qt', default_value='true'" in LAUNCH_SOURCE
     assert 'aruco_tf_broadcaster' not in LAUNCH_SOURCE
     assert "'robot_base_frame': 'alicia_base_link'" in LAUNCH_SOURCE
     assert "'/usr/share/gazebo-11/models'" in LAUNCH_SOURCE
@@ -87,7 +90,7 @@ def test_marker_pose_is_transformed_from_alicia_base_to_gazebo_root():
     assert rpy == pytest.approx((1.57079632679, 0.0, 3.141592653589793))
 
 
-def test_coverage_marker_keeps_at_least_fourteen_fixed_poses_in_strict_c10_view():
+def test_coverage_marker_keeps_configured_fixed_poses_in_strict_c10_view():
     """Protect the table location chosen for the complete fixed sequence."""
     module = _launch_module()
     description_root = ROOT.parent / 'wvcsc_description'
@@ -108,9 +111,14 @@ def test_coverage_marker_keeps_at_least_fourteen_fixed_poses_in_strict_c10_view(
         link = joint.find('parent').attrib['link']
 
     config = yaml.safe_load((PERCEPTION_ROOT /
-                             'wvcsc_calibration/config/' /
+                             'wvcsc_calibration/config/sim/' /
                              'auto_handeye_alicia_sim.yaml').read_text(
                                  encoding='utf-8'))[
+        'auto_calibration_collector']['ros__parameters']
+    base_config = yaml.safe_load((PERCEPTION_ROOT /
+                                  'wvcsc_calibration/config/real/' /
+                                  'auto_handeye_alicia.yaml').read_text(
+                                      encoding='utf-8'))[
         'auto_calibration_collector']['ros__parameters']
     intrinsics = yaml.safe_load((PERCEPTION_ROOT / 'wvcsc_c10_camera' /
                                  'config' / 'c10_intrinsics.yaml').read_text(
@@ -121,10 +129,13 @@ def test_coverage_marker_keeps_at_least_fourteen_fixed_poses_in_strict_c10_view(
         intrinsics['camera_matrix']['data'][2],
         intrinsics['camera_matrix']['data'][5])
     marker = config['marker_position_base_m']
-    corners = tuple((marker[0] + sign_x * 0.035,
-                     marker[1] + sign_y * 0.035,
-                     marker[2], 1.0)
-                    for sign_x in (-1.0, 1.0) for sign_y in (-1.0, 1.0))
+    half_size = float(config['marker_size_m']) * 0.5
+    corners = (
+        (marker[0] - half_size, marker[1] + half_size, marker[2], 1.0),
+        (marker[0] + half_size, marker[1] + half_size, marker[2], 1.0),
+        (marker[0] + half_size, marker[1] - half_size, marker[2], 1.0),
+        (marker[0] - half_size, marker[1] - half_size, marker[2], 1.0),
+    )
 
     valid = 0
     for sample in ALICIA_M_FIXED_JOINT_SAMPLES:
@@ -155,15 +166,18 @@ def test_coverage_marker_keeps_at_least_fourteen_fixed_poses_in_strict_c10_view(
         u_values, v_values = zip(*pixels)
         margin = min(min(u_values), intrinsics['image_width'] - max(u_values),
                      min(v_values), intrinsics['image_height'] - max(v_values))
-        side_px = max(u_values) - min(u_values)
+        side_px = mean_marker_side_px(pixels)
         center = tuple(sum(point[index] for point in projected) / len(projected)
                        for index in range(3))
         range_m = sum(value * value for value in center) ** 0.5
-        if margin >= 60.0 and side_px >= 90.0 and 0.20 <= range_m <= 0.80:
+        if (margin >= base_config['minimum_corner_margin_px']
+                and side_px >= base_config['minimum_marker_side_px']
+                and config['marker_distance_min_m'] <= range_m
+                <= base_config['marker_distance_max_m']):
             valid += 1
 
-    assert marker == pytest.approx([0.530, -0.030, 0.002])
-    assert valid >= config['minimum_samples']
+    assert marker == pytest.approx([0.480, 0.010, 0.002])
+    assert valid >= 19
 
 
 def test_failed_controller_spawner_stops_the_calibration_launch():
@@ -181,14 +195,14 @@ def test_failed_controller_spawner_stops_the_calibration_launch():
 
 def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
     config = yaml.safe_load((PERCEPTION_ROOT /
-                             'wvcsc_calibration/config/' /
+                             'wvcsc_calibration/config/sim/' /
                              'auto_handeye_alicia_sim.yaml').read_text(
                                  encoding='utf-8'))[
         'auto_calibration_collector']['ros__parameters']
     assert config['use_sim_time'] is True
     assert config['calibration_surface_enabled'] is False
     assert config['ground_truth_check_enabled'] is True
-    assert config['auto_start'] is True
+    assert config['auto_start'] is False
     assert config['velocity_scaling'] == pytest.approx(0.20)
     assert config['acceleration_scaling'] == pytest.approx(0.20)
     assert config['joint_stationary_max_position_delta_rad'] == pytest.approx(0.0001)
@@ -196,18 +210,20 @@ def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
     assert config['joint_stationary_timeout_sec'] == pytest.approx(5.0)
     # 固定20姿态覆盖率最优的 640x480 桌面位置；2 mm 是标定板表面，
     # 而非 Gazebo 模型中心。
-    assert config['marker_position_base_m'] == pytest.approx([0.530, -0.030, 0.002])
+    assert config['marker_position_base_m'] == pytest.approx([0.480, 0.010, 0.002])
     assert config['marker_distance_min_m'] == pytest.approx(0.20)
     assert 'minimum_corner_margin_px' not in config
     assert 'use_marker_position_prior_for_candidate_generation' not in config
     assert 'maximum_center_error_px' not in config
     assert config['calibration_output_dir'].startswith(
         '$HOME/WVCSC_S2Z_UTB_ARM/src/')
+    assert config['calibration_output_dir'].endswith('/config/sim')
     assert config['calibration_file_prefix'] == 'c10_handeye_sim'
     assert config['calibration_simulation'] is True
     assert config['marker_size_m'] == pytest.approx(0.070)
-    assert config['minimum_samples'] == 14
+    assert config['minimum_samples'] == 15
     assert config['minimum_solution_samples'] == 14
+    assert config['minimum_samples'] > config['minimum_solution_samples']
     assert 'seed_height_candidates_m' not in config
     assert 'target_samples' not in config
     assert 'maximum_samples' not in config
@@ -216,7 +232,7 @@ def test_simulation_collector_profile_enables_truth_gate_and_vehicle_anchor():
     assert config['ground_truth_max_xy_error_m'] == pytest.approx(0.002)
     assert config['ground_truth_max_rotation_error_deg'] == pytest.approx(1.0)
     assert config['maximum_marker_position_rms_m'] == pytest.approx(0.002)
-    assert config['maximum_marker_rotation_rms_deg'] == pytest.approx(0.60)
+    assert config['maximum_marker_rotation_rms_deg'] == pytest.approx(0.70)
     assert config['maximum_algorithm_translation_delta_m'] == pytest.approx(0.003)
     assert config['maximum_algorithm_rotation_delta_deg'] == pytest.approx(1.0)
     assert config['fixed_marker_refinement_enabled'] is True

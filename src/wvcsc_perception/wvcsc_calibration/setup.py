@@ -15,6 +15,10 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'config'),
          glob('config/*.yaml') + glob('config/*.calib')),
+        (os.path.join('share', package_name, 'config', 'real'),
+         glob('config/real/*.yaml') + glob('config/real/*.calib')),
+        (os.path.join('share', package_name, 'config', 'sim'),
+         glob('config/sim/*.yaml') + glob('config/sim/*.calib')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
@@ -30,5 +34,6 @@ setup(
         'export_handeye = wvcsc_calibration.calibration_io:main',
         'auto_calibration_collector = '
         'wvcsc_calibration.auto_calibration_collector:main',
+        'calibration_qt = wvcsc_calibration.calibration_qt:main',
     ]},
 )

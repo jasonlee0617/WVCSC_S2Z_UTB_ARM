@@ -10,7 +10,9 @@ from launch.actions import (
     SetEnvironmentVariable,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -18,6 +20,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('video_device', default_value='/dev/video2'),
         DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
+        DeclareLaunchArgument('use_calibration_qt', default_value='true'),
+        DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument(
             'camera_info_url',
             default_value=(
@@ -34,8 +38,14 @@ def generate_launch_description():
                 'video_device': LaunchConfiguration('video_device'),
                 'serial_port': LaunchConfiguration('serial_port'),
                 'camera_info_url': LaunchConfiguration('camera_info_url'),
+                'use_rviz': LaunchConfiguration('use_rviz'),
             }.items()),
-        # The real collector requires a controlling TTY for s/Enter and q.
-        # Start it separately after this stack is ready; a ros2 launch child
-        # process can never receive that operator confirmation safely.
+        # Qt embeds exactly one collector process.  Set this false for the
+        # documented second-terminal CLI collector mode.
+        Node(
+            package='wvcsc_calibration', executable='calibration_qt',
+            parameters=[os.path.join(
+                calibration_share, 'config', 'real', 'auto_handeye_alicia.yaml')],
+            condition=IfCondition(LaunchConfiguration('use_calibration_qt')),
+            output='both'),
     ])
