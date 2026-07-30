@@ -20,7 +20,7 @@ public:
   SerialPort& operator=(const SerialPort&) = delete;
 
   /// 打开串口设备
-  /// @param device 设备路径，如 /dev/ttyACM0
+  /// @param device 设备路径，如 /dev/my_robot
   /// @param baudrate 波特率，默认 1000000
   /// @return 是否成功
   bool open(const std::string& device, int baudrate = 1000000);

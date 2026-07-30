@@ -67,7 +67,7 @@ Gazebo Qt 的终端区会输出每条样本质量、求解质量、输出路径�
 
 ### 实机 Qt
 
-实机启动前车辆必须停稳、制动，且不得同时运行完整任务/MissionManager。C10 与 Alicia-M 默认设备是 `/dev/video2` 和 `/dev/ttyACM0`，其他机器请显式覆盖。
+实机启动前车辆必须停稳、制动，且不得同时运行完整任务/MissionManager。C10 与 Alicia-M 默认设备是 `/dev/video2` 和 `/dev/my_robot`，其他机器请显式覆盖。
 
 ```bash
 cd "$HOME/WVCSC_S2Z_UTB_ARM"
@@ -77,7 +77,7 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 
 ros2 launch wvcsc_calibration auto_handeye.launch.py \
-  video_device:=/dev/video2 serial_port:=/dev/ttyACM0
+  video_device:=/dev/video2 serial_port:=/dev/my_robot
 ```
 
 `unset PYTHONPATH` 必须在两次 `source` 之前执行；它避免用户目录的新版 NumPy 破坏 ROS Humble 的 `transforms3d`。
@@ -133,7 +133,7 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 
 ros2 launch wvcsc_calibration auto_handeye.launch.py \
-  use_calibration_qt:=false video_device:=/dev/video2 serial_port:=/dev/ttyACM0
+  use_calibration_qt:=false video_device:=/dev/video2 serial_port:=/dev/my_robot
 ```
 
 终端 B：同样隔离 Python 后启动唯一采集器。

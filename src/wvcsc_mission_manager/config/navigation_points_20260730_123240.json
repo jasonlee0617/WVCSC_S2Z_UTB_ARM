@@ -1,0 +1,105 @@
+{
+  "schema_version": 8,
+  "pose_reference": "alicia_base_link_xy_vehicle_yaw",
+  "start_pose": {
+    "position": {
+      "x": 2.0728708585952687,
+      "y": 0.09709697656231824,
+      "z": 0.0
+    },
+    "orientation": {
+      "x": 0.0,
+      "y": 0.0,
+      "z": 0.001954115835877905,
+      "w": 0.9999980907138273
+    }
+  },
+  "spray_duration": 3.0,
+  "return_home_after_mission": false,
+  "route_points": [
+    {
+      "pose": {
+        "position": {
+          "x": 5.585230827331543,
+          "y": 0.05792832374572754,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.0065916433437365925,
+          "w": 0.9999782748830242
+        }
+      },
+      "point_type": "TRANSIT",
+      "tree_x_m": 0.0,
+      "tree_y_m": 0.0,
+      "tree_base_z_m": 0.0,
+      "tree_pose": null,
+      "work_side": "UNSPECIFIED",
+      "wide_spray_on_approach": false,
+      "arm_spray_duration_sec": 3.0,
+      "dwell_time_sec": 0.0
+    },
+    {
+      "pose": {
+        "position": {
+          "x": 8.757189750671387,
+          "y": -0.11902353167533875,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.007920224334669638,
+          "w": 0.999968634531348
+        }
+      },
+      "point_type": "INSPECT",
+      "tree_x_m": -0.204554582484218,
+      "tree_y_m": 1.672193277226502,
+      "tree_base_z_m": 0.0,
+      "tree_pose": {
+        "position": {
+          "x": 8.93523120880127,
+          "y": -1.7942471504211426,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.0164601557628681,
+          "w": 0.999864522459049
+        }
+      },
+      "work_side": "LEFT",
+      "wide_spray_on_approach": true,
+      "arm_spray_duration_sec": 3.0,
+      "dwell_time_sec": 0.0
+    },
+    {
+      "pose": {
+        "position": {
+          "x": 10.768875122070312,
+          "y": -0.19524100422859192,
+          "z": 0.0
+        },
+        "orientation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": -0.006184155579219746,
+          "w": 0.9999808779270591
+        }
+      },
+      "point_type": "TRANSIT",
+      "tree_x_m": 0.0,
+      "tree_y_m": 0.0,
+      "tree_base_z_m": 0.0,
+      "tree_pose": null,
+      "work_side": "UNSPECIFIED",
+      "wide_spray_on_approach": false,
+      "arm_spray_duration_sec": 3.0,
+      "dwell_time_sec": 0.0
+    }
+  ]
+}

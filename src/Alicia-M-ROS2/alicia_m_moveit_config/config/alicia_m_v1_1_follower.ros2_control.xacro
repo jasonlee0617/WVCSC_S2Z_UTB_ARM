@@ -3,7 +3,7 @@
     <xacro:macro name="alicia_m_v1_1_follower_ros2_control"
                  params="name initial_positions_file
                          ros2_control_plugin:='mock_components/GenericSystem'
-                         serial_port:='/dev/ttyACM0'
+                         serial_port:='/dev/my_robot'
                          baudrate:='1000000'
                          control_mode:='pv'
                          default_speed:='1.0'

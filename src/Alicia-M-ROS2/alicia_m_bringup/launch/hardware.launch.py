@@ -3,7 +3,7 @@ hardware.launch.py - Hardware only (ros2_control + controllers, no MoveIt2)
 
 Usage:
   ros2 launch alicia_m_bringup hardware.launch.py
-  ros2 launch alicia_m_bringup hardware.launch.py serial_port:=/dev/ttyACM0
+  ros2 launch alicia_m_bringup hardware.launch.py serial_port:=/dev/my_robot
   ros2 launch alicia_m_bringup hardware.launch.py control_mode:=mit mit_kp:=30.0 mit_kd:=1.5
 """
 
@@ -38,8 +38,8 @@ def _print_launch_config(context):
 def generate_launch_description():
     declared_args = [
         DeclareLaunchArgument(
-            'serial_port', default_value='/dev/ttyACM0',
-            choices=['/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2', '/dev/ttyACM3'],
+            'serial_port', default_value='/dev/my_robot',
+            choices=['/dev/my_robot', '/dev/ttyACM1', '/dev/ttyACM2', '/dev/ttyACM3'],
             description='Serial port'),
         DeclareLaunchArgument(
             'control_mode', default_value='pv',

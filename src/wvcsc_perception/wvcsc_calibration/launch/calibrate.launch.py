@@ -63,7 +63,7 @@ def generate_launch_description():
             ]),
 
         # ── Alicia-M arm (MoveIt + ros2_control, arm-only URDF) ──
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/my_robot'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 alicia_bringup_share, 'launch', 'moveit_hardware.launch.py')),

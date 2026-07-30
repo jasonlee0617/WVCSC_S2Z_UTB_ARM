@@ -15,14 +15,14 @@ wvcsc_spray_task:
     # 每株任务最多冻结并喷洒的逻辑目标数量；冻结后新目标不能加入账本。
     max_targets_per_tree: 2
     # n：每个固定观察位允许进行初始目标发现的总时间。
-    view_detection_duration_sec: 7.0
+    view_detection_duration_sec: 4.0
     # m：单目标出现率使用的最近滑动时间窗口，必须不大于 n。
     target_presence_window_sec: 2.0
     # 单目标在最近 m 秒有效推理帧中的最低出现比例；0.50 表示至少一半。
     target_presence_ratio: 0.50
     # 最近 m 秒至少需要的有效推理帧数，防止样本过少时误确认。
-    target_presence_min_frames: 5
-
+    target_presence_min_frames: 3
+    
     # 所有冻结目标处理结束后，在当前观察位停留多久再返回机械臂 HOME。
     post_spray_home_delay_sec: 2.0
     # MoveIt 粗重心后重新确认目标时允许的最低单帧置信度。
@@ -34,7 +34,7 @@ wvcsc_spray_task:
 
     # 观察位模式：joint_presets 使用现场测量的固定关节角；ik 使用动态观察位。
     # 本实机配置默认固定关节预设，所有预设仍由 MoveIt 规划，不直接下发控制器。
-    observation_mode: joint_presets
+    observation_mode: ik
     # MoveIt 规划、重定时和执行的速度/加速度缩放；实机 launch 同时传给
     # motion_control 与 SprayTask。合法范围均为 (0, 1]。
     velocity_scaling: 0.20
@@ -86,9 +86,9 @@ wvcsc_spray_task:
     # IK 相机前伸距离候选的离散步长。
     observation_camera_reach_step_m: 0.10
     # IK 候选中相机光心相对 alicia_base_link 的最低 Z 高度。
-    camera_height_min_m: 0.15
+    camera_height_min_m: 0.2
     # IK 候选中相机光心相对 alicia_base_link 的最高 Z 高度。
-    camera_height_max_m: 0.30
+    camera_height_max_m: 0.45
     # IK 相机高度候选的离散步长。
     camera_height_step_m: 0.10
     # IK 初始扫描的中心、左扇形和右扇形方位偏移角。

@@ -25,7 +25,7 @@ ls -l /dev/video* /dev/ttyACM* /dev/ttyUSB* \
   /dev/serial/by-id /dev/serial/by-path 2>/dev/null || true
 ```
 
-不要只凭 `/dev/ttyACM0` 的编号判断设备身份；设备重新插拔后编号可能变化。应结合
+不要只凭 `/dev/my_robot` 的编号判断设备身份；设备重新插拔后编号可能变化。应结合
 `udevadm info`、`/dev/serial/by-id` 或 `/dev/serial/by-path` 确认。
 
 ### 2. C10 相机（视频设备）
@@ -60,10 +60,10 @@ ros2 topic echo /camera/color/camera_info --once
 
 ### 3. Alicia-M 机械臂串口
 
-当前实机默认机械臂串口是 `/dev/ttyACM0`，默认波特率为 `1000000`：
+当前实机默认机械臂串口是 `/dev/my_robot`，默认波特率为 `1000000`：
 
 ```bash
-ARM_DEVICE=/dev/ttyACM0
+ARM_DEVICE=/dev/my_robot
 ls -l "$ARM_DEVICE"
 udevadm info --query=all --name="$ARM_DEVICE" | rg 'ID_VENDOR|ID_MODEL|ID_SERIAL|DEVNAME'
 readlink -f "$ARM_DEVICE"
@@ -269,5 +269,5 @@ ros2 launch wvcsc_bringup real_cartographer.launch.py
 ros2 launch wvcsc_bringup real_navigation.launch.py
 ```
 
-实机默认 C10 为 `/dev/video2`，Alicia-M 串口为 `/dev/ttyACM0`；其他设备通过 launch 参数
+实机默认 C10 为 `/dev/video2`，Alicia-M 串口为 `/dev/my_robot`；其他设备通过 launch 参数
 显式覆盖。完整任务启动前会检查地图、标定、YOLO 环境、相机、机械臂和继电器配置。

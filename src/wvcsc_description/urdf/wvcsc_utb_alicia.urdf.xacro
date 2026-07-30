@@ -41,7 +41,7 @@
   <xacro:arg name="gazebo_controllers_file" default="$(find wvcsc_description)/config/ros2_controllers.yaml"/>
   <xacro:arg name="ros2_control_plugin" default="mock_components/GenericSystem"/>
   <xacro:arg name="initial_positions_file" default="$(find alicia_m_moveit_config)/config/initial_positions.yaml"/>
-  <xacro:arg name="serial_port" default="/dev/ttyACM0"/>
+  <xacro:arg name="serial_port" default="/dev/my_robot"/>
   <xacro:arg name="baudrate" default="1000000"/>
   <xacro:arg name="control_mode" default="pv"/>
   <xacro:arg name="default_speed" default="1.0"/>

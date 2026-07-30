@@ -634,10 +634,10 @@ def test_real_hardware_defaults_match_field_computer():
             'real_system_mission.launch.py'):
         source = _source(launch_name)
         assert "default_value='/dev/video2'" in source
-        assert "default_value='/dev/ttyACM0'" in source
+        assert "default_value='/dev/my_robot'" in source
     for launch_name in ('real_arm.launch.py', 'real_orchestration.launch.py'):
         source = _source(launch_name)
-        assert "default_value='/dev/ttyACM0'" in source
+        assert "default_value='/dev/my_robot'" in source
     source = (PERCEPTION / 'wvcsc_calibration' / 'launch' /
               'real_vision_test.launch.py').read_text(encoding='utf-8')
     assert "default_value='/dev/video2'" in source
@@ -647,7 +647,7 @@ def test_real_hardware_defaults_match_field_computer():
         source = (PERCEPTION / 'wvcsc_calibration' / 'launch' /
                   launch_name).read_text(encoding='utf-8')
         assert "default_value='/dev/video2'" in source
-        assert "default_value='/dev/ttyACM0'" in source
+        assert "default_value='/dev/my_robot'" in source
     assert "default_value='/dev/video2'" in (
         PERCEPTION / 'wvcsc_c10_camera' / 'launch' /
         'c10_camera.launch.py').read_text(encoding='utf-8')

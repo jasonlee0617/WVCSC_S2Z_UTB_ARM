@@ -72,7 +72,7 @@ mission_manager:
     # 设为 0.0 时，仅在 Nav2 到达且广域喷洒通道已确认关闭后跳过本软件
     # 停稳确认；仍保留该点 dwell_time_sec，且不会把独立 NavigateToPose
     # 变成连续穿点导航。
-    transit_stop_stable_duration_sec: 0.0
+    transit_stop_stable_duration_sec: 0.1
     # 如果 1.0 秒内没有收到新的 /odom 消息，视为里程计失联。
     odom_stale_timeout_sec: 1.0
     # 等待小车停稳的最大总时间 (5秒后还未稳定，任务判定失败)。

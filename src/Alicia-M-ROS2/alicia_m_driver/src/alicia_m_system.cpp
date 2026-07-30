@@ -56,7 +56,7 @@ hardware_interface::CallbackReturn AliciaHardwareInterface::on_init(
 
   // 读取硬件参数
   serial_port_name_ = info_.hardware_parameters.count("serial_port")
-    ? info_.hardware_parameters.at("serial_port") : "/dev/ttyACM0";
+    ? info_.hardware_parameters.at("serial_port") : "/dev/my_robot";
   baudrate_ = info_.hardware_parameters.count("baudrate")
     ? std::stoi(info_.hardware_parameters.at("baudrate")) : 1000000;
   control_mode_ = info_.hardware_parameters.count("control_mode")

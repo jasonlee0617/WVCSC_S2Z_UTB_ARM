@@ -19,7 +19,7 @@ def generate_launch_description():
     calibration_share = get_package_share_directory('wvcsc_calibration')
     return LaunchDescription([
         DeclareLaunchArgument('video_device', default_value='/dev/video2'),
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/my_robot'),
         DeclareLaunchArgument('use_calibration_qt', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument(
