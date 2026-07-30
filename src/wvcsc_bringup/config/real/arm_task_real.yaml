@@ -1,6 +1,8 @@
 # 实机喷洒任务覆盖配置。
 # 本文件覆盖 SprayTask 在代码中声明的参数默认值；实机 launch 不会同时加载
-# wvcsc_arm_task/config/arm_task.yaml。未在此处出现的参数使用 spray_config.py 默认值。
+# wvcsc_arm_task/config/arm_task.yaml。实机三个入口还会从这里读取观察模式和
+# 轨迹速度/加速度缩放，并一致传给 motion_control 与 SprayTask。
+# 未在此处出现的参数使用 spray_config.py 默认值。
 # 所有距离单位为米、时间单位为秒、角度单位为度（参数名以 _deg 结尾）或弧度
 #（参数名以 _rad 结尾）、图像误差单位为像素。
 wvcsc_spray_task:
@@ -33,6 +35,10 @@ wvcsc_spray_task:
     # 观察位模式：joint_presets 使用现场测量的固定关节角；ik 使用动态观察位。
     # 本实机配置默认固定关节预设，所有预设仍由 MoveIt 规划，不直接下发控制器。
     observation_mode: joint_presets
+    # MoveIt 规划、重定时和执行的速度/加速度缩放；实机 launch 同时传给
+    # motion_control 与 SprayTask。合法范围均为 (0, 1]。
+    velocity_scaling: 0.20
+    acceleration_scaling: 0.20
     # 左侧病株的中心固定观察位，依次对应六个机械臂关节角。
     joint_preset_center_deg: [95.3, -136.9, -71.0, 7.7, 57.3, -4.4]
     # 左侧病株中心视角无目标时使用的左扇形固定观察位。

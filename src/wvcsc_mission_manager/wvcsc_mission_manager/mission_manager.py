@@ -86,6 +86,8 @@ class MissionManager(Node):
             self.get_parameter('angular_stop_threshold').value)
         self._stop_stable_duration = float(
             self.get_parameter('stop_stable_duration_sec').value)
+        self._transit_stop_stable_duration = float(
+            self.get_parameter('transit_stop_stable_duration_sec').value)
         self._odom_stale_timeout = float(
             self.get_parameter('odom_stale_timeout_sec').value)
         self._return_home_after_mission = bool(
@@ -102,6 +104,7 @@ class MissionManager(Node):
                 self._arm_base_yaw, self._wide_motion_linear_threshold,
                 self._wide_motion_timeout, self._linear_stop_threshold,
                 self._angular_stop_threshold, self._stop_stable_duration,
+                self._transit_stop_stable_duration,
                 self._odom_stale_timeout)):
             raise ValueError('arm base and wide spray parameters must be finite')
         if (self._wide_motion_linear_threshold < 0.0 or
@@ -109,6 +112,7 @@ class MissionManager(Node):
                 self._linear_stop_threshold < 0.0 or
                 self._angular_stop_threshold < 0.0 or
                 self._stop_stable_duration <= 0.0 or
+                self._transit_stop_stable_duration < 0.0 or
                 self._odom_stale_timeout <= 0.0):
             raise ValueError('wide spray motion thresholds are invalid')
         if (not math.isfinite(self._nav_startup_retry_timeout) or
@@ -235,6 +239,7 @@ class MissionManager(Node):
             'linear_stop_threshold': 0.03,
             'angular_stop_threshold': 0.03,
             'stop_stable_duration_sec': 1.0,
+            'transit_stop_stable_duration_sec': 0.2,
             'odom_stale_timeout_sec': 1.0,
             'stop_verify_timeout_sec': 5.0,
             # Qt 实车路线可包含 23 株病株检查点及通行 Point；仍保留
@@ -548,8 +553,34 @@ class MissionManager(Node):
     def _begin_stop_verification(self):
         if self.core.state != MissionState.VERIFYING_STOP:
             return
+        point = self.core.current_point
+        if point is None:
+            self._fail('cannot verify stop without a route point')
+            return
+
+        # A zero transit duration means that Nav2 arrival and the confirmed
+        # channel-1 OFF command are sufficient for a non-arm route point.
+        # INSPECT points never enter this path: arm motion still requires the
+        # normal fresh-odometry stop confirmation.
+        if (not point.requires_arm and
+                self._transit_stop_stable_duration == 0.0):
+            self._phase_started = self._now()
+            if not self.core.stop_verified():
+                self._fail('cannot skip transit stop verification')
+                return
+            self.get_logger().info(
+                '[STOP_CHECK] transit confirmation skipped (0.0s)')
+            if point.dwell_time_sec <= 0.0:
+                self._finish_noninspect_point()
+            else:
+                self._publish_status()
+            return
+
         self._phase_started = self._now()
-        self._stop_detector.start(self._phase_started)
+        stable_duration = (
+            self._stop_stable_duration if point.requires_arm
+            else self._transit_stop_stable_duration)
+        self._stop_detector.start(self._phase_started, stable_duration)
         self._publish_status()
 
     def _skip_navigation_point(self, reason):

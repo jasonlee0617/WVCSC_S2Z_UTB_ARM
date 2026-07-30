@@ -30,6 +30,7 @@ from wvcsc_bringup.handeye_calibration_paths import (
     resolve_handeye_calibration,
 )
 from wvcsc_bringup.path_defaults import latest_map_yaml
+from wvcsc_bringup.real_arm_defaults import load_real_arm_defaults
 
 
 def _include(launch_dir, filename, arguments=None):
@@ -357,6 +358,8 @@ def generate_launch_description():
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
     controller_share = get_package_share_directory('controller_pkg')
     launch_dir = os.path.join(bringup_share, 'launch')
+    arm_defaults = load_real_arm_defaults(os.path.join(
+        bringup_share, 'config', 'real', 'arm_task_real.yaml'))
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -404,9 +407,14 @@ def generate_launch_description():
             default_value=(
                 'package://wvcsc_c10_camera/config/'
                 'c10_intrinsics.yaml')),
-        DeclareLaunchArgument('arm_velocity_scaling', default_value='0.20'),
-        DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
-        DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
+        DeclareLaunchArgument(
+            'arm_velocity_scaling',
+            default_value=str(arm_defaults.velocity_scaling)),
+        DeclareLaunchArgument(
+            'arm_acceleration_scaling',
+            default_value=str(arm_defaults.acceleration_scaling)),
+        DeclareLaunchArgument(
+            'observation_mode', default_value=arm_defaults.observation_mode),
         DeclareLaunchArgument(
             'default_arm_spray_duration_sec', default_value='3.0'),
         DeclareLaunchArgument(

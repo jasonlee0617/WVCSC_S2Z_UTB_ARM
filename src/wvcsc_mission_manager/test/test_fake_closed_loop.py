@@ -179,6 +179,26 @@ def _spin_until(executor, predicate, timeout=5.0):
     return False
 
 
+def test_mission_manager_accepts_zero_transit_stop_duration():
+    context = Context()
+    rclpy.init(context=context)
+    manager = MissionManager(
+        context=context,
+        parameter_overrides=[
+            Parameter('transit_stop_stable_duration_sec', value=0.0),
+        ],
+    )
+    try:
+        assert manager._transit_stop_stable_duration == 0.0
+        # The arm-safety detector keeps its independent INSPECT duration.
+        assert manager._stop_detector.stable_duration == 1.0
+    finally:
+        manager._nav_client.destroy()
+        manager._spray_client.destroy()
+        manager.destroy_node()
+        context.try_shutdown()
+
+
 def test_three_two_point_fake_closed_loops_complete_in_order():
     context = Context()
     rclpy.init(context=context)

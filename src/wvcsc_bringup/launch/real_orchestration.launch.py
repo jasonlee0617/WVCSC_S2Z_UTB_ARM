@@ -12,6 +12,7 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 from wvcsc_bringup.path_defaults import latest_map_yaml
+from wvcsc_bringup.real_arm_defaults import load_real_arm_defaults
 
 
 def generate_launch_description():
@@ -21,6 +22,8 @@ def generate_launch_description():
     controller_share = get_package_share_directory('controller_pkg')
     mission_share = get_package_share_directory('wvcsc_mission_manager')
     real_config = os.path.join(bringup_share, 'config', 'real')
+    arm_defaults = load_real_arm_defaults(
+        os.path.join(real_config, 'arm_task_real.yaml'))
 
     xacro_file = os.path.join(
         description_share, 'urdf', 'wvcsc_utb_alicia.urdf.xacro')
@@ -167,9 +170,14 @@ def generate_launch_description():
         DeclareLaunchArgument('baudrate', default_value='1000000'),
         DeclareLaunchArgument('control_mode', default_value='pv'),
         DeclareLaunchArgument('default_speed', default_value='0.5'),
-        DeclareLaunchArgument('arm_velocity_scaling', default_value='0.20'),
-        DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
-        DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
+        DeclareLaunchArgument(
+            'arm_velocity_scaling',
+            default_value=str(arm_defaults.velocity_scaling)),
+        DeclareLaunchArgument(
+            'arm_acceleration_scaling',
+            default_value=str(arm_defaults.acceleration_scaling)),
+        DeclareLaunchArgument(
+            'observation_mode', default_value=arm_defaults.observation_mode),
         DeclareLaunchArgument('c10_mount_xyz', default_value='-0.055 0 -0.10'),
         DeclareLaunchArgument(
             'c10_mount_rpy', default_value='0 -1.57079632679 0'),

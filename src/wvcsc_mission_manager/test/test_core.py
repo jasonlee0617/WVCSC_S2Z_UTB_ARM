@@ -205,6 +205,27 @@ def test_stop_detector_requires_continuous_fresh_samples():
     assert detector.status(1.7) == StopDetector.STABLE
 
 
+def test_stop_detector_can_override_duration_for_one_check():
+    detector = StopDetector(stable_duration=1.0, stale_timeout=1.0, timeout=5.0)
+    detector.start(0.0, stable_duration=0.2)
+    detector.update(0.1, 0.0, 0.0)
+    assert detector.status(0.29) == StopDetector.WAITING
+    detector.update(0.3, 0.0, 0.0)
+    assert detector.status(0.5) == StopDetector.STABLE
+
+
+def test_stop_detector_default_duration_is_preserved():
+    detector = StopDetector(stable_duration=1.0, stale_timeout=1.0, timeout=5.0)
+    detector.start(0.0, stable_duration=0.2)
+    detector.update(0.1, 0.0, 0.0)
+    detector.update(0.2, 0.0, 0.0)
+    assert detector.status(0.4) == StopDetector.STABLE
+    detector.stop()
+    detector.start(1.0)
+    detector.update(1.1, 0.0, 0.0)
+    assert detector.status(1.5) == StopDetector.WAITING
+
+
 def test_stop_detector_reports_stale_and_timeout():
     detector = StopDetector(stale_timeout=1.0, timeout=5.0)
     detector.start(0.0)

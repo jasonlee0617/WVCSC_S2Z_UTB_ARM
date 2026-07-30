@@ -50,6 +50,10 @@ class _Detector:
     def __init__(self, status=StopDetector.WAITING):
         self.value = status
         self.stopped = False
+        self.started = None
+
+    def start(self, now, stable_duration=None):
+        self.started = (float(now), stable_duration)
 
     def status(self, _now):
         return self.value
@@ -142,6 +146,8 @@ class _Harness:
         self._spray_timeout = 5.0
         self._spray_progress_timeout = 3.0
         self._spray_last_progress = 0.0
+        self._stop_stable_duration = 1.0
+        self._transit_stop_stable_duration = 0.2
         self._return_home_after_mission = False
         self._manual_return_home = False
         self._home_pose = (0.0, 0.0, 0.0)
@@ -293,6 +299,68 @@ def test_transit_arrival_disables_wide_spray_before_any_dwell_or_next_point():
     assert harness.core.state == MissionState.VERIFYING_STOP
     assert harness.relay_commands == [
         (1, False, 0.0, 'transit_1: disable wide spray at stop')]
+
+
+def test_stop_verification_uses_short_duration_for_transit_points():
+    harness = _Harness(state=MissionState.VERIFYING_STOP)
+    transit = RoutePoint(
+        'transit_1', 3.0, 2.0, 0.0, 0.0, (3.4, 0.2, 0.0),
+        point_type=PointType.TRANSIT)
+    harness.core = MissionCore()
+    harness.core.load('transit_demo', [transit])
+    harness.core.state = MissionState.VERIFYING_STOP
+
+    MissionManager._begin_stop_verification(harness)
+
+    assert harness._stop_detector.started == (6.0, 0.2)
+
+
+def test_zero_transit_stop_confirmation_skips_detector_after_wide_off():
+    harness = _Harness()
+    harness._transit_stop_stable_duration = 0.0
+    transit = RoutePoint(
+        'transit_1', 3.0, 2.0, 0.0, 0.0, (3.4, 0.2, 0.0),
+        point_type=PointType.TRANSIT, wide_spray_on_approach=True,
+        dwell_time_sec=1.0)
+    following = RoutePoint(
+        'transit_2', 4.0, 2.0, 0.0, 0.0, (4.4, 0.2, 0.0),
+        point_type=PointType.TRANSIT)
+    harness.core = MissionCore()
+    harness.core.load('zero_transit_demo', [transit, following])
+    harness.core.state = MissionState.NAVIGATING
+    harness._begin_stop_verification = (
+        MissionManager._begin_stop_verification.__get__(harness, _Harness))
+
+    MissionManager._navigation_arrived(harness)
+
+    assert harness.relay_commands == [
+        (1, False, 0.0, 'transit_1: disable wide spray at stop')]
+    assert harness._stop_detector.started is None
+    assert harness.core.state == MissionState.DWELLING
+    assert harness._phase_started == 6.0
+    assert not hasattr(harness, 'nav_sent')
+
+    MissionManager._tick_active_work_phase(harness, 6.9)
+    assert harness.core.state == MissionState.DWELLING
+
+    MissionManager._tick_active_work_phase(harness, 7.0)
+    assert harness.core.state == MissionState.NAVIGATING
+    assert harness.nav_sent
+
+
+def test_stop_verification_keeps_arm_duration_for_inspect_points():
+    harness = _Harness(state=MissionState.VERIFYING_STOP)
+    harness._transit_stop_stable_duration = 0.0
+    inspect = RoutePoint(
+        'inspect_1', 3.0, 2.0, 0.0, 0.9, (3.4, 0.2, 0.0),
+        point_type=PointType.INSPECT)
+    harness.core = MissionCore()
+    harness.core.load('inspect_demo', [inspect])
+    harness.core.state = MissionState.VERIFYING_STOP
+
+    MissionManager._begin_stop_verification(harness)
+
+    assert harness._stop_detector.started == (6.0, 1.0)
 
 
 def test_wide_spray_waits_for_motion_and_times_out_with_relay_off():

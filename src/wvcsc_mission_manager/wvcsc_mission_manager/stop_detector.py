@@ -17,7 +17,8 @@ class StopDetector:
             stable_duration=1.0, stale_timeout=1.0, timeout=5.0):
         self.linear_threshold = float(linear_threshold)
         self.angular_threshold = float(angular_threshold)
-        self.stable_duration = float(stable_duration)
+        self._default_stable_duration = float(stable_duration)
+        self.stable_duration = self._default_stable_duration
         self.stale_timeout = float(stale_timeout)
         self.timeout = float(timeout)
         self.active = False
@@ -25,11 +26,24 @@ class StopDetector:
         self.last_update = None
         self.stable_since = None
 
-    def start(self, now):
+    def start(self, now, stable_duration=None):
+        """Start a stop check, optionally overriding this check's duration.
+
+        The default keeps the detector's configured duration.  MissionManager
+        uses a shorter per-check duration for transit points while retaining
+        the longer arm-safety duration for inspection points.
+        """
         self.active = True
         self.started_at = float(now)
         self.last_update = None
         self.stable_since = None
+        if stable_duration is None:
+            self.stable_duration = self._default_stable_duration
+        else:
+            stable_duration = float(stable_duration)
+            if stable_duration <= 0.0:
+                raise ValueError('stable_duration must be positive')
+            self.stable_duration = stable_duration
 
     def update(self, now, linear_speed, angular_speed):
         if not self.active:

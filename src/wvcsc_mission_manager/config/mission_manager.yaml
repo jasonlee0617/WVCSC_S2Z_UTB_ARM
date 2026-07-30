@@ -66,8 +66,13 @@ mission_manager:
     # 线速度和角速度阈值，低于此值判定小车为静止。
     linear_stop_threshold: 0.03      # 0.03 m/s
     angular_stop_threshold: 0.03     # 0.03 rad/s
-    # 小车速度持续稳定在阈值以下必须持续 1.0 秒，才视为完全停稳。
+    # 病株检查点的停稳确认时长；通行点使用下面的短时确认参数。
     stop_stable_duration_sec: 1.0
+    # 通行点不执行机械臂动作，只需短暂确认车辆已停稳即可推进下一点。
+    # 设为 0.0 时，仅在 Nav2 到达且广域喷洒通道已确认关闭后跳过本软件
+    # 停稳确认；仍保留该点 dwell_time_sec，且不会把独立 NavigateToPose
+    # 变成连续穿点导航。
+    transit_stop_stable_duration_sec: 0.0
     # 如果 1.0 秒内没有收到新的 /odom 消息，视为里程计失联。
     odom_stale_timeout_sec: 1.0
     # 等待小车停稳的最大总时间 (5秒后还未稳定，任务判定失败)。

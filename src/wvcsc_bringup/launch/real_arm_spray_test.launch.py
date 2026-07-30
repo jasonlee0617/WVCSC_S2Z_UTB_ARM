@@ -14,6 +14,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
 from wvcsc_bringup.handeye_calibration_paths import resolve_handeye_calibration
+from wvcsc_bringup.real_arm_defaults import load_real_arm_defaults
 
 
 def _include(launch_dir, filename, arguments=None):
@@ -203,6 +204,10 @@ def generate_launch_description():
         get_package_share_directory('wvcsc_bringup'), 'launch')
     controller_share = get_package_share_directory('controller_pkg')
     vision_share = get_package_share_directory('wvcsc_rgb_vision')
+    real_config = os.path.join(
+        get_package_share_directory('wvcsc_bringup'), 'config', 'real')
+    arm_defaults = load_real_arm_defaults(
+        os.path.join(real_config, 'arm_task_real.yaml'))
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -222,9 +227,14 @@ def generate_launch_description():
             'relay_config_file',
             default_value=os.path.join(
                 controller_share, 'config', 'fault.ini')),
-        DeclareLaunchArgument('arm_velocity_scaling', default_value='0.20'),
-        DeclareLaunchArgument('arm_acceleration_scaling', default_value='0.20'),
-        DeclareLaunchArgument('observation_mode', default_value='joint_presets'),
+        DeclareLaunchArgument(
+            'arm_velocity_scaling',
+            default_value=str(arm_defaults.velocity_scaling)),
+        DeclareLaunchArgument(
+            'arm_acceleration_scaling',
+            default_value=str(arm_defaults.acceleration_scaling)),
+        DeclareLaunchArgument(
+            'observation_mode', default_value=arm_defaults.observation_mode),
         DeclareLaunchArgument('working_range_min_m', default_value='0.20'),
         DeclareLaunchArgument('working_range_max_m', default_value='2.00'),
         DeclareLaunchArgument('default_working_range_m', default_value='1.00'),

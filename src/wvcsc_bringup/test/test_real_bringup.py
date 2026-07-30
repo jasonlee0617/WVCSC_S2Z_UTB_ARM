@@ -11,6 +11,14 @@ from xml.etree import ElementTree
 
 import pytest
 import yaml
+from launch import LaunchContext
+from launch.actions import DeclareLaunchArgument
+from launch.utilities import perform_substitutions
+
+from wvcsc_bringup.real_arm_defaults import (
+    RealArmDefaults,
+    load_real_arm_defaults,
+)
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -29,6 +37,15 @@ def _launch_module(name):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _launch_argument_defaults(description):
+    context = LaunchContext()
+    return {
+        entity.name: perform_substitutions(context, entity.default_value)
+        for entity in description.entities
+        if isinstance(entity, DeclareLaunchArgument)
+    }
 
 
 @pytest.mark.parametrize('path', sorted(LAUNCH.glob('*.launch.py')))
@@ -324,11 +341,17 @@ def test_arm_test_exposes_separate_ik_and_manual_working_ranges():
 
 
 def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
-    real_config = yaml.safe_load((PACKAGE / 'config' / 'real' /
-                                  'arm_task_real.yaml').read_text(
-                                      encoding='utf-8'))
+    real_config_path = PACKAGE / 'config' / 'real' / 'arm_task_real.yaml'
+    real_config = yaml.safe_load(real_config_path.read_text(encoding='utf-8'))
     parameters = real_config['wvcsc_spray_task']['ros__parameters']
     assert parameters['observation_mode'] == 'joint_presets'
+    assert parameters['velocity_scaling'] == pytest.approx(0.20)
+    assert parameters['acceleration_scaling'] == pytest.approx(0.20)
+    assert load_real_arm_defaults(real_config_path) == RealArmDefaults(
+        observation_mode='joint_presets',
+        velocity_scaling=pytest.approx(0.20),
+        acceleration_scaling=pytest.approx(0.20),
+    )
     assert parameters['spray_on_alignment_failure'] is True
     assert parameters['max_targets_per_tree'] == 2
     assert parameters['target_recenter_workspace_px'] == 128.0
@@ -347,8 +370,20 @@ def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
             'real_arm_spray_test.launch.py', 'real_orchestration.launch.py',
             'real_system_mission.launch.py'):
         source = _source(launch_name)
-        assert "'observation_mode', default_value='joint_presets'" in source
+        assert 'from wvcsc_bringup.real_arm_defaults import ' \
+            'load_real_arm_defaults' in source
+        assert 'load_real_arm_defaults(' in source
+        assert 'default_value=arm_defaults.observation_mode' in source
+        assert 'default_value=str(arm_defaults.velocity_scaling)' in source
+        assert 'default_value=str(arm_defaults.acceleration_scaling)' in source
+        assert "'observation_mode', default_value='joint_presets'" not in source
         assert "LaunchConfiguration('observation_mode')" in source
+        if launch_name == 'real_system_mission.launch.py':
+            assert "'arm_velocity_scaling': LaunchConfiguration(" in source
+            assert "'arm_acceleration_scaling': LaunchConfiguration(" in source
+        else:
+            assert "LaunchConfiguration('arm_velocity_scaling')" in source
+            assert "LaunchConfiguration('arm_acceleration_scaling')" in source
 
     mission_source = _source('real_system_mission.launch.py')
     assert "'default_arm_spray_duration_sec', default_value='3.0'" in mission_source
@@ -357,6 +392,8 @@ def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
                         'real_orchestration.launch.py'):
         source = _source(launch_name)
         assert "os.path.join(real_config, 'arm_task_real.yaml')" in source
+        assert 'parameters=[arm_motion_parameters]' in source
+        assert 'arm_motion_parameters,' in source
 
     simulation_config = (PACKAGE.parent / 'wvcsc_manipulation' / 'wvcsc_arm_task' / 'config' /
                          'arm_task.yaml').read_text(encoding='utf-8')
@@ -369,6 +406,57 @@ def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
     task_source = (PACKAGE.parent / 'wvcsc_manipulation' / 'wvcsc_arm_task' / 'wvcsc_arm_task' /
                    'spray_task.py').read_text(encoding='utf-8')
     assert 'SINGLE_SHOT_OPEN_LOOP_ALIGN' not in task_source
+
+
+def test_real_arm_defaults_reject_invalid_yaml_values(tmp_path):
+    config = tmp_path / 'arm_task_real.yaml'
+    config.write_text(yaml.safe_dump({
+        'wvcsc_spray_task': {
+            'ros__parameters': {
+                'observation_mode': 'ik',
+                'velocity_scaling': 0.30,
+                'acceleration_scaling': 0.40,
+            },
+        },
+    }), encoding='utf-8')
+    assert load_real_arm_defaults(config) == RealArmDefaults(
+        observation_mode='ik',
+        velocity_scaling=pytest.approx(0.30),
+        acceleration_scaling=pytest.approx(0.40),
+    )
+
+    invalid = yaml.safe_load(config.read_text(encoding='utf-8'))
+    invalid['wvcsc_spray_task']['ros__parameters']['observation_mode'] = 'bad'
+    config.write_text(yaml.safe_dump(invalid), encoding='utf-8')
+    with pytest.raises(RuntimeError, match='observation_mode'):
+        load_real_arm_defaults(config)
+
+    invalid['wvcsc_spray_task']['ros__parameters']['observation_mode'] = 'ik'
+    invalid['wvcsc_spray_task']['ros__parameters']['velocity_scaling'] = 0.0
+    config.write_text(yaml.safe_dump(invalid), encoding='utf-8')
+    with pytest.raises(RuntimeError, match='velocity_scaling'):
+        load_real_arm_defaults(config)
+
+
+@pytest.mark.parametrize('launch_name', (
+    'real_arm_spray_test.launch.py',
+    'real_orchestration.launch.py',
+    'real_system_mission.launch.py',
+))
+def test_real_launches_use_arm_task_yaml_runtime_defaults(
+        monkeypatch, tmp_path, launch_name):
+    module = _launch_module(launch_name)
+    expected = RealArmDefaults('ik', 0.30, 0.40)
+    monkeypatch.setattr(module, 'load_real_arm_defaults',
+                        lambda _path: expected)
+    monkeypatch.setattr(module, 'get_package_share_directory',
+                        lambda _package: str(PACKAGE))
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path / 'ros_logs'))
+
+    defaults = _launch_argument_defaults(module.generate_launch_description())
+    assert defaults['observation_mode'] == 'ik'
+    assert defaults['arm_velocity_scaling'] == '0.3'
+    assert defaults['arm_acceleration_scaling'] == '0.4'
 
 
 def test_real_spray_actuator_uses_the_physical_relay_service():
