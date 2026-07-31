@@ -176,8 +176,10 @@ def test_manual_mission_request_schema_mismatch_is_reported_before_submit():
 def test_navigation_qt_keeps_spray_indicators_but_removes_extra_task_controls():
     source = SCRIPT.read_text(encoding='utf-8')
 
-    assert "QTableWidget(0, 3)" in source
-    assert "QCheckBox('开启广域喷洒')" in source
+    assert "QTableWidget(0, 4)" in source
+    assert "QCheckBox('开启广域喷洒')" not in source
+    assert "['序号', '类型', '广域喷洒', '机械臂基座位姿 (x, y, yaw)']" in source
+    assert 'verticalHeader().setVisible(False)' in source
     assert "QPushButton('终止任务')" in source
     assert "QCheckBox('显示相机/YOLO画面')" in source
     assert "QLabel('广域喷洒: ● 未收到状态')" in source
@@ -191,6 +193,26 @@ def test_navigation_qt_keeps_spray_indicators_but_removes_extra_task_controls():
     assert "addItem('终点'" not in source
     for obsolete in ('暂停', '继续', '跳过当前', '取消任务', '重置任务'):
         assert f"QPushButton('{obsolete}')" not in source
+
+
+def test_wide_spray_table_toggle_updates_the_matching_route_point():
+    class Checkbox:
+        def __init__(self):
+            self.text = ''
+
+        def setText(self, value):
+            self.text = value
+
+    point = nav2_qt.WorkPoint(_pose(3.0, 0.5))
+    checkbox = Checkbox()
+
+    nav2_qt.Nav2Gui._set_wide_spray_enabled(point, checkbox, True)
+    assert point.wide_spray_on_approach
+    assert checkbox.text == '是'
+
+    nav2_qt.Nav2Gui._set_wide_spray_enabled(point, checkbox, False)
+    assert not point.wide_spray_on_approach
+    assert checkbox.text == '否'
 
 
 def test_spray_indicator_uses_blue_red_and_gray_states():
@@ -465,13 +487,14 @@ def _gui(editor):
             'record_start_button', 'record_point_button', 'start_task_button',
             'delete_button', 'up_button', 'down_button',
             'clear_button', 'save_button', 'load_button', 'home_button',
-            'abort_home_button', 'point_type_combo', 'wide_spray_checkbox',
+            'abort_home_button', 'point_type_combo',
             'candidate_label', 'status_label',
             'start_label', 'capture_label', 'relocalize_button',
             'wide_relay_label', 'arm_relay_label'):
         setattr(gui, name, _Widget())
     gui._publish_markers = lambda: None
     gui._update_table = lambda: None
+    gui._set_wide_spray_cells_enabled = lambda _enabled: None
     gui._log = lambda _message: None
     return gui
 
@@ -556,6 +579,7 @@ def test_task_uses_all_queued_points_and_keeps_the_editor_list():
     editor = nav2_qt.MissionEditor()
     editor.start_pose = _pose(0.0, 0.0)
     editor.add_point(_pose(3.0, 0.5, 0.3), 0.0, -1.5)
+    editor.points[0].wide_spray_on_approach = True
     gui = _gui(editor)
     submitted = {}
     gui._submit_manual = lambda points, prefix: submitted.update(
@@ -564,5 +588,6 @@ def test_task_uses_all_queued_points_and_keeps_the_editor_list():
     gui._start_task()
     assert submitted['prefix'] == 'task'
     assert submitted['points'][0].tree_y_m == -1.5
+    assert submitted['points'][0].wide_spray_on_approach
     assert math.isclose(submitted['points'][0].pose.position.x, 3.0)
     assert len(editor.points) == 1

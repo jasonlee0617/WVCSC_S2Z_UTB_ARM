@@ -395,17 +395,13 @@ class Nav2Gui(QWidget):
         self.point_type_combo.addItem('通行点', POINT_TRANSIT)
         self.point_type_combo.addItem('病株检查点', POINT_INSPECT)
         self.record_point_button = QPushButton('记录当前点')
-        self.wide_spray_checkbox = QCheckBox('开启广域喷洒')
-        self.wide_spray_checkbox.setToolTip(
-            '驶向新点的来程区段开启；到达该点后自动关闭。')
         self.start_task_button = QPushButton('开始任务')
         task_layout.addWidget(self.record_start_button, 0, 0)
         task_layout.addWidget(QLabel('新点类型:'), 0, 1)
         task_layout.addWidget(self.point_type_combo, 0, 2)
         task_layout.addWidget(self.record_point_button, 0, 3)
-        task_layout.addWidget(self.wide_spray_checkbox, 0, 4)
-        task_layout.addWidget(self.start_task_button, 0, 5, 1, 2)
-        task_layout.addWidget(self.relocalize_button, 0, 7)
+        task_layout.addWidget(self.start_task_button, 0, 4, 1, 2)
+        task_layout.addWidget(self.relocalize_button, 0, 6)
         layout.addLayout(task_layout)
 
         self.candidate_label = QLabel('最新RViz机械臂基座点: 未收到 /manual_goal_pose')
@@ -429,13 +425,17 @@ class Nav2Gui(QWidget):
         relay_layout.addWidget(self.arm_relay_label)
         layout.addLayout(relay_layout)
 
-        self.table = QTableWidget(0, 3)
+        self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(
-            ['序号', '类型', '机械臂基座位姿 (x, y, yaw)'])
+            ['序号', '类型', '广域喷洒', '机械臂基座位姿 (x, y, yaw)'])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        for column in range(3):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
         layout.addWidget(self.table)
 
         edit_layout = QHBoxLayout()
@@ -554,8 +554,7 @@ class Nav2Gui(QWidget):
         self.relocalize_button.setEnabled(editable)
         waiting_for_tree = self.pending_dock_pose is not None
         self.point_type_combo.setEnabled(editable and not waiting_for_tree)
-        self.wide_spray_checkbox.setEnabled(
-            editable and not waiting_for_tree)
+        self._set_wide_spray_cells_enabled(editable)
         required_sequence = (
             self.pending_dock_sequence if waiting_for_tree
             else self.consumed_goal_sequence)
@@ -680,7 +679,7 @@ class Nav2Gui(QWidget):
         self.editor.add_point(
             self.candidate,
             point_type=point_type,
-            wide_spray_on_approach=self.wide_spray_checkbox.isChecked(),
+            wide_spray_on_approach=False,
             arm_spray_duration_sec=self.editor.spray_duration)
         self.consumed_goal_sequence = self.node.goal_sequence
         self._update_table()
@@ -731,7 +730,7 @@ class Nav2Gui(QWidget):
             tree_base_z_m=self.candidate.position.z,
             point_type=POINT_INSPECT,
             work_side=work_side,
-            wide_spray_on_approach=self.wide_spray_checkbox.isChecked(),
+            wide_spray_on_approach=False,
             arm_spray_duration_sec=self.editor.spray_duration,
             tree_pose=self.candidate)
         self.consumed_goal_sequence = self.node.goal_sequence
@@ -845,7 +844,7 @@ class Nav2Gui(QWidget):
             static_cells = (
                 (0, QTableWidgetItem(str(row + 1))),
                 (1, QTableWidgetItem(point_type)),
-                (2, QTableWidgetItem(
+                (3, QTableWidgetItem(
                     f'({point.pose.position.x:.3f}, '
                     f'{point.pose.position.y:.3f}, '
                     f'{pose_yaw(point.pose):.3f})')),
@@ -855,6 +854,27 @@ class Nav2Gui(QWidget):
                     item.setBackground(QColor(255, 226, 226))
                     item.setToolTip(range_error)
                 self.table.setItem(row, column, item)
+            self.table.setCellWidget(row, 2, self._wide_spray_checkbox(point))
+
+    @staticmethod
+    def _set_wide_spray_enabled(point, checkbox, enabled):
+        point.wide_spray_on_approach = bool(enabled)
+        checkbox.setText('是' if enabled else '否')
+
+    def _wide_spray_checkbox(self, point):
+        checkbox = QCheckBox('是' if point.wide_spray_on_approach else '否')
+        checkbox.setChecked(point.wide_spray_on_approach)
+        checkbox.setToolTip('控制上一点驶向本点期间的广域喷洒。')
+        checkbox.toggled.connect(
+            lambda enabled, target=point, control=checkbox:
+            self._set_wide_spray_enabled(target, control, enabled))
+        return checkbox
+
+    def _set_wide_spray_cells_enabled(self, enabled):
+        for row in range(self.table.rowCount()):
+            checkbox = self.table.cellWidget(row, 2)
+            if checkbox is not None:
+                checkbox.setEnabled(enabled)
 
     def _delete_point(self):
         row = self.table.currentRow()
