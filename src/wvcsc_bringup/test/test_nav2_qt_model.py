@@ -178,8 +178,12 @@ def test_navigation_qt_keeps_spray_indicators_but_removes_extra_task_controls():
 
     assert "QTableWidget(0, 4)" in source
     assert "QCheckBox('开启广域喷洒')" not in source
-    assert "['序号', '类型', '广域喷洒', '机械臂基座位姿 (x, y, yaw)']" in source
+    assert "['序号', '类型', '广域喷洒', '基座位姿 (x, y, θ)']" in source
     assert 'verticalHeader().setVisible(False)' in source
+    assert 'header.setSectionResizeMode(column, QHeaderView.Fixed)' in source
+    assert 'header.setSectionResizeMode(3, QHeaderView.Stretch)' not in source
+    assert 'splitter.addWidget(editor_panel)' in source
+    assert 'self.workspace_splitter.setSizes([500, 680])' in source
     assert "QPushButton('终止任务')" in source
     assert "QCheckBox('显示相机/YOLO画面')" in source
     assert "QLabel('广域喷洒: ● 未收到状态')" in source

@@ -425,18 +425,24 @@ class Nav2Gui(QWidget):
         relay_layout.addWidget(self.arm_relay_label)
         layout.addLayout(relay_layout)
 
+        editor_panel = QWidget()
+        editor_panel.setMinimumWidth(500)
+        editor_layout = QVBoxLayout(editor_panel)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(
-            ['序号', '类型', '广域喷洒', '机械臂基座位姿 (x, y, yaw)'])
+            ['序号', '类型', '广域喷洒', '基座位姿 (x, y, θ)'])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
-        for column in range(3):
-            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.Stretch)
-        layout.addWidget(self.table)
+        for column, width in enumerate((50, 105, 95, 220)):
+            header.setSectionResizeMode(column, QHeaderView.Fixed)
+            self.table.setColumnWidth(column, width)
+        header.setStretchLastSection(False)
+        editor_layout.addWidget(self.table)
 
         edit_layout = QHBoxLayout()
         self.delete_button = QPushButton('删除选中点')
@@ -446,7 +452,7 @@ class Nav2Gui(QWidget):
         for button in (self.delete_button, self.up_button,
                        self.down_button, self.clear_button):
             edit_layout.addWidget(button)
-        layout.addLayout(edit_layout)
+        editor_layout.addLayout(edit_layout)
 
         control_layout = QHBoxLayout()
         self.abort_home_button = QPushButton('终止任务')
@@ -454,30 +460,32 @@ class Nav2Gui(QWidget):
         self.home_button = QPushButton('返回起点')
         for button in (self.abort_home_button, self.home_button):
             control_layout.addWidget(button)
-        layout.addLayout(control_layout)
+        editor_layout.addLayout(control_layout)
 
         file_layout = QHBoxLayout()
         self.save_button = QPushButton('保存任务')
         self.load_button = QPushButton('加载任务')
         file_layout.addWidget(self.save_button)
         file_layout.addWidget(self.load_button)
-        layout.addLayout(file_layout)
+        editor_layout.addLayout(file_layout)
 
         self.status_label = QLabel('状态: 等待任务管理器')
         self.status_label.setAlignment(Qt.AlignCenter)
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        manager_panel = QWidget()
-        manager_layout = QVBoxLayout(manager_panel)
-        manager_layout.addWidget(self.status_label)
-        manager_layout.addWidget(self.log_area, 1)
+        editor_layout.addWidget(self.status_label)
+        editor_layout.addWidget(self.log_area, 1)
+
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(manager_panel)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(editor_panel)
         self.image_panel = RosImagePanel(self.node, active=False)
         self.image_panel.setVisible(False)
         splitter.addWidget(self.image_panel)
-        splitter.setSizes([520, 780])
-        self.output_splitter = splitter
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([500, 680])
+        self.workspace_splitter = splitter
         layout.addWidget(splitter, 1)
         self.setLayout(layout)
 
@@ -508,7 +516,7 @@ class Nav2Gui(QWidget):
         self.image_panel.setVisible(bool(visible))
         self.image_panel.set_active(bool(visible))
         if visible:
-            self.output_splitter.setSizes([520, 780])
+            self.workspace_splitter.setSizes([500, 680])
 
     def _update_record_point_button(self, *_args):
         if self.pending_dock_pose is not None:
