@@ -166,6 +166,7 @@ def test_real_system_starts_each_hardware_stack_once_after_preflight():
     assert "'relay_config_file'" in source
     assert "'--relay-config', relay_config" in source
     assert "'--operation', 'qt_mission'" in source
+    assert "'--vision-config'" in source
     assert 'mission_mode' not in source
     assert 'mission_file' not in source
     assert "'use_qt_gui', default_value='true'" in source
@@ -201,7 +202,12 @@ def test_real_orchestration_uses_the_qt_mission_manager_only():
     assert "'wide_relay_channel': 1" in source
     assert "'arm_relay_channel': 2" in source
     assert "'arm_base_yaw_rad': 3.141592653589793" in source
-    assert 'vision_real_detect.yaml' in source
+    # The standalone orchestration launch keeps the segment comparison
+    # configuration; the complete real_system_mission entrypoint overrides
+    # this with vision_real_detect.yaml by default.
+    assert "'vision_config_file'," in source
+    system_source = _source('real_system_mission.launch.py')
+    assert 'vision_real_detect.yaml' in system_source
     assert 'yolov8s_seg_real.pt' in vision
     assert vision_parameters['disease_model_backend'] == 'segment'
     assert vision_parameters['model_target_class_name'] == 'disease_leaf'
@@ -299,7 +305,7 @@ def test_real_arm_spray_test_is_decoupled_from_vehicle_navigation():
 
 
 def test_real_arm_spray_server_wrapper_starts_qt_launch_only():
-    wrapper = PACKAGE.parent / 'run_real_arm_spray_server.sh'
+    wrapper = PACKAGE.parent.parent / 'run_real_arm_spray_server.sh'
     source = wrapper.read_text(encoding='utf-8')
 
     assert wrapper.stat().st_mode & 0o111
@@ -340,15 +346,15 @@ def test_arm_test_exposes_separate_ik_and_manual_working_ranges():
         assert f"LaunchConfiguration('{argument}')" in source
 
 
-def test_real_joint_preset_observation_mode_is_default_and_can_be_overridden():
+def test_real_arm_yaml_observation_mode_is_default_and_can_be_overridden():
     real_config_path = PACKAGE / 'config' / 'real' / 'arm_task_real.yaml'
     real_config = yaml.safe_load(real_config_path.read_text(encoding='utf-8'))
     parameters = real_config['wvcsc_spray_task']['ros__parameters']
-    assert parameters['observation_mode'] == 'joint_presets'
+    assert parameters['observation_mode'] == 'ik'
     assert parameters['velocity_scaling'] == pytest.approx(0.20)
     assert parameters['acceleration_scaling'] == pytest.approx(0.20)
     assert load_real_arm_defaults(real_config_path) == RealArmDefaults(
-        observation_mode='joint_presets',
+        observation_mode='ik',
         velocity_scaling=pytest.approx(0.20),
         acceleration_scaling=pytest.approx(0.20),
     )
@@ -747,6 +753,7 @@ def test_preflight_checks_every_direct_runtime_boundary():
             'trajectory_retime_server', 'wvcsc_description'):
         assert repr(package) in source
     assert "--camera-info" in source
+    assert "--vision-config" in source
     assert "--handeye-calibration" in source
     assert "--nozzle-calibration" in source
     assert "_calibration_checks(args, failures)" in source
@@ -778,8 +785,8 @@ def test_real_arm_keeps_camera_clearance_and_servo_collision_checks():
         PACKAGE / 'config' / 'real' / 'visual_servo_real.yaml'
     ).read_text(encoding='utf-8'))['wvcsc_visual_servo']['ros__parameters']
 
-    assert arm_parameters['camera_height_min_m'] == pytest.approx(0.15)
-    assert arm_parameters['camera_height_max_m'] == pytest.approx(0.30)
+    assert arm_parameters['camera_height_min_m'] == pytest.approx(0.20)
+    assert arm_parameters['camera_height_max_m'] == pytest.approx(0.45)
     assert arm_parameters['camera_height_step_m'] == pytest.approx(0.10)
     assert 'observation_min_camera_z_in_base_m' not in arm_parameters
     assert servo_parameters['use_gazebo'] is False

@@ -13,7 +13,6 @@ install(DIRECTORY launch config maps rviz
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/preflight_check.py
-  scripts/save_corn_map.sh
   DESTINATION share/${PROJECT_NAME}/scripts)
 install(PROGRAMS
   scripts/fake_arm_spray_action.py

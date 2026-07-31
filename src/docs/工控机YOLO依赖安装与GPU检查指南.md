@@ -8,6 +8,10 @@ yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python"
 
 本项目采用隔离 Python 虚拟环境运行 YOLO/PyTorch，同时通过 `--system-site-packages` 复用 ROS Humble 的 `rclpy`、`cv_bridge` 等系统包。
 
+当前实机完整任务默认加载 `vision_real_detect.yaml` 和 `best.pt`（detect）。
+`vision_real.yaml` 仍保留为 segment 对比入口，只有显式传入
+`vision_config_file:=.../vision_real.yaml` 时才使用；仿真默认由 `vision_sim.yaml` 决定。
+
 官方参考：
 
 - PyTorch 安装选择器：https://docs.pytorch.org/get-started/locally/
@@ -20,8 +24,9 @@ yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python"
 在工控机上执行：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 source /opt/ros/humble/setup.bash
-source ~/WVCSC_S2Z_UTB_ARM/install/setup.bash
+source install/setup.bash
 
 lsb_release -a
 uname -a
@@ -236,8 +241,9 @@ PY
 必须先 source ROS 和工作区：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 source /opt/ros/humble/setup.bash
-source "$HOME/WVCSC_S2Z_UTB_ARM/install/setup.bash"
+source install/setup.bash
 export PYTHONNOUSERSITE=1
 export YOLO_CONFIG_DIR=/tmp/wvcsc_ultralytics
 
@@ -267,16 +273,18 @@ python3 -m venv --system-site-packages "$HOME/venvs/wvcsc_yolo_ros"
 
 ## 8. 部署真实权重
 
-将训练好的权重复制到：
+当前实机默认 detect 权重为 `best.pt`；segment 对比权重仍可以使用
+`yolov8s_seg_real.pt`。将对应权重复制到：
 
 ```text
+~/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_rgb_vision/models/best.pt
 ~/WVCSC_S2Z_UTB_ARM/src/wvcsc_perception/wvcsc_rgb_vision/models/yolov8s_seg_real.pt
 ```
 
 重新构建安装：
 
 ```bash
-cd "$HOME/WVCSC_S2Z_UTB_ARM"
+cd ~/WVCSC_S2Z_UTB_ARM
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select wvcsc_rgb_vision
 source install/setup.bash
@@ -285,6 +293,8 @@ source install/setup.bash
 确认安装后的权重存在：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
+ls -l "$(ros2 pkg prefix wvcsc_rgb_vision)/share/wvcsc_rgb_vision/models/best.pt"
 ls -l "$(ros2 pkg prefix wvcsc_rgb_vision)/share/wvcsc_rgb_vision/models/yolov8s_seg_real.pt"
 ```
 
@@ -293,8 +303,9 @@ ls -l "$(ros2 pkg prefix wvcsc_rgb_vision)/share/wvcsc_rgb_vision/models/yolov8s
 执行：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 source /opt/ros/humble/setup.bash
-source "$HOME/WVCSC_S2Z_UTB_ARM/install/setup.bash"
+source install/setup.bash
 export PYTHONNOUSERSITE=1
 export YOLO_CONFIG_DIR=/tmp/wvcsc_ultralytics
 
@@ -304,7 +315,10 @@ from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
 
 model_dir = Path(get_package_share_directory("wvcsc_rgb_vision")) / "models"
-contracts = [("yolov8s_seg_real.pt", "segment", {0: "disease_leaf"})]
+contracts = [
+    ("best.pt", "detect", {0: "illness"}),
+    ("yolov8s_seg_real.pt", "segment", {0: "disease_leaf"}),
+]
 
 for filename, expected_task, expected_names in contracts:
     model = YOLO(str(model_dir / filename))
@@ -336,6 +350,7 @@ model contracts ok
 有 C10 图像时，先启动机械臂单独测试栈：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python"
 ```
@@ -343,18 +358,21 @@ ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
 另开终端检查：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 ros2 topic hz /camera/color/image_raw
 ros2 topic list | grep /vision
 ```
 
-在单臂 Qt 填写树 X/Y/Z 与喷洒时长，点击“执行单目标喷洒”。Action 阶段、进度、结果以及
-`/camera/color/image_raw`、YOLO 调试图像都在同一窗口显示。
+在单臂 Qt 选择 `ik` 或 `joint_presets`、病株侧位、病株距离、工作距离和喷洒时长，点击“启动”。
+Action 阶段、进度、结果以及 `/camera/color/image_raw`、YOLO 调试图像都在同一窗口显示。
+喷洒完成后点击“复位”执行 HOME；脚本不会自动发送 Action Goal。
 
 实机喷洒前必须同时确认继电器服务已启动。`real_arm_spray_test.launch.py` 会自动
 启动 `controller_pkg`，实机执行器使用 `service` 模式调用第 2 路；机械臂串口
 `serial_port` 与继电器配置文件中的 `PortName` 是两条独立串口：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 ros2 service type /relay/set
 # wvcsc_interfaces/srv/SetRelay
 ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
@@ -363,14 +381,22 @@ ros2 service call /relay/set wvcsc_interfaces/srv/SetRelay \
   "{channel: 2, enabled: false, duration: 0.0}"
 ```
 
-确认第 2 路实际吸合和断开后，再通过单臂 Qt 执行喷洒。如果继电器串口不是默认的
-`/dev/serial/by-path/pci-0000:00:14.0-usb-0:5:1.0-port0`，复制并修改
-`controller_pkg/config/fault.ini`，然后通过
-`relay_config_file:=/绝对路径/relay_fault.ini` 传给 launch。
+确认第 2 路实际吸合和断开后，再通过单臂 Qt 执行喷洒。继电器串口由安装后的
+`controller_pkg/config/fault.ini` 提供；如果物理 USB 插口变化，先按《实机硬件通讯口与设备检查指南》
+重新确认 `PortName`，再修改该配置或临时传入新的配置文件：
+
+```bash
+cd ~/WVCSC_S2Z_UTB_ARM
+RELAY_CONFIG="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini"
+ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
+  relay_config_file:="$RELAY_CONFIG" \
+  yolo_python_executable:="$HOME/venvs/wvcsc_yolo_ros/bin/python"
+```
 
 检查：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 ros2 topic hz /vision/diseased_target_debug_image
 ros2 topic echo /vision/target
 ```

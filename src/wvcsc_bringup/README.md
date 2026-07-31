@@ -1,8 +1,14 @@
 # WVCSC 实机 Bringup
 
+设备通讯口、udev 别名、物理 USB 插口更换后的处理，以及从建图到完整任务的可复制命令，
+统一维护在 `docs/实机硬件通讯口与设备检查指南.md` 和
+`docs/小车机械臂完整任务操作指南.md`。本 README 保留启动链路说明，避免硬件检查命令
+在两处长期漂移。
+
 先加载环境：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 source /opt/ros/humble/setup.bash
 source ~/WVCSC_S2Z_UTB_ARM/install/setup.bash
 ```
@@ -94,7 +100,7 @@ ros2 topic hz /joint_states
 约定通道 1 为广域喷洒、通道 2 为机械臂喷嘴：
 
 ```bash
-RELAY_CONFIG="$HOME/WVCSC_S2Z_UTB_ARM/src/controller_pkg/config/fault.ini"
+RELAY_CONFIG="$(ros2 pkg prefix controller_pkg)/share/controller_pkg/config/fault.ini"
 sed -n '/^\[serial\]/,/^\[/p' "$RELAY_CONFIG"
 grep -E '^(PortName|BaudRate|Address|Timeout)[[:space:]]*=' "$RELAY_CONFIG"
 
@@ -238,7 +244,7 @@ YOLO 或视觉伺服。
 默认启动真实单臂喷洒后端和 Qt：
 
 ```bash
-cd ~/WVCSC_S2Z_UTB_ARM/src
+cd ~/WVCSC_S2Z_UTB_ARM
 ./run_real_arm_spray_server.sh
 ```
 
@@ -247,27 +253,33 @@ cd ~/WVCSC_S2Z_UTB_ARM/src
 喷洒、复检和 HOME。无界面排障时可显式关闭 Qt：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 ./run_real_arm_spray_server.sh use_qt_gui:=false
 ```
 
 也可以用原始 launch 一次启动后端和 Qt：
 
 ```bash
+cd ~/WVCSC_S2Z_UTB_ARM
 ros2 launch wvcsc_bringup real_arm_spray_test.launch.py \
   yolo_python_executable:="${HOME}/venvs/wvcsc_yolo_ros/bin/python"
 ```
 
 单臂 Qt 只执行一个目标。两种模式都提供病株侧位、喷洒时长和手动工作距离；IK 模式额外
-显示机械臂基座到病株的平面距离，`joint_preset` 模式不需要该距离。工作距离只用于喷嘴
+显示机械臂基座到病株的平面距离，`joint_presets` 模式不需要该距离。工作距离只用于喷嘴
 瞄准平面标定，不替代机械臂碰撞、限位和奇异性检查，也不会写入完整导航任务。界面还提供
 复位、HOME 成功后的自动就绪、Action 阶段、进度、结果和可折叠的相机/YOLO 图像。
 
 ## 建图与单独导航
 
 ```bash
-ros2 launch wvcsc_bringup real_cartographer.launch.py
-ros2 launch wvcsc_bringup real_navigation.launch.py
+cd ~/WVCSC_S2Z_UTB_ARM
+./run_cartograph.sh
+
+# 结束建图后，另一个终端执行纯导航
+./run_nav2.sh
 ```
 
 实机默认 C10 为 `/dev/video2`，Alicia-M 串口为 `/dev/my_robot`；其他设备通过 launch 参数
-显式覆盖。完整任务启动前会检查地图、标定、YOLO 环境、相机、机械臂和继电器配置。
+显式覆盖。完整任务默认使用 `vision_real_detect.yaml` 的 `best.pt` detect 模型；完整任务启动前
+会检查地图、标定、YOLO 环境、相机、机械臂和继电器配置。

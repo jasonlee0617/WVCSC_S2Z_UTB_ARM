@@ -33,7 +33,8 @@ wvcsc_spray_task:
     spray_on_alignment_failure: true
 
     # 观察位模式：joint_presets 使用现场测量的固定关节角；ik 使用动态观察位。
-    # 本实机配置默认固定关节预设，所有预设仍由 MoveIt 规划，不直接下发控制器。
+    # 本实机配置默认 IK；joint_presets 仍可由 launch/Qt 显式选择，所有预设都由
+    # MoveIt 规划，不直接下发控制器。
     observation_mode: ik
     # MoveIt 规划、重定时和执行的速度/加速度缩放；实机 launch 同时传给
     # motion_control 与 SprayTask。合法范围均为 (0, 1]。

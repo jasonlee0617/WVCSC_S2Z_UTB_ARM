@@ -251,6 +251,8 @@ def _resolve_calibrations(context, *, launch_dir):
             '--map', LaunchConfiguration('map').perform(context),
             '--yolo-python', LaunchConfiguration(
                 'yolo_python_executable').perform(context),
+            '--vision-config', LaunchConfiguration(
+                'vision_config_file').perform(context),
             '--camera-info', camera_info,
             '--handeye-calibration', calibration_path,
             '--nozzle-calibration', nozzle_path,
@@ -282,7 +284,7 @@ def _resolve_calibrations(context, *, launch_dir):
             'base_frame': 'base_footprint',
             'goal_pose_topic': '/manual_goal_pose',
             # Keep the recorder's admission policy in sync with the arm
-            # execution mode.  The real default remains joint presets.
+            # execution mode loaded from arm_task_real.yaml.
             'observation_mode': LaunchConfiguration('observation_mode'),
             'default_arm_spray_duration_sec': LaunchConfiguration(
                 'default_arm_spray_duration_sec'),

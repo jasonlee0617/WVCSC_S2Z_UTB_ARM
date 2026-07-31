@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import yaml
+
 from ament_index_python.packages import (
     PackageNotFoundError,
     get_package_prefix,
@@ -38,10 +40,6 @@ MISSION_PACKAGES = (
 MAPPING_PACKAGES = (
     'cartographer_ros', 'my_cartographer', 'joint_state_publisher', 'rviz2',
 )
-REAL_MODELS = ('yolov8s_seg_real.pt',)
-REAL_MODEL_CONTRACTS = (
-    ('yolov8s_seg_real.pt', 'segment', {0: 'disease_leaf'}),
-)
 
 
 def _arguments():
@@ -53,6 +51,7 @@ def _arguments():
     parser.add_argument('--arm-device', default='')
     parser.add_argument('--map', default='')
     parser.add_argument('--yolo-python', default='')
+    parser.add_argument('--vision-config', default='')
     parser.add_argument('--camera-info', default='')
     parser.add_argument('--handeye-calibration', default='')
     parser.add_argument('--nozzle-calibration', default='')
@@ -103,13 +102,52 @@ def _yolo_runtime(interpreter, failures):
         print(f'  [OK]   YOLO runtime: {executable}')
 
 
-def _yolo_contracts(interpreter, model_dir, failures):
-    """Load real weights before hardware startup and enforce exact contracts."""
+def _vision_contract(config_path, failures):
+    """Read the same model contract that the perception launch will use."""
+    path = Path(config_path).expanduser()
+    try:
+        data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+        parameters = data['wvcsc_perception_pipeline']['ros__parameters']
+        backend = str(parameters['disease_model_backend']).strip()
+        model_path = str(parameters['disease_model_path']).strip()
+        class_id = int(parameters['target_class_id'])
+        native_name = str(parameters['model_target_class_name']).strip()
+        strict = bool(parameters.get('strict_model_classes', False))
+    except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as error:
+        failures.append(f'invalid vision configuration: {path}: {error}')
+        print(f'  [FAIL] vision configuration: {path}: {error}')
+        return None
+
+    if backend not in ('detect', 'segment'):
+        failures.append(f'unsupported vision backend: {backend}')
+        print(f'  [FAIL] vision backend: {backend}')
+        return None
+    if not model_path or class_id < 0 or not native_name:
+        failures.append('vision model path, class id, and native class name are required')
+        print('  [FAIL] vision model contract is incomplete')
+        return None
+
+    model_file = Path(model_path).expanduser()
+    if not model_file.is_absolute():
+        try:
+            model_file = (Path(get_package_share_directory('wvcsc_rgb_vision')) /
+                          'models' / model_file)
+        except PackageNotFoundError:
+            failures.append('ROS package not found: wvcsc_rgb_vision')
+            print('  [FAIL] ROS package: wvcsc_rgb_vision')
+            return None
+    return (model_file, backend, {class_id: native_name}, strict)
+
+
+def _yolo_contracts(interpreter, contract, failures):
+    """Load the configured weight before hardware startup and enforce its contract."""
     executable = Path(interpreter).expanduser()
     if not executable.is_file() or not os.access(executable, os.X_OK):
         return
-    if not all((model_dir / name).is_file() for name, _task, _names in
-               REAL_MODEL_CONTRACTS):
+    model_file, expected_task, expected_names, exact_names = contract
+    if not model_file.is_file():
+        failures.append(f'real YOLO weight not found: {model_file}')
+        print(f'  [FAIL] real YOLO weight: {model_file}')
         return
     checker = r'''
 import json
@@ -117,7 +155,7 @@ import sys
 from ultralytics import YOLO
 
 contracts = json.loads(sys.argv[1])
-for path, expected_task, expected_names in contracts:
+for path, expected_task, expected_names, exact_names in contracts:
     model = YOLO(path)
     names = model.names
     actual_names = ({int(key): str(value) for key, value in names.items()}
@@ -125,17 +163,16 @@ for path, expected_task, expected_names in contracts:
                     else {index: str(value) for index, value in enumerate(names)})
     expected_names = {int(key): str(value)
                       for key, value in expected_names.items()}
-    if model.task != expected_task or actual_names != expected_names:
+    names_match = (actual_names == expected_names if exact_names
+                   else expected_names.items() <= actual_names.items())
+    if model.task != expected_task or not names_match:
         raise SystemExit(
             f'{path}: expected task={expected_task}, names={expected_names}; '
             f'found task={model.task}, names={actual_names}')
 print('model contracts ok')
 '''
     import json
-    contracts = [
-        [str(model_dir / name), task, names]
-        for name, task, names in REAL_MODEL_CONTRACTS
-    ]
+    contracts = [[str(model_file), expected_task, expected_names, exact_names]]
     environment = os.environ.copy()
     environment['PYTHONNOUSERSITE'] = '1'
     environment['YOLO_CONFIG_DIR'] = '/tmp/wvcsc_ultralytics'
@@ -148,7 +185,9 @@ print('model contracts ok')
         failures.append(f'real YOLO model contract failed: {detail}')
         print(f'  [FAIL] real YOLO contracts: {detail}')
     else:
-        print('  [OK]   real YOLO contracts: disease_leaf')
+        print(
+            f'  [OK]   real YOLO contract: task={expected_task}, '
+            f'native_class={next(iter(expected_names.values()))}')
 
 
 def _calibration_checks(args, failures):
@@ -202,14 +241,10 @@ def main():
             _packages(MISSION_PACKAGES, failures)
             _exists('Alicia-M serial', args.arm_device, failures)
             _yolo_runtime(args.yolo_python, failures)
-            try:
-                model_dir = Path(
-                    get_package_share_directory('wvcsc_rgb_vision')) / 'models'
-            except PackageNotFoundError:
-                model_dir = Path('/package-not-found')
-            for model in REAL_MODELS:
-                _exists(f'real YOLO weight {model}', model_dir / model, failures)
-            _yolo_contracts(args.yolo_python, model_dir, failures)
+            contract = _vision_contract(args.vision_config, failures)
+            if contract is not None:
+                _exists('real YOLO weight', contract[0], failures)
+                _yolo_contracts(args.yolo_python, contract, failures)
             _calibration_checks(args, failures)
             _relay_config(args.relay_config, failures)
             # The operator creates the route in Qt only after AMCL is ready.
